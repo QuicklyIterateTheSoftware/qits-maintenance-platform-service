@@ -168,10 +168,12 @@ An operator presses Bump in a browser; a machine may post the same request. Ther
 route here and there must never be one — the write surface pushes branches into every repository on
 the platform.
 
-**Outbound, this service carries BOTH roles**, and that is not tidiness: `GET /ci/api/runs/{id}` is
-`@RolesAllowed("qits:admin")` while qits-ci's trigger and every git-host read take `qits:system`. A
-system-only identity would leave every bump RUNNING for ever. See README's "Rollout needs" — the
-same asymmetry is what the idp client has to carry.
+**Outbound, this service is a MACHINE and nothing else**: every call carries `X-Qits-Roles:
+qits:system`, and the idp client carries `qits:system,qits-platform:system` — the orchestrator's
+pair. `qits:admin` is the human role and this service never holds it, not even to read a CI run:
+qits-ci a3ecce2 made its read-only run and repository routes take `qits:system`. What the client
+needs beyond the orchestrator's is one claim, `project = *`, because qits-ci's trigger demands every
+project. See README's "Rollout needs".
 
 `quarkus.oidc.tenant-enabled=${qits.auth.machine.required:false}` — validation follows the rollout
 gate rather than standing on its own, so with the gate off there is no OIDC tenant, nothing fetches

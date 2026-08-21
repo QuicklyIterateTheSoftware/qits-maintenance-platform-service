@@ -26,9 +26,10 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  *
  * <p><b>Two credentials on every call, and they are not alternatives.</b> {@code X-Qits-User} /
  * {@code X-Qits-Roles} are the forward-auth pair a peer accepts on the platform's own network; the
- * bearer, where a client is enabled, is the machine track. The roles header carries BOTH roles this
- * service acts with: {@code qits:system} is what qits-projects and qits-githost read on, and
- * {@code qits:admin} is what qits-ci's run listing demands.
+ * bearer, where a client is enabled, is the machine track. The roles header carries
+ * {@code qits:system} and only that: every peer route this service calls is a machine route, and
+ * {@code qits:admin} is the human role — a bump asked for by a person is still this service
+ * calling.
  *
  * <p><b>Nothing throws.</b> A scan reads every repository in the catalog, so one unreachable peer
  * must cost one row's status and not the run.
@@ -83,11 +84,12 @@ public class PeerClient {
     HttpRequest.Builder request =
         HttpRequest.newBuilder(URI.create(call.url()))
             .timeout(callTimeout)
-            // The forward-auth half: this service's own name and the roles it acts with. Both are
-            // needed — qits-ci's run listing is @RolesAllowed("qits:admin") while its trigger and
-            // every git-host read take qits:system.
+            // The forward-auth half: this service's own name and the one role it acts with. Every
+            // peer route a scan or a bump calls is a machine route — qits-ci's read-only run and
+            // repository routes included, since its a3ecce2 — so the role is qits:system and never
+            // an operator's.
             .header("X-Qits-User", "qits-platform-maintenance")
-            .header("X-Qits-Roles", "qits:system,qits:admin");
+            .header("X-Qits-Roles", "qits:system");
     if (call.body() == null) {
       request.GET();
     } else {

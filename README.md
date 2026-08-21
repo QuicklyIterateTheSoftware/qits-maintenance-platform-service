@@ -224,7 +224,7 @@ QUARKUS_OIDC_CLIENT_CI_GRANT_OPTIONS_CLIENT_AUDIENCE=dev-qits-ci
 ```
 
 Off, calls go out with the forward-auth pair alone (`X-Qits-User: qits-platform-maintenance`,
-`X-Qits-Roles: qits:system,qits:admin`), which every call carries regardless.
+`X-Qits-Roles: qits:system`), which every call carries regardless.
 
 **The store** is its own PostgreSQL database, `qits_platform_maintenance`, declared by
 `resources: postgresql:db` in `.config/qits/deployments.yml`. Seven tables: `mt_repository`,
@@ -233,19 +233,19 @@ Off, calls go out with the forward-auth pair alone (`X-Qits-User: qits-platform-
 
 ## Rollout needs
 
-**The idp client `qits-platform-maintenance` needs more than the orchestrator's**, and the extra
-grants are not optional — each one is a route this service cannot use without it.
+**The idp client `qits-platform-maintenance` is the orchestrator's shape plus one claim.** The
+claim is not optional — it is a route this service cannot use without it.
 
 | what | why |
 |---|---|
-| roles `qits:system` **and** `qits:admin` | `qits:system` covers qits-projects' catalog, qits-githost's content policy and qits-ci's trigger. **`GET /ci/api/runs/{id}` is `@RolesAllowed("qits:admin")` and makes no machine check** — a plain `qits:system` token is 403 there, and the bump poller would never see a run finish. |
+| roles `qits:system`, `qits-platform:system` | the same pair qits-platform-orchestrator's client carries. It covers qits-projects' catalog, qits-githost's content policy, qits-ci's trigger and — since qits-ci a3ecce2 — the read-only run and repository routes the bump poller follows. **`qits:admin` is NOT needed**: it is the human role, and this service is never a person. |
 | claim `project` = `*` | qits-ci's trigger calls `machineAuth.requireProject("*")`, which passes only for a token literally granted every project. The bump names one repository but the trigger route demands them all. Today the only such grant is qits-platform-artifacts'; this service needs its own. |
 | audiences `<env>-qits-ci`, `qits-projects`, `qits-githost` | a token is cut for one service. qits-githost ships `qits.auth.machine.required=true`, so its content reads need a real bearer addressed to it. |
 | audiences `qits-platform-artifacts`, `qits-platform-mirror` | **not needed today** — the registry routes and the mirror's proxies are unguarded on qits-net. The two clients ship disabled for the day the edge's rule reaches the inside. |
 
 In `qits-configuration` / `.qits-bootstrap.env` terms that is a client with
-`_ROLES` carrying `qits:system,qits:admin`, `_CLAIMS_PROJECT: "*"`, and `_AUDIENCES` listing the
-three services above.
+`_ROLES` carrying `qits:system,qits-platform:system`, `_CLAIMS_PROJECT: "*"`, and `_AUDIENCES`
+listing the three services above.
 
 **The wrapper needs `.config/qits/ci-platform-event-maintenance-bump.yml`** — the platform-level
 pipeline that answers `MaintenanceBump` — and a qits-ci release carrying platform pipelines. Until
