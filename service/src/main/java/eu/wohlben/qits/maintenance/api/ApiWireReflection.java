@@ -6,6 +6,7 @@ import eu.wohlben.qits.maintenance.dto.GroupDto;
 import eu.wohlben.qits.maintenance.dto.PinDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDetailDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDto;
+import eu.wohlben.qits.maintenance.dto.ScanDto;
 import eu.wohlben.qits.maintenance.pending.Change;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -35,6 +36,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       DependencyDto.class,
       DependencyDto.DependencyPinDto.class,
       BumpDto.class,
+      ScanDto.class,
       Change.class
     })
 final class ApiWireReflection {

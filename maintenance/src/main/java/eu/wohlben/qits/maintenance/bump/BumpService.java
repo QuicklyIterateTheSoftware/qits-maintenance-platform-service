@@ -95,7 +95,14 @@ public class BumpService {
     // the operator saw when they pressed the button, and a retry after a 503 would send a different
     // list than the first attempt under the same dedupe key.
     UUID id =
-        store.openBump(repository, group, config.environment(), trigger, changes, Instant.now());
+        store.openBump(
+            repository,
+            group,
+            BRANCH_PREFIX + group,
+            config.environment(),
+            trigger,
+            changes,
+            Instant.now());
     queue.submit("bump " + id + " of " + repository + "/" + group, () -> dispatch(id));
     LOG.infof(
         "Opened the %s bump %s of %s/%s with %d changes",
@@ -131,7 +138,7 @@ public class BumpService {
           id, BumpStatus.FAILED, null, "the repository left the inventory", Instant.now());
       return;
     }
-    String branch = BRANCH_PREFIX + bump.groupName;
+    String branch = bump.branch;
     String baseRef = baseRef(repository.get());
 
     // REFUSED HERE RATHER THAN OVER THERE. The step holds every one of these to the same rule, so
@@ -224,7 +231,7 @@ public class BumpService {
   private void finish(MtBump bump, boolean passed, String ciRunStatus) {
     Instant now = Instant.now();
     Optional<MtRepository> repository = store.repository(bump.repository);
-    String branch = BRANCH_PREFIX + bump.groupName;
+    String branch = bump.branch;
     String before = store.branch(bump.repository, bump.groupName).map(row -> row.headSha).orElse(null);
     String after =
         repository

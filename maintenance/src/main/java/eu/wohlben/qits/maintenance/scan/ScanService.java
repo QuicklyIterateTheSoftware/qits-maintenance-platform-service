@@ -15,6 +15,7 @@ import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.PinKind;
 import eu.wohlben.qits.maintenance.model.RepositoryStatus;
 import eu.wohlben.qits.maintenance.model.ScanScope;
+import eu.wohlben.qits.maintenance.model.ScanStatus;
 import eu.wohlben.qits.maintenance.pending.PendingChanges;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
 import eu.wohlben.qits.maintenance.bump.BumpService;
@@ -67,31 +68,34 @@ public class ScanService {
   @Inject WorkQueue queue;
 
   /**
-   * Queues a scan and answers at once.
+   * Opens a scan row, queues the work and answers at once.
    *
-   * <p><b>The id is the QUEUED WORK's, and nothing stores it.</b> The model has no scan table — a
-   * scan's outcome is the repository rows it wrote, which is what the UI reads — so the id is a
-   * handle for the log line and the 202, not something to fetch later. It is in the answer because
-   * a client that queued work is owed the name of what it queued.
+   * <p><b>The row exists before the work does.</b> {@code POST /scans} answers 202 with this id and
+   * the client polls {@code GET /scans/{id}} — a scan of the whole catalog is one git-host read per
+   * repository and a registry lookup per dependency, so a person who pressed the button has to be
+   * able to see that something is happening rather than guess from a listing that has not changed
+   * yet.
    */
   public UUID request(ScanScope scope, String repository, ScanTrigger trigger) {
-    UUID id = UUID.randomUUID();
+    UUID id = store.openScan(scope, repository, trigger.name(), Instant.now());
     String what =
         "the " + trigger.name().toLowerCase(java.util.Locale.ROOT) + " " + scope + " scan " + id
             + (repository == null ? "" : " of " + repository);
-    queue.submit(what, () -> run(scope, repository, trigger, what));
+    queue.submit(what, () -> run(id, scope, repository, trigger, what));
     return id;
   }
 
   /** One scan, start to finish, on the worker thread. */
-  void run(ScanScope scope, String repository, ScanTrigger trigger, String what) {
+  void run(UUID id, ScanScope scope, String repository, ScanTrigger trigger, String what) {
     Instant now = Instant.now();
+    store.scanStatus(id, ScanStatus.RUNNING, null, now);
     CatalogReader.Result read = catalog.read();
     if (!read.ok()) {
       // NOTHING IS MARKED. A catalog this service could not read says nothing about any
       // repository, and writing UNREACHABLE across the whole inventory would turn one peer's
       // outage into seventy rows of noise.
       LOG.warnf("%s did nothing: %s", what, read.error());
+      store.scanStatus(id, ScanStatus.FAILED, read.error(), Instant.now());
       return;
     }
     List<CatalogEntry> entries =
@@ -100,6 +104,8 @@ public class ScanService {
             .toList();
     if (entries.isEmpty()) {
       LOG.warnf("%s matched no repository in the catalog", what);
+      store.scanStatus(
+          id, ScanStatus.FAILED, "no repository in the catalog matched", Instant.now());
       return;
     }
 
@@ -112,6 +118,11 @@ public class ScanService {
       autoBump(entries);
     }
     LOG.infof("%s finished over %d repositories", what, entries.size());
+    store.scanStatus(
+        id,
+        ScanStatus.SUCCEEDED,
+        entries.size() + " repositories read at " + scope + " scope",
+        Instant.now());
   }
 
   /** One repository's manifests, written into the inventory. */

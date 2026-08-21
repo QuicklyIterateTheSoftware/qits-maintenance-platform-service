@@ -7,14 +7,17 @@ import eu.wohlben.qits.maintenance.dto.GroupDto;
 import eu.wohlben.qits.maintenance.dto.PinDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDetailDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDto;
+import eu.wohlben.qits.maintenance.dto.ScanDto;
 import eu.wohlben.qits.maintenance.entity.MtBranch;
 import eu.wohlben.qits.maintenance.entity.MtBump;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
+import eu.wohlben.qits.maintenance.entity.MtScan;
 import eu.wohlben.qits.maintenance.error.NoSuchBumpException;
 import eu.wohlben.qits.maintenance.error.NoSuchRepositoryException;
+import eu.wohlben.qits.maintenance.error.NoSuchScanException;
 import eu.wohlben.qits.maintenance.manifest.Globs;
 import eu.wohlben.qits.maintenance.model.BranchState;
 import eu.wohlben.qits.maintenance.pending.PendingChanges;
@@ -143,6 +146,20 @@ public class Inventory {
     return bump(store.bump(id).orElseThrow(() -> new NoSuchBumpException(id)));
   }
 
+  /** One scan, which is what a client polls after a 202. */
+  public ScanDto scan(UUID id) {
+    MtScan row = store.scan(id).orElseThrow(() -> new NoSuchScanException(id));
+    return new ScanDto(
+        row.id,
+        row.scope,
+        row.repository,
+        row.trigger,
+        row.status,
+        row.startedAt,
+        row.finishedAt,
+        row.message);
+  }
+
   private List<GroupDto> groups(
       String repository, List<MtPin> pins, Map<String, MtLatest> latest, List<MtGroup> groups) {
     Map<String, Integer> counts = PendingChanges.countByGroup(pins, latest, groups);
@@ -187,11 +204,12 @@ public class Inventory {
         row.id,
         row.repository,
         row.groupName,
-        BumpService.BRANCH_PREFIX + row.groupName,
+        row.branch,
         row.environment,
         row.trigger,
         row.status,
         row.ciEventId,
+        row.ciRunId,
         row.ciRunId == null || row.ciRunId.isBlank()
             ? List.of()
             : List.of(row.ciRunId.split(",")),

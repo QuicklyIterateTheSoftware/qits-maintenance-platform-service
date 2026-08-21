@@ -3,14 +3,14 @@
 -- One V1 and no inherited lineage: this repository starts on PostgreSQL and has never had another
 -- store. From here on the ordinary rule holds — keep appending, never edit an applied migration.
 --
--- SIX TABLES, AND FIVE OF THEM ARE AN INVENTORY. `mt_repository`, `mt_pin`, `mt_group` and
+-- SEVEN TABLES, AND FOUR OF THEM ARE AN INVENTORY. `mt_repository`, `mt_pin`, `mt_group` and
 -- `mt_latest` are what a scan writes: what every repository pins today, how it wants those pins
 -- grouped, and what the newest published version of each dependency is. They are a CACHE of other
 -- people's truth — a git host's files and a registry's metadata — and a fresh scan replaces them
 -- wholesale.
 --
--- `mt_branch` and `mt_bump` are the other kind: a LOG of what this service asked qits-ci to do and
--- what came back. Those rows are not derivable from anything and are never replaced.
+-- `mt_scan`, `mt_branch` and `mt_bump` are the other kind: a LOG of what this service did and what
+-- came back. Those rows are not derivable from anything and are never replaced.
 --
 -- PENDING IS NOT A TABLE. "which pins are behind" is `mt_pin` joined to `mt_latest` and read
 -- through `mt_group`, computed on every read. Storing it would be a third copy of a fact that two
@@ -157,6 +157,40 @@ create table mt_group (
 
 create unique index uq_mt_group_repository_name on mt_group (repository, name);
 
+create table mt_scan (
+    id uuid not null,
+
+    -- INTERNAL, EXTERNAL or ALL. It governs which half of the registry lookups refresh; every scan
+    -- re-reads every manifest whatever it says.
+    scope varchar(32) not null,
+
+    -- One repository's name, or null for the whole catalog.
+    repository varchar(255),
+
+    -- MANUAL (the button) or SCHEDULED (one of the two crons).
+    trigger varchar(32) not null,
+
+    -- REQUESTED (queued behind the worker), RUNNING, SUCCEEDED or FAILED. A scan FAILS only when it
+    -- could do nothing at all — an unreadable catalog. One unreachable repository is that
+    -- repository's status, not the scan's.
+    status varchar(32) not null,
+
+    started_at timestamp(6) with time zone not null,
+
+    -- Null while it is REQUESTED or RUNNING, and null forever for a scan whose process died. The
+    -- honest record of a restart: nothing backfills it, because a successor knows nothing about how
+    -- far the dead one got.
+    finished_at timestamp(6) with time zone,
+
+    -- The scan in one line when it ends, or why it did nothing.
+    message text,
+
+    primary key (id)
+);
+
+-- The listing is newest-first, which is this index.
+create index idx_mt_scan_started_at on mt_scan (started_at desc);
+
 create table mt_branch (
     id uuid not null,
 
@@ -194,6 +228,10 @@ create table mt_bump (
     repository varchar(255) not null,
 
     group_name varchar(255) not null,
+
+    -- The ref this bump writes, without refs/heads/. Stored rather than derived from the group: it
+    -- is what the payload carried, and a row has to stay readable after the naming rule changes.
+    branch varchar(512) not null,
 
     -- WHICH ENVIRONMENT'S CI RAN IT. This service is platform tier and CI is per environment; v1
     -- talks to one, and recording the name here is what makes a second environment a config entry

@@ -8,6 +8,7 @@ import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
+import eu.wohlben.qits.maintenance.entity.MtScan;
 import eu.wohlben.qits.maintenance.error.BumpAlreadyActiveException;
 import eu.wohlben.qits.maintenance.latest.LatestLookup;
 import eu.wohlben.qits.maintenance.manifest.GroupConfig;
@@ -19,6 +20,8 @@ import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.GroupSource;
 import eu.wohlben.qits.maintenance.model.PinKind;
 import eu.wohlben.qits.maintenance.model.RepositoryStatus;
+import eu.wohlben.qits.maintenance.model.ScanScope;
+import eu.wohlben.qits.maintenance.model.ScanStatus;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
 import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -30,7 +33,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * The only writer of the six tables, and the reader the API uses.
+ * The only writer of the seven tables, and the reader the API uses.
  *
  * <p><b>Every method activates a request context</b>, because the caller is usually the worker
  * thread and a Hibernate session is bound to that context. A route's call already has one and
@@ -209,6 +212,59 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
         MtLatest.find("ecosystem = ?1 and name = ?2", ecosystem.wireName(), name).firstResult());
   }
 
+  // --- scans --------------------------------------------------------------------------------
+
+  /** Opens a scan row, REQUESTED, before it is queued. */
+  @ActivateRequestContext
+  public UUID openScan(ScanScope scope, String repository, String trigger, Instant now) {
+    return DbRetry.inNewTx(
+        "open a " + scope + " scan",
+        () -> {
+          MtScan row = new MtScan();
+          row.id = UUID.randomUUID();
+          row.scope = scope.name();
+          row.repository = repository;
+          row.trigger = trigger;
+          row.status = ScanStatus.REQUESTED.name();
+          row.startedAt = now;
+          row.persist();
+          getEntityManager().flush();
+          return row.id;
+        });
+  }
+
+  /** Moves a scan along. A terminal status stamps {@code finished_at} and nothing else does. */
+  @ActivateRequestContext
+  public void scanStatus(UUID id, ScanStatus status, String message, Instant now) {
+    DbRetry.runInNewTx(
+        "set scan " + id + " " + status,
+        () -> {
+          MtScan row = MtScan.findById(id);
+          if (row == null) {
+            return;
+          }
+          row.status = status.name();
+          if (message != null) {
+            row.message = message;
+          }
+          if (status.terminal()) {
+            row.finishedAt = now;
+          }
+          getEntityManager().flush();
+        });
+  }
+
+  @ActivateRequestContext
+  public Optional<MtScan> scan(UUID id) {
+    return Optional.ofNullable(MtScan.findById(id));
+  }
+
+  /** The newest scans. */
+  @ActivateRequestContext
+  public List<MtScan> scans(int limit) {
+    return MtScan.findAll(Sort.by("startedAt").descending()).page(0, limit).list();
+  }
+
   // --- branches -----------------------------------------------------------------------------
 
   @ActivateRequestContext
@@ -264,6 +320,7 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
   public UUID openBump(
       String repository,
       String group,
+      String branch,
       String environment,
       BumpTrigger trigger,
       List<?> changes,
@@ -279,6 +336,7 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
           row.id = UUID.randomUUID();
           row.repository = repository;
           row.groupName = group;
+          row.branch = branch;
           row.environment = environment;
           row.trigger = trigger.name();
           row.status = BumpStatus.REQUESTED.name();

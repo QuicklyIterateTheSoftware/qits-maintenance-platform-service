@@ -1,14 +1,19 @@
 package eu.wohlben.qits.maintenance.api;
 
+import eu.wohlben.qits.maintenance.control.Inventory;
+import eu.wohlben.qits.maintenance.dto.ScanDto;
 import eu.wohlben.qits.maintenance.error.BadRequestException;
+import eu.wohlben.qits.maintenance.error.NoSuchScanException;
 import eu.wohlben.qits.maintenance.model.ScanScope;
 import eu.wohlben.qits.maintenance.scan.ScanService;
 import eu.wohlben.qits.maintenance.scan.ScanTrigger;
 import jakarta.annotation.security.RolesAllowed;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -23,10 +28,10 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * plus a registry lookup per dependency; it is minutes, and an HTTP request is the wrong place to
  * hold it.
  *
- * <p><b>The id is the QUEUED WORK's and nothing stores it.</b> A scan's outcome is the repository
- * rows it wrote — which is what {@code GET /repositories} shows — so there is no scan row to fetch
- * and no route that would take this id. It is in the answer because a client that queued work is
- * owed the name of what it queued, and because it is what the log line says.
+ * <p><b>The id is a ROW, and {@code GET /scans/{id}} is how a client follows it.</b> A scan of the
+ * whole catalog is one git-host read per repository and a registry lookup per dependency; a person
+ * who pressed the button has to see that something is happening rather than guess from a listing
+ * that has not changed yet.
  *
  * <p><b>A manual scan never bumps.</b> {@code qits.maintenance.bump.auto} is about the schedule:
  * pressing Scan asks what is out of date, and pressing Bump asks for a branch.
@@ -37,6 +42,8 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 public class ScanController {
 
   @Inject ScanService scans;
+
+  @Inject Inventory inventory;
 
   /**
    * The request body of a scan.
@@ -74,5 +81,27 @@ public class ScanController {
         .entity(new StartScanRequest.Response(id))
         .type(MediaType.APPLICATION_JSON)
         .build();
+  }
+
+  /**
+   * One scan: what it covers and how far it has got.
+   *
+   * <p>An id that is not a uuid is a 404 like any other unknown scan — a malformed id and an absent
+   * one are the same question from the caller's side.
+   */
+  @GET
+  @Path("/{id}")
+  @Operation(summary = "One scan and its status")
+  @APIResponse(responseCode = "200", description = "The scan")
+  @APIResponse(responseCode = "404", description = "No such scan")
+  @RolesAllowed({"qits:admin", "qits:system"})
+  public ScanDto scan(@PathParam("id") String id) {
+    UUID scanId;
+    try {
+      scanId = UUID.fromString(id);
+    } catch (IllegalArgumentException e) {
+      throw new NoSuchScanException(id);
+    }
+    return inventory.scan(scanId);
   }
 }

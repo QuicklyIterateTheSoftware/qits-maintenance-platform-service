@@ -20,7 +20,9 @@ import java.util.UUID;
  * @param trigger SCHEDULED or MANUAL
  * @param status REQUESTED, RUNNING, SUCCEEDED, FAILED or NOTHING_TO_DO
  * @param ciEventId the event id the trigger carried
- * @param ciRunIds the runs qits-ci named
+ * @param ciRunId the runs qits-ci named, comma-separated — the column verbatim, and the field the
+ *     client reads
+ * @param ciRunIds the same ids as a list, because a trigger can match more than one pipeline
  * @param configPath the pipeline file in the wrapper that ran it, which qits-ci records on the run
  * @param ciRunStatus the last ci run status this service read
  * @param startedAt when the row was opened
@@ -37,6 +39,7 @@ public record BumpDto(
     String trigger,
     String status,
     String ciEventId,
+    String ciRunId,
     List<String> ciRunIds,
     String configPath,
     String ciRunStatus,

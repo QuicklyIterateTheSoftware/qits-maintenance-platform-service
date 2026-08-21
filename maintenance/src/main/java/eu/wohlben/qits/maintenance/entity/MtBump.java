@@ -30,6 +30,12 @@ public class MtBump extends PanacheEntityBase {
   @Column(name = "group_name", nullable = false, length = 255)
   public String groupName;
 
+  /** The ref this bump writes, without {@code refs/heads/}. Stored rather than derived from the
+   * group: it is what the payload carried, and a row must stay readable after the naming rule
+   * changes. */
+  @Column(nullable = false, length = 512)
+  public String branch;
+
   /** Which environment's CI ran it. Platform tier calling a per-environment service, recorded so a
    * second environment is a config entry rather than a schema change. */
   @Column(nullable = false, length = 64)
