@@ -61,6 +61,27 @@ public class WorkQueue {
     }
   }
 
+  /**
+   * Waits until everything queued before this call has finished.
+   *
+   * <p>A barrier task rather than a queue-length check: the executor is single-threaded, so work
+   * that reaches the front after this one does not exist yet, and a task that has already started
+   * is one this waits out. It is what a test uses to make "the worker is done" a fact rather than a
+   * sleep — and it is honest in a deployment too, though nothing there asks.
+   *
+   * @return whether the queue drained inside the timeout
+   */
+  public boolean awaitIdle(java.time.Duration timeout) {
+    java.util.concurrent.CountDownLatch drained = new java.util.concurrent.CountDownLatch(1);
+    submit("the idle barrier", drained::countDown);
+    try {
+      return drained.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
+    }
+  }
+
   void onShutdown(@Observes ShutdownEvent event) {
     worker.shutdown();
     try {

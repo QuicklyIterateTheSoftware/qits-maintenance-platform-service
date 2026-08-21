@@ -79,11 +79,14 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
     DbRetry.runInNewTx(
         "replace the inventory of " + name,
         () -> {
+          // EVERY FIELD BEFORE THE PERSIST. `MtPin.delete` below is a query, and Hibernate flushes
+          // before one — so a row persisted with its not-null columns still unset fails the flush
+          // rather than the insert, naming a column nobody was writing at the time.
           MtRepository row = findById(name);
-          if (row == null) {
+          boolean fresh = row == null;
+          if (fresh) {
             row = new MtRepository();
             row.name = name;
-            persist(row);
           }
           row.project = project;
           row.mainBranch = mainBranch;
@@ -91,6 +94,9 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
           row.headSha = headSha;
           row.message = message;
           row.lastScanAt = now;
+          if (fresh) {
+            persist(row);
+          }
 
           MtPin.delete("repository", name);
           for (ParsedPin pin : pins) {
@@ -137,10 +143,10 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
         "mark " + name + " " + status,
         () -> {
           MtRepository row = findById(name);
-          if (row == null) {
+          boolean fresh = row == null;
+          if (fresh) {
             row = new MtRepository();
             row.name = name;
-            persist(row);
           }
           if (project != null) {
             row.project = project;
@@ -148,6 +154,9 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
           row.status = status.name();
           row.message = message;
           row.lastScanAt = now;
+          if (fresh) {
+            persist(row);
+          }
           getEntityManager().flush();
         });
   }
@@ -161,17 +170,20 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
           MtLatest row =
               MtLatest.find("ecosystem = ?1 and name = ?2", ecosystem.wireName(), name)
                   .firstResult();
-          if (row == null) {
+          boolean fresh = row == null;
+          if (fresh) {
             row = new MtLatest();
             row.id = UUID.randomUUID();
             row.ecosystem = ecosystem.wireName();
             row.name = name;
-            row.persist();
           }
           row.latest = lookup.latest();
           row.sourceUrl = lookup.sourceUrl();
           row.error = lookup.error();
           row.checkedAt = now;
+          if (fresh) {
+            row.persist();
+          }
           getEntityManager().flush();
         });
   }
@@ -292,17 +304,20 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
         () -> {
           MtBranch row =
               MtBranch.find("repository = ?1 and groupName = ?2", repository, group).firstResult();
-          if (row == null) {
+          boolean fresh = row == null;
+          if (fresh) {
             row = new MtBranch();
             row.id = UUID.randomUUID();
             row.repository = repository;
             row.groupName = group;
-            row.persist();
           }
           row.branch = branchName;
           row.state = state.name();
           row.headSha = headSha;
           row.updatedAt = now;
+          if (fresh) {
+            row.persist();
+          }
           getEntityManager().flush();
         });
   }
