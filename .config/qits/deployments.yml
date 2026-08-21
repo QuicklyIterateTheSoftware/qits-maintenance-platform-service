@@ -1,0 +1,45 @@
+# How qits-platform-deployments deploys this repo. It reads this file from the git host at the built
+# sha, so the answer travels with the commit.
+#
+# CARRYING THE FILE AT ALL is the other thing it says. qits-workspaces reads it on a release to
+# decide whether this repository deploys — a library or an SPA carries none and its release is the
+# trunk push alone — and then promotes onto the branch it is configured with.
+#
+# PLATFORM service: one instance per platform, not one per environment. It is the right tier because
+# what it inventories is platform-wide — the repository catalog is qits-projects', the manifests are
+# the git host's, and both are shared by every environment on the machine. A per-environment
+# instance would mean two schedules scanning one git host and two bumps racing for one branch.
+#
+# It talks to ONE qits-ci, which IS per environment: `qits.maintenance.targets.ci-url` is injected
+# with the environment's alias and every bump row records which environment ran it, so a second
+# environment is a config entry rather than a schema change.
+deployment_target: platform
+
+# One route for the whole segment: the client at /maintenance/, the API at /maintenance/api and the
+# document at /maintenance/q. qits-gateway routes verbatim by prefix, so this one line reaches all
+# three.
+routes: /maintenance
+
+# The left-navigation entry, and the number is its position. 13 puts it after Orchestrator:12 at the
+# end of the platform block the operator screens form — Githost:9, Mirror:10, Configuration:11,
+# Orchestrator:12 — rather than among the per-project doors.
+navigation: Maintenance:13
+
+# THE STORE, DECLARED RATHER THAN CONFIGURED. The line below is what provisions it: a role and a
+# database of its own on the tier's postgres, created before the successor container starts and
+# injected as QITS_RESOURCE_DB_URL / _USERNAME / _PASSWORD — the generic contract the maintenance
+# jar's datasource defaults read verbatim.
+#
+# The third segment is omitted, so the database is the default derivation: the application name minus
+# its `qits-` prefix, dashes to underscores, under a `qits_` prefix — `qits_platform_maintenance`.
+#
+# WHAT IS IN IT is half cache and half log. The inventory — pins, groups, latest versions — is a
+# cache of the git host's files and the registries' metadata, and a fresh scan rebuilds it. The bump
+# log is not: it is the only record of which branches this service pushed and on the strength of
+# which pins, and nothing else on the platform holds it.
+resources: postgresql:db
+
+# The readiness endpoint the deployer's health gate curls. The convention derives it from the
+# repository name and would land on exactly this path; it is written out because a probe that 404s
+# fails a deployment for a reason nobody would look for in a config file.
+health_path: /maintenance/q/health/ready
