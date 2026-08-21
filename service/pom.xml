@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-platform-maintenance</artifactId>
+        <version>2026.821.000000</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- The maintenance SERVICE layer: the JAX-RS routes over the inventory and the bump log, the
+         two scan schedules and the bump poll, and the native-image reflection registration for what
+         Jackson binds.
+
+         A DEPLOYABLE APP, not a library jar — <packaging>quarkus</packaging> below is what says so.
+
+         IT ALSO CARRIES THE CLIENT: Quinoa builds the SPA submodule at src/main/webui
+         (qits-platform-spa-maintenance) during augmentation and serves it at /maintenance/, beside
+         this module's own /maintenance/api and /maintenance/q. That makes `./mvnw verify` need BOTH
+         a node on PATH and an initialised submodule — `verify` runs `package` on its way to
+         failsafe, and an empty webui/ stops it at "No package.json found in Web UI directory".
+         `./mvnw test` still needs neither, because Quinoa is off in test mode.
+
+         NEVER let quarkus-undertow onto this classpath. It arrives transitively from anything
+         servlet-shaped; `./mvnw -pl service -am dependency:tree | grep -i undertow` before adding a
+         dependency that sounds like a web framework. Quinoa's production static serving goes
+         through Quarkus' own static-resource route, which undertow's servlet stack takes over and
+         then cannot find — a packaged process that answers the API correctly and the SPA with a
+         404. -->
+    <artifactId>qits-platform-maintenance-service</artifactId>
+    <name>qits-platform-maintenance :: service</name>
+    <packaging>quarkus</packaging>
+
+    <dependencies>
+        <dependency>
+            <!-- /maintenance/q/health/ready — the readiness endpoint qits-platform-deployments'
+                 health gate curls; the deployment convention every service answers. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-smallrye-health</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-platform-maintenance-domain</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-rest-jackson</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-hibernate-validator</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The two scan crons and the bump poll — the only triggers besides a person pressing
+                 a button. The mirror's shape: a cron, concurrentExecution=SKIP, and an `enabled`
+                 key beside it. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-scheduler</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The maintenance client. Quinoa runs the npm build in src/main/webui (the
+                 qits-platform-spa-maintenance submodule) during augmentation and serves the result
+                 as static resources at /maintenance/ — see the quarkus.quinoa.* block in
+                 application.properties. Version from the root pom's dependencyManagement. -->
+            <groupId>io.quarkiverse.quinoa</groupId>
+            <artifactId>quarkus-quinoa</artifactId>
+        </dependency>
+        <dependency>
+            <!-- SecurityIdentity and the HttpAuthenticationMechanism SPI. Two tracks of identity
+                 reach this service: qits-gateway's X-Qits-User / X-Qits-Roles headers (an operator
+                 pressing Bump now), and a bearer validated against qits-platform-idp (a machine).
+                 Both land as roles, which is why every route here is @RolesAllowed and none is
+                 open. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-auth-core</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The machine half of the pair above: it validates the bearer. Gated by
+                 quarkus.oidc.tenant-enabled in application.properties, so a clone-alone build needs
+                 no issuer. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-oidc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-smallrye-openapi</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The platform's shared rules. DatasourceBaselineRules is what this repo takes them
+                 for, and it lives here because this module's config is the deployable's whole
+                 config — the `maintenance` datasource is declared in the domain jar. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-arch-rules</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.rest-assured</groupId>
+            <artifactId>rest-assured</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The store every @QuarkusTest here boots against, and the one PackagedSurfaceIT hands
+                 to the launched process. testdb/EmbeddedPg + testdb/EmbeddedPgConfigSource hand the
+                 running instance to Quarkus. -->
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <!-- This module is the DEPLOYABLE, not a library jar, and <packaging>quarkus</packaging>
+                     above is what says so: it binds generate-code, generate-code-tests and build into
+                     the lifecycle, so augmentation is not an execution someone can misplace. Drop
+                     this <extensions>true</extensions> and the build stops at "Unknown packaging:
+                     quarkus" rather than quietly producing nothing. Version comes from the root
+                     pom's pluginManagement. -->
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <extensions>true</extensions>
+            </plugin>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                        <configuration>
+                            <systemPropertyVariables>
+                                <!-- How @QuarkusIntegrationTest finds the compiled binary in a
+                                     `-Dnative` build. The binary's name is
+                                     quarkus.package.output-name in application.properties, NOT the
+                                     maven finalName — with an output-name set,
+                                     ${project.build.finalName}-runner is a path that does not
+                                     exist, so the two have to be spelled the same here or a native
+                                     IT launches nothing and passes. -->
+                                <native.image.path>${project.build.directory}/qits-platform-maintenance</native.image.path>
+                                <!-- The launched artifact takes a FREE port rather than queueing for
+                                     Quarkus' default 8081 — which on the deployment host is the
+                                     platform's own npm registry. The same value is set for the unit
+                                     suite in src/test/resources. -->
+                                <quarkus.http.test-port>0</quarkus.http.test-port>
+                                <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>io.smallrye</groupId>
+                <artifactId>jandex-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- GraalVM native build (the same profile every qits deployable carries): `-Dnative`
+             disables the fast-jar and enables the native image. It lives in THIS module, not the
+             root pom, because only this module is an application — `maintenance` is a library jar
+             with nothing to native-compile. skipITs flips with it so a native build runs
+             PackagedSurfaceIT against the binary rather than skipping it silently. -->
+        <profile>
+            <id>native</id>
+            <activation>
+                <property>
+                    <name>native</name>
+                </property>
+            </activation>
+            <properties>
+                <quarkus.package.jar.enabled>false</quarkus.package.jar.enabled>
+                <skipITs>false</skipITs>
+                <quarkus.native.enabled>true</quarkus.native.enabled>
+            </properties>
+        </profile>
+    </profiles>
+</project>
