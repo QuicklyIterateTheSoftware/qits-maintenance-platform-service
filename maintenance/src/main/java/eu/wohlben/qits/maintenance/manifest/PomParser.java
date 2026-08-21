@@ -124,11 +124,6 @@ public final class PomParser {
     return modules;
   }
 
-  /** Whether the text is a pom at all — the guard a CONFIG-less repository's stray file needs. */
-  public static boolean parses(String xml) {
-    return Xml.root(xml) != null;
-  }
-
   private static Optional<ParsedPin> pin(
       String manifestPath,
       String rootManifestPath,

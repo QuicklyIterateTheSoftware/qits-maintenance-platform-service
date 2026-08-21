@@ -23,7 +23,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import org.jboss.logging.Logger;
@@ -81,8 +80,9 @@ public class BumpService {
     if (!config.bumpEnabled()) {
       throw new BumpDisabledException();
     }
-    MtRepository row =
-        store.repository(repository).orElseThrow(() -> new NoSuchRepositoryException(repository));
+    // Read for its refusal: a repository the inventory does not hold has no pins to bump and no
+    // coordinate to name in a payload.
+    store.repository(repository).orElseThrow(() -> new NoSuchRepositoryException(repository));
     List<MtGroup> groups = store.groups(repository);
     if (groups.stream().noneMatch(candidate -> candidate.name.equals(group))) {
       throw new NoSuchGroupException(repository, group);
@@ -107,7 +107,6 @@ public class BumpService {
     LOG.infof(
         "Opened the %s bump %s of %s/%s with %d changes",
         trigger, id, repository, group, changes.size());
-    Objects.requireNonNull(row);
     return id;
   }
 
@@ -153,7 +152,7 @@ public class BumpService {
     }
 
     // The head BEFORE the run, which is what an unmoved branch is compared against afterwards.
-    recordBranchHead(repository.get(), bump.groupName, branch, null);
+    recordBranchHead(repository.get(), bump.groupName, branch);
 
     CiClient.TriggerResult result =
         ci.trigger(id.toString(), bump.repository, bump.groupName, branch, baseRef, changes);
@@ -276,9 +275,9 @@ public class BumpService {
   }
 
   /** Reads the branch's head and writes it, so the next comparison has something to compare to. */
-  private void recordBranchHead(MtRepository repository, String group, String branch, BranchState force) {
+  private void recordBranchHead(MtRepository repository, String group, String branch) {
     String head = branchHead(repository, branch);
-    BranchState state = force != null ? force : (head == null ? BranchState.NONE : BranchState.PUSHED);
+    BranchState state = head == null ? BranchState.NONE : BranchState.PUSHED;
     store.recordBranch(repository.name, group, branch, state, head, Instant.now());
   }
 
