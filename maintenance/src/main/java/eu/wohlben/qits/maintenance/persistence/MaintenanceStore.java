@@ -60,8 +60,8 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
   /**
    * Replaces one repository's whole inventory: the row, its pins and its groups.
    *
-   * @param kindOf how a pin's name is classified — passed in rather than injected, because the rule
-   *     is configuration and this class is storage
+   * @param kindOf what can be done with a pin — passed in rather than injected, because the rule is
+   *     configuration and this class is storage
    */
   @ActivateRequestContext
   public void replaceInventory(
@@ -74,7 +74,7 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
       List<ParsedPin> pins,
       List<GroupConfig.Group> groups,
       GroupSource groupSource,
-      java.util.function.BiFunction<Ecosystem, String, PinKind> kindOf,
+      java.util.function.Function<ParsedPin, PinKind> kindOf,
       Instant now) {
     DbRetry.runInNewTx(
         "replace the inventory of " + name,
@@ -108,7 +108,7 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
             stored.name = pin.name();
             stored.version = pin.version();
             stored.range = pin.range();
-            stored.kind = kindOf.apply(pin.ecosystem(), pin.name()).name();
+            stored.kind = kindOf.apply(pin).name();
             stored.location = pin.location();
             stored.persist();
           }
@@ -263,6 +263,33 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
             row.finishedAt = now;
           }
           getEntityManager().flush();
+        });
+  }
+
+  /**
+   * Closes every scan a dead process left open, and answers how many there were.
+   *
+   * <p>A scan's work is entirely in this process — reads it made and rows it wrote — so a successor
+   * cannot resume one and must not pretend it did. FAILED with a sentence is the honest record; the
+   * next schedule scans again in minutes.
+   */
+  @ActivateRequestContext
+  public long failInterruptedScans(String message, Instant now) {
+    return DbRetry.inNewTx(
+        "close the scans a restart interrupted",
+        () -> {
+          List<MtScan> open =
+              MtScan.find(
+                      "status in ?1",
+                      List.of(ScanStatus.REQUESTED.name(), ScanStatus.RUNNING.name()))
+                  .list();
+          for (MtScan row : open) {
+            row.status = ScanStatus.FAILED.name();
+            row.message = message;
+            row.finishedAt = now;
+          }
+          getEntityManager().flush();
+          return (long) open.size();
         });
   }
 

@@ -18,8 +18,17 @@ public enum ScanScope {
   /** Both. */
   ALL;
 
-  /** Whether this scope refreshes the latest of a pin of that kind. */
+  /**
+   * Whether this scope refreshes the latest of a pin of that kind.
+   *
+   * <p><b>No scope covers a REACTOR or an UNRESOLVED pin</b>, ALL included: there is no registry
+   * question to ask about this repository's own artifact, and none at all about a name that is
+   * still an expression.
+   */
   public boolean covers(PinKind kind) {
+    if (!kind.actionable()) {
+      return false;
+    }
     return switch (this) {
       case ALL -> true;
       case INTERNAL -> kind == PinKind.INTERNAL;

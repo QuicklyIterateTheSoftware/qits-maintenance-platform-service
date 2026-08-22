@@ -108,6 +108,40 @@ class PendingChangesTest {
   }
 
   @Test
+  void thisRepositorysOwnArtifactIsNeverPendingWhateverTheRegistrySays() {
+    // qits-ci depending on qits-ci-domain at ${project.version}. The registry HAS a newer release —
+    // this repository published it — and offering it would be offering to overwrite what the
+    // release door stamps on the next build.
+    MtPin pin = pin(Ecosystem.MAVEN, "eu.wohlben.qits:qits-ci-domain", "2026.821.1", "pom.xml");
+    pin.kind = "REACTOR";
+    Map<String, MtLatest> latest =
+        PendingChanges.index(
+            List.of(latest(Ecosystem.MAVEN, "eu.wohlben.qits:qits-ci-domain", "2026.822.9")));
+    assertTrue(PendingChanges.of(List.of(pin), latest, GROUPS).isEmpty());
+    assertTrue(PendingChanges.newerVersion(pin, latest).isEmpty());
+  }
+
+  @Test
+  void aPinStillCarryingAnExpressionIsNeverPending() {
+    MtPin pin = pin(Ecosystem.MAVEN, "${project.groupId}:qits-arch-rules", "1.0.0", "pom.xml");
+    pin.kind = "UNRESOLVED";
+    Map<String, MtLatest> latest =
+        PendingChanges.index(
+            List.of(latest(Ecosystem.MAVEN, "${project.groupId}:qits-arch-rules", "2.0.0")));
+    assertTrue(PendingChanges.of(List.of(pin), latest, GROUPS).isEmpty());
+  }
+
+  @Test
+  void aKindThisBuildDoesNotKnowIsReadAsUnresolvedRatherThanCrashing() {
+    // A row written by a newer build, read by an older one. Refusing to act on it is the safe
+    // reading; throwing would take the whole page down.
+    MtPin pin = pin(Ecosystem.MAVEN, "g:a", "1.0.0", "pom.xml");
+    pin.kind = "SOMETHING_LATER";
+    assertEquals(
+        eu.wohlben.qits.maintenance.model.PinKind.UNRESOLVED, PendingChanges.kindOf(pin));
+  }
+
+  @Test
   void firstMatchWinsInDeclarationOrder() {
     assertEquals("angular", PendingChanges.groupOf("@angular/core", GROUPS).orElseThrow());
     assertEquals("dependencies", PendingChanges.groupOf("rxjs", GROUPS).orElseThrow());

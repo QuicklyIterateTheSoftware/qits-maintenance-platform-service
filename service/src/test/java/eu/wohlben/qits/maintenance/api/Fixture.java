@@ -23,15 +23,32 @@ final class Fixture {
   private static final String TREE = "/git/" + PROJECT + "/" + REPOSITORY + "/tree/";
   private static final String BLOB = "/git/" + PROJECT + "/" + REPOSITORY + "/blob/" + HEAD_SHA + "/";
 
+  /**
+   * A REAL REACTOR, because a single-module pom exercises none of what broke live: a parent that is
+   * the repository's own root, a groupId written as an expression, a module pinned at
+   * {@code ${project.version}}, and a property nobody declared.
+   */
   private static final String POM =
       """
       <project>
+        <parent>
+          <groupId>eu.wohlben.qits</groupId>
+          <artifactId>qits-parent</artifactId>
+          <version>2026.800.1</version>
+        </parent>
         <groupId>eu.wohlben.qits</groupId>
         <artifactId>qits-ci</artifactId>
         <version>2026.821.1</version>
         <properties>
           <qits.eventstream.version>2026.811.1</qits.eventstream.version>
+          <qits.arch-rules.version>2026.817.175344</qits.arch-rules.version>
+          <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
+          <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
+          <quarkus.platform.version>3.34.5</quarkus.platform.version>
         </properties>
+        <modules>
+          <module>service</module>
+        </modules>
         <dependencies>
           <dependency>
             <groupId>eu.wohlben.qits</groupId>
@@ -39,9 +56,39 @@ final class Fixture {
             <version>${qits.eventstream.version}</version>
           </dependency>
           <dependency>
-            <groupId>io.quarkus.platform</groupId>
-            <artifactId>quarkus-bom</artifactId>
-            <version>3.34.5</version>
+            <groupId>${quarkus.platform.group-id}</groupId>
+            <artifactId>${quarkus.platform.artifact-id}</artifactId>
+            <version>${quarkus.platform.version}</version>
+          </dependency>
+        </dependencies>
+      </project>
+      """;
+
+  /** The module: its parent IS this repository's root, and one of its dependencies is a sibling. */
+  private static final String MODULE_POM =
+      """
+      <project>
+        <parent>
+          <groupId>eu.wohlben.qits</groupId>
+          <artifactId>qits-ci</artifactId>
+          <version>2026.821.1</version>
+        </parent>
+        <artifactId>qits-ci-service</artifactId>
+        <dependencies>
+          <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-ci-domain</artifactId>
+            <version>${project.version}</version>
+          </dependency>
+          <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-arch-rules</artifactId>
+            <version>${qits.arch-rules.version}</version>
+          </dependency>
+          <dependency>
+            <groupId>g</groupId>
+            <artifactId>mystery</artifactId>
+            <version>${nobody.declared.this}</version>
           </dependency>
         </dependencies>
       </project>
@@ -104,6 +151,7 @@ final class Fixture {
     peers.answer(PeerTarget.GITHOST, TREE + HEAD_SHA, FakePeers.Scripted.ok(root, sha));
 
     peers.answer(PeerTarget.GITHOST, BLOB + "pom.xml", FakePeers.Scripted.ok(POM, sha));
+    peers.answer(PeerTarget.GITHOST, BLOB + "service/pom.xml", FakePeers.Scripted.ok(MODULE_POM, sha));
     peers.answer(PeerTarget.GITHOST, BLOB + "package.json", FakePeers.Scripted.ok(PACKAGE_JSON, sha));
     peers.answer(
         PeerTarget.GITHOST, BLOB + "package-lock.json", FakePeers.Scripted.ok(PACKAGE_LOCK, sha));
@@ -122,6 +170,14 @@ final class Fixture {
         PeerTarget.MAVEN_MIRROR,
         "/io/quarkus/platform/quarkus-bom/maven-metadata.xml",
         FakePeers.Scripted.ok(metadata("3.34.5", "3.34.6", "3.35.0.CR1")));
+    peers.answer(
+        PeerTarget.MAVEN_REGISTRY,
+        "/eu/wohlben/qits/qits-parent/maven-metadata.xml",
+        FakePeers.Scripted.ok(metadata("2026.800.1", "2026.820.1")));
+    peers.answer(
+        PeerTarget.MAVEN_REGISTRY,
+        "/eu/wohlben/qits/qits-arch-rules/maven-metadata.xml",
+        FakePeers.Scripted.ok(metadata("2026.817.175344", "2026.822.1")));
     peers.answer(
         PeerTarget.NPM_REGISTRY,
         "/@qits%2fui-components",

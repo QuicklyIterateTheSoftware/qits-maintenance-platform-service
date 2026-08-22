@@ -41,13 +41,34 @@ path" identically, so the root tree at the same sha is what tells ABSENT from GO
 | `package.json` + `package-lock.json` | npm | `dependencies`, `devDependencies` | `dependencies` / `devDependencies` |
 | `Dockerfile`, `*.Dockerfile` | docker | every `FROM <image>:<tag>` | `line:<n>` |
 
+`kind` says what can be done with a pin, which is not the same question as who published it:
+
+| `kind` | meaning |
+|---|---|
+| `INTERNAL` / `EXTERNAL` | a real version, comparable and bumpable; the name rule decides which registry answers |
+| `REACTOR` | **this repository's own artifact** — its version comes from maven's coordinates (`${project.version}`), or its `groupId:artifactId` is a module of this same reactor. It moves with this repository's release train and no line anywhere holds it. |
+| `UNRESOLVED` | an expression this service could not resolve. Recorded so a person sees what the repository wrote. |
+
+`REACTOR` and `UNRESOLVED` pins are shown, and are never looked up, never pending and never in a
+bump payload.
+
 Discovery is the repository ROOT plus the reactor, and nothing else. `service/src/main/webui` is a
 gitlink to the SPA's own repository, which the catalog lists in its own right.
 
+**The whole reactor is read before any of it is parsed**, because two of the rules below cannot be
+answered from a single pom.
+
+- **Expressions are resolved in the groupId and the artifactId too, not only the version** — from
+  the pom's properties and from maven's own built-in coordinates (`${project.groupId}`,
+  `${project.version}`, their `project.parent.*` siblings, the deprecated `pom.*` and the bare
+  spellings), with a module that declares no groupId or version inheriting its parent's.
 - **A property reference is resolved and remembered**, so the location is the property rather than
   the dependency element — rewriting the element would replace an expression with a literal. A pin
   whose property lives in the ROOT pom is recorded against the root pom, because that is the file
-  holding the line.
+  holding the line. A BUILT-IN is never such a location: no file holds `${project.version}`.
+- **A parent that is this repository's own root pom is not recorded at all.** It is the reactor's
+  shape, not a dependency. A parent from OUTSIDE the reactor — a shared `qits-parent` from the
+  registry — stays a pin and is bumpable.
 - **A dependency with no version of its own is not a pin.** It takes one from a BOM; there is no
   line here to edit.
 - **npm's version is the LOCK's, and the manifest's range rides beside it as `range`.** A range is
@@ -74,8 +95,8 @@ branch the author configured against.
 
 ## Pending
 
-`mt_pin ⋈ mt_latest`, read through `mt_group`, computed on every read and never stored. Two rules
-decide whether a newer version is offered:
+`mt_pin ⋈ mt_latest`, read through `mt_group`, computed on every read and never stored. A pin has to
+be `INTERNAL` or `EXTERNAL` before anything is offered at all; then two rules decide:
 
 1. it is strictly newer in that ecosystem's own order — maven's `ComparableVersion` for a pom, real
    semver for npm, the maven order over calver tags for an image;
@@ -163,8 +184,14 @@ GET  /bumps/{id}                                  → {id, repository, group, br
 - **`POST` answers 202 and does not wait.** A scan is one git-host read per repository plus a
   registry lookup per dependency; a bump is a CI run. The client polls `GET /scans/{id}` or
   `GET /bumps/{id}`.
-- A scan `FAILED` means the scan did nothing — the catalog was unreadable. One unreachable
-  repository is that repository's status.
+- A scan `FAILED` means the scan did nothing — the catalog was unreadable, or the run hit an
+  exception. One unreachable repository is that repository's status, not the scan's.
+- **A scan row is never left RUNNING.** Any exception closes it FAILED with the sentence, and at
+  boot every scan a dead process left open is closed `interrupted by restart`: a scan's work is
+  entirely in-process, so a successor cannot resume one and must not pretend it did. **Bumps are
+  resumed instead** — their work is qits-ci's, the run outlived this service, and the first sweep
+  after boot re-dispatches a REQUESTED bump under the same event id or polls a RUNNING one to its
+  end.
 - `GET /bumps` carries `changes` too; a change list is small.
 
 The document is at `/maintenance/q/openapi`, the browsable UI at `/maintenance/q/swagger-ui`, and

@@ -85,8 +85,25 @@ public class ScanService {
     return id;
   }
 
-  /** One scan, start to finish, on the worker thread. */
+  /**
+   * One scan, start to finish, on the worker thread.
+   *
+   * <p><b>It never lets an exception escape without closing the row.</b> The first live scan over
+   * 49 repositories died inside a latest lookup, and because nothing caught it the row stayed
+   * RUNNING for ever — a scan that is not running and does not say so is worse than a failed one,
+   * because nothing and nobody can tell the difference from a slow one.
+   */
   void run(UUID id, ScanScope scope, String repository, ScanTrigger trigger, String what) {
+    try {
+      scan(id, scope, repository, trigger, what);
+    } catch (RuntimeException e) {
+      LOG.errorf(e, "%s could not be completed", what);
+      store.scanStatus(id, ScanStatus.FAILED, message(e), Instant.now());
+    }
+  }
+
+  /** What a scan does, with the row's ending left to {@link #run}. */
+  private void scan(UUID id, ScanScope scope, String repository, ScanTrigger trigger, String what) {
     Instant now = Instant.now();
     store.scanStatus(id, ScanStatus.RUNNING, null, now);
     CatalogReader.Result read = catalog.read();
@@ -125,8 +142,23 @@ public class ScanService {
         Instant.now());
   }
 
-  /** One repository's manifests, written into the inventory. */
+  /**
+   * One repository's manifests, written into the inventory.
+   *
+   * <p>A repository that blows up is that repository's row, not the scan's: forty-eight others
+   * still have manifests worth reading.
+   */
   private void scanOne(CatalogEntry entry, Instant now) {
+    try {
+      readInto(entry, now);
+    } catch (RuntimeException e) {
+      LOG.warnf(e, "%s could not be scanned", entry.name());
+      store.markRepository(
+          entry.name(), entry.project(), RepositoryStatus.UNREACHABLE, message(e), now);
+    }
+  }
+
+  private void readInto(CatalogEntry entry, Instant now) {
     ManifestScanner.Read read = manifests.read(entry);
     if (read.status() == RepositoryStatus.UNREACHABLE) {
       store.markRepository(entry.name(), entry.project(), read.status(), read.message(), now);
@@ -169,8 +201,20 @@ public class ScanService {
           PendingChanges.key(pin.ecosystem, pin.name), new Lookup(ecosystem.get(), kind, pin.name));
     }
     for (Lookup lookup : wanted.values()) {
-      LatestLookup latest = resolver.resolve(lookup.ecosystem(), lookup.kind(), lookup.name());
-      store.recordLatest(lookup.ecosystem(), lookup.name(), latest, Instant.now());
+      // The resolver already turns everything into an answer; this is the belt to its braces, so
+      // that even a bug in the resolver itself costs one dependency rather than the scan.
+      LatestLookup latest;
+      try {
+        latest = resolver.resolve(lookup.ecosystem(), lookup.kind(), lookup.name());
+      } catch (RuntimeException e) {
+        LOG.warnf("The latest of %s could not be looked up: %s", lookup.name(), e.toString());
+        latest = LatestLookup.failed(null, "the lookup failed: " + e);
+      }
+      try {
+        store.recordLatest(lookup.ecosystem(), lookup.name(), latest, Instant.now());
+      } catch (RuntimeException e) {
+        LOG.warnf("The latest of %s could not be written: %s", lookup.name(), e.toString());
+      }
     }
   }
 
@@ -212,6 +256,12 @@ public class ScanService {
         }
       }
     }
+  }
+
+  /** An exception as a row's message: the sentence, never a stack trace, never null. */
+  private static String message(RuntimeException e) {
+    String message = e.getMessage();
+    return message == null || message.isBlank() ? e.toString() : e.getClass().getSimpleName() + ": " + message;
   }
 
   /** One registry question: what is the newest version of this dependency. */
