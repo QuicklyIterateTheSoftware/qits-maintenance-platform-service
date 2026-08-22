@@ -1,0 +1,48 @@
+# Build context trim for `docker build -f docker/Dockerfile .` (root context, whole reactor).
+#
+# docker/Dockerfile deliberately does `COPY . .` rather than listing modules: the reactor builds
+# service's dependency from source (`configuration` is never published), and a module list would have
+# to be edited every time a module is added. This file is what makes that cheap — it drops everything
+# the build does not need, so adding a module stays free and no stale output leaks in.
+
+.git
+.gitignore
+
+# Maven / Quarkus build output — regenerated inside the build stage, and hundreds of megabytes of it
+# here. Copying it in would also risk a stale target/ shadowing what the stage compiles.
+**/target
+**/target-ide
+
+# The Angular client's install output: the bulk of a working tree once the webui submodule is
+# initialised, full of binaries compiled for the HOST rather than for the builder image, and nothing
+# in the build stage reads it — that stage runs no install and no client build (see docker/Dockerfile,
+# whose three `package-manager-command.*=--version` flags are what neuter them). `.angular` is the
+# CLI's own cache, the same shape of host-local junk.
+#
+# NOTE THE ASYMMETRY with the platform's generic Quinoa recipe, which excludes the client's dist/ as
+# well: here dist/ is the PAYLOAD. The client depends on @qits/ui-components, which exists only on
+# the platform's own npm registry and is reachable from no address a docker build has, so the bundle
+# is built BEFORE this image by the step in .config/qits/ci-post-receive.yml. Excluding dist/ would
+# fail the build at the `test -f` guard on the mvnw line.
+**/node_modules
+service/src/main/webui/.angular
+
+# Quinoa's own toolchain install directory. The build stage creates its own; a host-installed one
+# would be a Linux/glibc question we do not want to import from whatever built the context.
+**/.quinoa
+
+# Local env / IDE cruft. `.env` is per-machine Quarkus overrides read at ordinal 295 — above the
+# packaged application.properties — so shipping one into the build context would let a developer's
+# local value quietly outrank what the image is supposed to run with.
+.env
+.idea
+.vscode
+.settings
+.sdkmanrc
+
+# Docs and the docker/ dir itself: nothing in the build reads them, and keeping them out means
+# editing this Dockerfile does not bust the `COPY . .` layer. `maintenance/` is a MODULE, not
+# prose — it stays.
+*.md
+docs
+docker

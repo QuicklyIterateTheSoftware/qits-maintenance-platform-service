@@ -1,0 +1,99 @@
+# The release pipeline: this repository reacts to its OWN release and pushes the image under the
+# released VERSION. The shape is qits-workspaces' file since the client landed — that repo is where
+# the two-half release pattern is maintained and the copies should keep matching. The short form of
+# the rules that bite:
+#
+# - The selection naming this repository is not a loop: SCMRelease comes from qits-workspaces, and
+#   nothing in this file publishes it.
+# - `artifacts:` is a declaration, not a report — qits-ci cannot see what the step pushed and
+#   announces on the strength of it. One entry, because this pipeline pushes one image: the jars
+#   this repo builds stay inside it and no maven release publishes them.
+# - The name is unqualified on purpose; the reader supplies its own registry host.
+# - The build below is ci-post-receive.yml's, and the two must stay matched: one image content, two
+#   coordinates. `:$QITS_CI_SHA` there remains the whole contract with the deployer.
+# - This file is inert until an SCMRelease for this repository exists, and it lands first on
+#   purpose — the bus is at-most-once, so the trigger must precede the event it selects.
+event: SCMRelease
+when:
+  - repository: { exact: qits-platform-maintenance }
+artifacts:
+  - { type: docker, name: qits/qits-platform-maintenance }
+steps:
+    # node-docker-base, the image ci-post-receive.yml already uses: node, npm and git for the
+    # bundle half, the docker CLI for the image half — and node is also what reads the event
+    # payload, which is JSON. qits-platform-idp's 2026.814.191019 release burned on the old ci-base form of this
+    # file: no node, no bundle, and the Dockerfile's guard stopped the version image cold.
+  - image: qits/build-images/node-docker-base:latest
+    docker: true
+    timeout-seconds: 3600
+    script: |
+      # Without -e a failed docker build is swallowed and a green release run makes qits-ci announce
+      # an artifact that was never pushed. -u makes an unset registry variable stop the step.
+      set -eu
+
+      # The event, read as data: the payload reaches the container verbatim in $QITS_EVENT_PAYLOAD,
+      # with no per-field projection.
+      version=$(node -p 'JSON.parse(process.env.QITS_EVENT_PAYLOAD).version')
+      # A version here is a calver or a semver, and nothing legitimate needs a character outside
+      # this set. Refused rather than quoted, because it reaches a shell and a docker reference.
+      case "$version" in
+        ''|*[!0-9A-Za-z._+-]*) echo "refusing an implausible version: $version" >&2; exit 1 ;;
+      esac
+      echo "releasing qits/qits-platform-maintenance:$version"
+
+      # The tag is the checkout target: an event-triggered run is cloned at the head of main, which
+      # a later push moves — the tag does not. The clone is shallow and carries no tags, hence the
+      # explicit refspec; the URL rather than `origin` because every address a step needs arrives
+      # as environment. `checkout --detach` peels the tag — and it is what makes the submodule
+      # fetch below land on the gitlink the release recorded rather than on main's.
+      git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
+      git checkout --detach "$version"
+
+      # --- half one: the bundle -----------------------------------------------------------------
+      # The daemon's clone is shallow and does not recurse, so the qits-platform-spa-maintenance submodule
+      # arrives as an empty directory and the Dockerfile's guard fails the image build on it. See
+      # ci-post-receive.yml for why the lockfile origins are rewritten and why the registry is
+      # passed as environment rather than as a file — the SPA's committed .npmrc outranks any
+      # ~/.npmrc this step could write.
+      frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-platform-spa-maintenance"
+      git -c submodule.qits-platform-spa-maintenance.url="$frontend_url" submodule update --init service/src/main/webui
+
+      cd service/src/main/webui
+      # Two registries since the byte-plane split, so the swap reads the PATH: an entry under the
+      # hosted registry's own pathname ($QITS_NPM_REGISTRY_URL's, /artifacts/npm/npm/) gets the
+      # hosted origin and everything else gets the proxy's, and the broad expression has to run
+      # before the narrow one. ci-post-receive.yml carries the full reasoning.
+      npm_hosted_origin=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).origin')
+      npm_proxy_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
+      npm_hosted_path=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).pathname')
+      sed -i -E \
+        -e "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_proxy_origin#" \
+        -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
+        package-lock.json
+
+      env npm_config_registry="$QITS_NPM_PROXY_URL" \
+          "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
+          npm ci --no-audit --no-fund
+
+      npm run build
+      cd -
+
+      # --- half two: the image ------------------------------------------------------------------
+      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-platform-maintenance:$version"
+      # Same doctrine as ci-post-receive.yml: host network + derived maven address, or the
+      # qits-db-core and qits-arch-rules resolve dies inside the build.
+      # And the same credential doctrine: a SECRET MOUNT, never a build arg, because an arg is
+      # recorded in the history of a pullable image. The launcher injects the run's commissioned
+      # client as $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET. Unconditional — a
+      # missing env source is NOT a buildx error, measured on v0.36.1 — so it is inert until a run
+      # carries the pair. ci-post-receive.yml has the same two flags; keep them matched.
+      docker build --network host \
+        --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
+        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
+        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
+        -t "$ref" -f docker/Dockerfile .
+      docker push "$ref"
+      # NO `docker rmi "$ref"`: on a CI host it frees nothing — the layers stay in the builder's
+      # cache either way — while under the containerd image store it drops the last reference to
+      # content a concurrent build of this same Dockerfile may still be resolving, which is the
+      # race that broke the release of 2026-08-11.

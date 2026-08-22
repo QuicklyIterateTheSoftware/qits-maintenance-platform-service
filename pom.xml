@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Standalone parent for qits-platform-maintenance — the MAINTENANCE context: the dependency
+         inventory of every repository in the catalog, the latest version of every dependency it
+         pins, and the maintenance branches that close the gap between the two.
+
+         WHAT IT DOES. It scans every repository's manifests at `main`, records each direct pin,
+         asks the registries what the newest version of each dependency is, groups the pending
+         upgrades per the repository's own `.config/qits/maintenance.yml`, and asks qits-ci to apply
+         one group as one branch.
+
+         WHAT IT DOES NOT DO. It edits no file and pushes no branch. A bump is a request to qits-ci,
+         which runs the platform-level `MaintenanceBump` pipeline in a step container; this service
+         decides WHAT changes and records WHAT happened. It also reads no transitive dependency: a
+         manifest holds direct pins and only those move.
+
+         DELIBERATELY ITS OWN GAV, the qits-configuration case: the child directories are
+         `maintenance` and `service`, and `eu.wohlben:service` would collide in the shared ~/.m2
+         every workspace container mounts. So the coordinates are namespaced
+         (`eu.wohlben.qits:qits-platform-maintenance-*`) while the directories stay short. The
+         `maintenance/` module's artifactId is `qits-platform-maintenance-domain` — the directory
+         names the context, the artifactId names the layer.
+
+         Versions that must stay in step with the platform (Quarkus, JDK release, MapStruct, Lombok)
+         are duplicated here on purpose: a clone of THIS repo alone must build, with no monorepo and
+         no parent to inherit from. -->
+    <groupId>eu.wohlben.qits</groupId>
+    <artifactId>qits-platform-maintenance</artifactId>
+    <!-- A PLACEHOLDER until this repo's first release train runs. The platform's release flow stamps
+         a calver version onto the merge commit, as every released sibling carries, so nothing here
+         is meant to be edited by hand. Deliberately NOT a -SNAPSHOT: the image build resolves this
+         reactor from source, so a snapshot coordinate would only invite a resolver to look for one
+         in a repository that will never hold it. -->
+    <version>2026.822.171807</version>
+    <packaging>pom</packaging>
+    <name>qits-platform-maintenance</name>
+
+    <modules>
+        <!-- Listed first: `service` depends on it. -->
+        <module>maintenance</module>
+        <module>service</module>
+    </modules>
+
+    <properties>
+        <!-- THE PLATFORM'S OWN MAVEN REPOSITORY, and this repo's three artifacts from it:
+             qits-db-core (PatientPgDriver, which the datasource opens every connection through, and
+             DbRetry.inNewTx, which every write path runs in), qits-auth-core (the forward-auth
+             mechanism and the machine-token gate) and qits-arch-rules (the test that refuses to let
+             the datasource baseline go missing). All three are published by
+             qits-integrations-quarkus. The url is a property so the image build can point it at the
+             address the builder container can actually reach — see docker/Dockerfile and
+             .qits-maven-settings.xml. -->
+        <qits.db-core.version>2026.817.175344</qits.db-core.version>
+        <qits.auth-core.version>2026.817.175344</qits.auth-core.version>
+        <qits.arch-rules.version>2026.817.175344</qits.arch-rules.version>
+        <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
+        <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
+        <quarkus.platform.version>3.34.6</quarkus.platform.version>
+
+        <!-- Quinoa is a Quarkiverse extension: not in quarkus-bom, and its version does NOT track
+             the platform's. 2.8.2 is built against Quarkus 3.27.3 LTS — older than the 3.34.6
+             above, which is the direction that works, since an extension compiled against an older
+             core runs on a newer one. Bump it only past a platform bump. Same pin as
+             qits-platform-orchestrator and every other SPA-serving service. -->
+        <quinoa.version>2.8.2</quinoa.version>
+
+        <!-- MAVEN'S OWN VERSION ORDER, not a home-grown one. `ComparableVersion` is the class every
+             maven resolver ranks versions with, and "which release is newer" is exactly the
+             question this service asks of a `maven-metadata.xml`. A re-implementation would differ
+             from the resolver on the qualifiers that actually occur (`-alpha`, `.RELEASE`, a
+             four-segment calver against a three-segment one) and be wrong in the direction nobody
+             tests. plexus-utils is excluded at the use site: ComparableVersion imports nothing
+             outside java.*. -->
+        <maven-artifact.version>3.9.12</maven-artifact.version>
+
+        <!-- Embedded PostgreSQL for the suites. This service's store IS postgres, so every test that
+             touches SQL has to run against one — and the first rule here is that a clone tests green
+             with NO DOCKER, which rules out Testcontainers and Quarkus dev services alike. Zonky
+             resolves real postgres binaries as ordinary Maven artifacts and spawns them as a child
+             process: a maven dependency, not a container.
+
+             Two coordinates, on purpose. The BOM pins which POSTGRES the binaries are (18.4.0 — the
+             platform's own postgres tag), the library version is the harness around them, and they
+             move independently. Every architecture the suite may run on is named explicitly in the
+             modules that use it: the binaries are per-arch artifacts, and a missing one fails in the
+             middle of a suite rather than during resolution. -->
+        <zonky.embedded-postgres.version>2.2.2</zonky.embedded-postgres.version>
+        <zonky.postgres-binaries.version>18.4.0</zonky.postgres-binaries.version>
+
+        <compiler-plugin.version>3.15.0</compiler-plugin.version>
+        <surefire-plugin.version>3.5.4</surefire-plugin.version>
+        <failsafe-plugin.version>3.5.4</failsafe-plugin.version>
+        <jandex-plugin.version>3.4.0</jandex-plugin.version>
+        <jar-plugin.version>3.4.2</jar-plugin.version>
+        <lombok.version>1.18.38</lombok.version>
+        <lombok-mapstruct-binding.version>0.2.0</lombok-mapstruct-binding.version>
+        <mapstruct.version>1.6.3</mapstruct.version>
+
+        <!-- PackagedSurfaceIT runs against the BUILT artifact, so it needs a `package` to have
+             happened. `-DskipITs=false` (or `-Dnative`, which flips this in service/pom.xml's
+             profile) is how you ask for the artifact to be probed; a plain `./mvnw verify` on a
+             fresh clone stays green without it. -->
+        <skipITs>true</skipITs>
+        <!-- Surefire's @{argLine} has no value unless something (jacoco/quarkus) sets it. -->
+        <argLine/>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>${quarkus.platform.artifact-id}</artifactId>
+                <version>${quarkus.platform.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <!-- Which postgres the embedded binaries ARE — 18.4.0, the tag the platform's own
+                     qits-oci-postgresql image is built from. The suites migrate and query against
+                     the same major version the deployment runs, which is the whole reason a real
+                     server is spawned rather than an in-memory stand-in. Imported as a BOM because
+                     the per-arch artifacts are separate coordinates. -->
+                <groupId>io.zonky.test.postgres</groupId>
+                <artifactId>embedded-postgres-binaries-bom</artifactId>
+                <version>${zonky.postgres-binaries.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.zonky.test</groupId>
+                <artifactId>embedded-postgres</artifactId>
+                <version>${zonky.embedded-postgres.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.projectlombok</groupId>
+                <artifactId>lombok</artifactId>
+                <version>${lombok.version}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.mapstruct</groupId>
+                <artifactId>mapstruct</artifactId>
+                <version>${mapstruct.version}</version>
+            </dependency>
+            <dependency>
+                <!-- ComparableVersion and nothing else. See the property above for why maven's own
+                     class rather than a comparator of ours. -->
+                <groupId>org.apache.maven</groupId>
+                <artifactId>maven-artifact</artifactId>
+                <version>${maven-artifact.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.codehaus.plexus</groupId>
+                        <artifactId>plexus-utils</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <!-- The reactor's own module, so `service` depends on it version-less. -->
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-platform-maintenance-domain</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Published by qits-integrations-quarkus into the platform Maven repository. The
+                     forward-auth mechanism that turns qits-gateway's X-Qits-User / X-Qits-Roles into
+                     an identity, and the machine-token gate beside it. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-auth-core</artifactId>
+                <version>${qits.auth-core.version}</version>
+            </dependency>
+            <dependency>
+                <!-- PatientPgDriver, named only by the datasource's `jdbc.driver` line, and
+                     DbRetry.inNewTx, which every inventory and bump write goes through. The second
+                     is why `maintenance` declares it at compile scope rather than runtime. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-db-core</artifactId>
+                <version>${qits.db-core.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The platform's shared rules, test scope. DatasourceBaselineRules is what this
+                     repo takes them for. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-arch-rules</artifactId>
+                <version>${qits.arch-rules.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Managed here rather than versioned at the use site because Quinoa is in no BOM;
+                     the pin and its reasoning stay in one place. -->
+                <groupId>io.quarkiverse.quinoa</groupId>
+                <artifactId>quarkus-quinoa</artifactId>
+                <version>${quinoa.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <repositories>
+        <repository>
+            <!-- Where the three qits jars above come from. Named `qits-maven` because the image
+                 build's settings file mirrors exactly that id — see .qits-maven-settings.xml. -->
+            <id>qits-maven</id>
+            <url>${qits.maven.repository.url}</url>
+        </repository>
+    </repositories>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>${quarkus.platform.group-id}</groupId>
+                    <artifactId>quarkus-maven-plugin</artifactId>
+                    <version>${quarkus.platform.version}</version>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${compiler-plugin.version}</version>
+                    <configuration>
+                        <parameters>true</parameters>
+                        <!-- Incremental compilation leaves stale MapStruct *Impl classes behind
+                             when a mapper's shape changes; the siblings disable it for the same
+                             reason. -->
+                        <useIncrementalCompilation>false</useIncrementalCompilation>
+                        <annotationProcessorPaths>
+                            <path>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok</artifactId>
+                                <version>${lombok.version}</version>
+                            </path>
+                            <path>
+                                <groupId>org.mapstruct</groupId>
+                                <artifactId>mapstruct-processor</artifactId>
+                                <version>${mapstruct.version}</version>
+                            </path>
+                            <path>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok-mapstruct-binding</artifactId>
+                                <version>${lombok-mapstruct-binding.version}</version>
+                            </path>
+                        </annotationProcessorPaths>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>${surefire-plugin.version}</version>
+                    <configuration>
+                        <systemPropertyVariables>
+                            <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                        </systemPropertyVariables>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <version>${failsafe-plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>${jar-plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>io.smallrye</groupId>
+                    <artifactId>jandex-maven-plugin</artifactId>
+                    <version>${jandex-plugin.version}</version>
+                    <executions>
+                        <execution>
+                            <id>make-index</id>
+                            <goals>
+                                <goal>jandex</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

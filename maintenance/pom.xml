@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-platform-maintenance</artifactId>
+        <version>2026.822.171807</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- The maintenance domain: the inventory (repositories, pins, groups, latest versions), the
+         scanner that fills it, the resolvers that answer "what is the newest", the pending
+         computation over the two, the bump that asks qits-ci to apply one group, and the six tables
+         they leave behind. A plain library jar — entity, persistence, scan, latest, bump, peer, dto
+         — with NO web/JAX-RS in it; the REST boundary and the schedules are `service`'s, the same
+         split every qits context carries.
+
+         It owns its OWN named datasource + persistence unit + Flyway lineage — its own PostgreSQL
+         database, provisioned by qits-platform-deployments from the `resources: postgresql:db` line
+         in .config/qits/deployments.yml and handed over as QITS_RESOURCE_DB_URL / _USERNAME /
+         _PASSWORD (see src/main/resources/META-INF/microprofile-config.properties, ordinal 100).
+
+         THE OUTBOUND HALF LIVES HERE TOO, and that is why quarkus-oidc-client is a dependency of a
+         library jar. A scan IS a sequence of reads and a bump IS a request: separating the calls
+         from the work that makes them would put half of one definition in each module. The HTTP
+         client is the JDK's, not a REST client — the orchestrator's shape, and it keeps a peer's
+         answer an opaque document rather than a bound type this service would have to track.
+
+         The directory is `maintenance/` and the artifactId `qits-platform-maintenance-domain`: the
+         directory names the context, the artifactId names the layer. -->
+    <artifactId>qits-platform-maintenance-domain</artifactId>
+    <name>qits-platform-maintenance :: domain</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-hibernate-orm-panache</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The context's store. Declared rather than configured: `.config/qits/deployments.yml`
+                 says `resources: postgresql:db` and the deployer creates the role and the database
+                 before this service's container starts. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Two things, and the second is why this is compile scope. PatientPgDriver, which the
+                 datasource this module ships opens every connection through, is named only by the
+                 `jdbc.driver` line in META-INF/microprofile-config.properties — the dependency sits
+                 beside that line so the two cannot drift apart. DbRetry.inNewTx is named by
+                 MaintenanceStore: every inventory and bump row is written inside it. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-db-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Flyway 10 split its database support out of the core: without this module Flyway
+                 refuses a postgres url with "no database found to handle". It sits here because
+                 this module owns the lineage. -->
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+        <dependency>
+            <!-- ObjectMapper without a REST layer. A peer's answer is read as a TREE and never bound
+                 to a record: the shapes belong to qits-projects, qits-githost, qits-artifacts,
+                 qits-platform-mirror and qits-ci, and binding them here would be five other
+                 repositories' contracts to keep in step with. It is also how `changes` reaches the
+                 `mt_bump` row and the CI payload. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jackson</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The outbound machine credential: five NAMED clients, one per peer, each minting for
+                 that peer's audience. Shipped `client-enabled=false`, so a clone-alone build needs
+                 no idp — see PeerTokens and META-INF/microprofile-config.properties. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-oidc-client</artifactId>
+        </dependency>
+        <dependency>
+            <!-- ComparableVersion: maven's own version order, which is the order a maven resolver
+                 would pick a release in. plexus-utils is excluded — ComparableVersion imports
+                 nothing outside java.*, and a native image should not carry a library no code
+                 reaches. -->
+            <groupId>org.apache.maven</groupId>
+            <artifactId>maven-artifact</artifactId>
+        </dependency>
+        <dependency>
+            <!-- `.config/qits/maintenance.yml`, a repository's own group configuration. The version
+                 comes from quarkus-bom, which manages it: a pin of ours would be a second opinion
+                 about a jar the runtime already carries, and the two disagreeing is a classpath
+                 nobody meant. -->
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The store every @QuarkusTest in this module boots against. Zonky spawns real
+                 postgres binaries as a child process — a maven dependency rather than a container —
+                 which is what keeps the clone-alone, docker-free rule true.
+                 testdb/EmbeddedPg + testdb/EmbeddedPgConfigSource hand the running instance to
+                 Quarkus. -->
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- Named per architecture on purpose: the binaries are separate artifacts and zonky
+                 picks one at run time, so an unnamed arch fails in the middle of a suite rather
+                 than during resolution. These three are what this platform is built and developed
+                 on. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
