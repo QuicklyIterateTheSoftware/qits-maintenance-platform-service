@@ -69,7 +69,7 @@ public final class DockerParser {
         continue;
       }
       pins.add(
-          new ParsedPin(
+          ParsedPin.of(
               Ecosystem.DOCKER, manifestPath, image, tag, null, "line:" + (index + 1)));
     }
     return List.copyOf(pins);

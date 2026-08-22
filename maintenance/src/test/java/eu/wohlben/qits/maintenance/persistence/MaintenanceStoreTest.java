@@ -10,6 +10,7 @@ import eu.wohlben.qits.maintenance.entity.MtBump;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtPin;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
+import eu.wohlben.qits.maintenance.entity.MtScan;
 import eu.wohlben.qits.maintenance.error.BumpAlreadyActiveException;
 import eu.wohlben.qits.maintenance.latest.LatestLookup;
 import eu.wohlben.qits.maintenance.manifest.GroupConfig;
@@ -20,6 +21,8 @@ import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.GroupSource;
 import eu.wohlben.qits.maintenance.model.PinKind;
 import eu.wohlben.qits.maintenance.model.RepositoryStatus;
+import eu.wohlben.qits.maintenance.model.ScanScope;
+import eu.wohlben.qits.maintenance.model.ScanStatus;
 import eu.wohlben.qits.maintenance.pending.Change;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -40,7 +43,7 @@ class MaintenanceStoreTest {
   @Inject MaintenanceStore store;
 
   private static ParsedPin pin(String name, String version, String location) {
-    return new ParsedPin(Ecosystem.MAVEN, "pom.xml", name, version, null, location);
+    return ParsedPin.of(Ecosystem.MAVEN, "pom.xml", name, version, null, location);
   }
 
   @Test
@@ -56,7 +59,7 @@ class MaintenanceStoreTest {
         List.of(pin("g:a", "1.0.0", "dependency:g:a"), pin("g:b", "2.0.0", "dependency:g:b")),
         List.of(new GroupConfig.Group("dependencies", List.of("*"))),
         GroupSource.DEFAULT,
-        (ecosystem, name) -> PinKind.INTERNAL,
+        candidate -> PinKind.INTERNAL,
         Instant.now());
     assertEquals(2, store.pins(repository).size());
 
@@ -71,7 +74,7 @@ class MaintenanceStoreTest {
         List.of(pin("g:a", "1.1.0", "dependency:g:a")),
         List.of(new GroupConfig.Group("dependencies", List.of("*"))),
         GroupSource.DEFAULT,
-        (ecosystem, name) -> PinKind.INTERNAL,
+        candidate -> PinKind.INTERNAL,
         Instant.now());
     List<MtPin> pins = store.pins(repository);
     assertEquals(1, pins.size());
@@ -93,7 +96,7 @@ class MaintenanceStoreTest {
         List.of(pin("g:a", "1.0.0", "dependency:g:a")),
         List.of(new GroupConfig.Group("dependencies", List.of("*"))),
         GroupSource.DEFAULT,
-        (ecosystem, name) -> PinKind.INTERNAL,
+        candidate -> PinKind.INTERNAL,
         Instant.now());
 
     store.markRepository(
@@ -120,7 +123,7 @@ class MaintenanceStoreTest {
             new GroupConfig.Group("quarkus", List.of("io.quarkus:*")),
             new GroupConfig.Group("dependencies", List.of("*"))),
         GroupSource.CONFIG,
-        (ecosystem, name) -> PinKind.EXTERNAL,
+        candidate -> PinKind.EXTERNAL,
         Instant.now());
     List<MtGroup> groups = store.groups(repository);
     assertEquals(List.of("angular", "quarkus", "dependencies"), groups.stream().map(g -> g.name).toList());
@@ -147,6 +150,30 @@ class MaintenanceStoreTest {
     store.recordLatest(Ecosystem.MAVEN, name, LatestLookup.found("1.0.0", "u"), Instant.now());
     store.recordLatest(Ecosystem.MAVEN, name, LatestLookup.found("2.0.0", "u"), Instant.now());
     assertEquals("2.0.0", store.latest(Ecosystem.MAVEN, name).orElseThrow().latest);
+  }
+
+  @Test
+  void aRestartClosesEveryScanADeadProcessLeftOpen() {
+    // A scan's work is entirely in the process it ran in: reads it made, rows it wrote, a position
+    // in a loop nothing recorded. A successor cannot resume one, so a row left RUNNING for ever is
+    // indistinguishable from a slow scan — which is what the first live failure looked like.
+    UUID running = store.openScan(ScanScope.ALL, null, "MANUAL", Instant.now());
+    store.scanStatus(running, ScanStatus.RUNNING, null, Instant.now());
+    UUID queued = store.openScan(ScanScope.INTERNAL, "qits-ci", "SCHEDULED", Instant.now());
+    UUID done = store.openScan(ScanScope.ALL, null, "MANUAL", Instant.now());
+    store.scanStatus(done, ScanStatus.SUCCEEDED, "all good", Instant.now());
+
+    assertTrue(store.failInterruptedScans("interrupted by restart", Instant.now()) >= 2);
+
+    for (UUID id : List.of(running, queued)) {
+      MtScan row = store.scan(id).orElseThrow();
+      assertEquals(ScanStatus.FAILED.name(), row.status);
+      assertEquals("interrupted by restart", row.message);
+      assertNotNull(row.finishedAt);
+    }
+    // A scan that had already ended keeps the ending it earned.
+    assertEquals(ScanStatus.SUCCEEDED.name(), store.scan(done).orElseThrow().status);
+    assertEquals("all good", store.scan(done).orElseThrow().message);
   }
 
   @Test

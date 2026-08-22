@@ -6,6 +6,7 @@ import eu.wohlben.qits.maintenance.entity.MtPin;
 import eu.wohlben.qits.maintenance.latest.VersionOrder;
 import eu.wohlben.qits.maintenance.manifest.Globs;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
+import eu.wohlben.qits.maintenance.model.PinKind;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -20,7 +21,11 @@ import java.util.Optional;
  * read through {@code mt_group}; a table would be a third copy of a fact two others already carry,
  * going stale between the scan that moves a pin and the scan that moves a latest.
  *
- * <p><b>Two rules decide whether a newer version is OFFERED, and the second is the one people
+ * <p><b>A pin has to be actionable before either rule applies.</b> REACTOR and UNRESOLVED pins are
+ * recorded and shown and are never pending — there is no line to edit in the first and no version
+ * to compare in the second.
+ *
+ * <p><b>Two rules then decide whether a newer version is OFFERED, and the second is the one people
  * ask about.</b>
  *
  * <ol>
@@ -108,6 +113,13 @@ public final class PendingChanges {
    * implementation of "is this one behind" would be the one the UI disagreed with.
    */
   public static Optional<String> newerVersion(MtPin pin, Map<String, MtLatest> latest) {
+    // A REACTOR or UNRESOLVED pin has no line to bump and no version worth comparing. It is never
+    // pending, whatever a registry says — a module depending on its sibling at ${project.version}
+    // is the ordinary case, and offering an upgrade for it would be offering to overwrite the
+    // release door's own stamp.
+    if (!kindOf(pin).actionable()) {
+      return Optional.empty();
+    }
     MtLatest row = latest.get(key(pin.ecosystem, pin.name));
     if (row == null || row.latest == null || row.latest.isBlank()) {
       return Optional.empty();
@@ -140,6 +152,15 @@ public final class PendingChanges {
       }
     }
     return Optional.empty();
+  }
+
+  /** A stored pin's kind, defaulting to UNRESOLVED for a word this build does not know. */
+  public static PinKind kindOf(MtPin pin) {
+    try {
+      return PinKind.valueOf(pin.kind);
+    } catch (IllegalArgumentException | NullPointerException e) {
+      return PinKind.UNRESOLVED;
+    }
   }
 
   /** The join key of {@code mt_pin} and {@code mt_latest}. */

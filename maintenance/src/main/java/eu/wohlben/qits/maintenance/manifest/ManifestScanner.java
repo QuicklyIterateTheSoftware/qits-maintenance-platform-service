@@ -10,6 +10,7 @@ import jakarta.inject.Inject;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +49,9 @@ public class ManifestScanner {
 
   /** The path fragment a gitlink to an embedded SPA sits at on this platform. */
   private static final String EMBEDDED_CLIENT = "src/main/webui";
+
+  /** What PomParser writes as the location of a {@code <parent>} pin. */
+  private static final String PARENT_LOCATION = "parent:";
 
   @Inject GitHostReader gitHost;
 
@@ -129,6 +133,12 @@ public class ManifestScanner {
    * <p>The ROOT pom's properties are carried into every module, because a module's version
    * expression is nearly always defined up there — resolving them per-file would drop most of the
    * platform's pins as unresolvable.
+   *
+   * <p><b>The whole reactor is read BEFORE any of it is parsed</b>, and that ordering is the point:
+   * "is this dependency one of our own modules" cannot be answered from a single pom, and it is the
+   * question that decides whether a pin is bumpable at all. A one-pass parser reported
+   * {@code eu.wohlben.qits:qits-ci-domain} as a dependency of {@code qits-ci} to upgrade, which
+   * would have been an offer to overwrite what its own release door stamps.
    */
   private List<ParsedPin> mavenPins(String project, String name, String sha, TreeLookup root) {
     if (!root.hasBlob("pom.xml")) {
@@ -138,19 +148,17 @@ public class ManifestScanner {
     if (!rootPom.found()) {
       return List.of();
     }
-    Map<String, String> rootProperties = PomParser.properties(rootPom.content());
-    List<ParsedPin> pins =
-        new ArrayList<>(PomParser.parse("pom.xml", rootPom.content(), Map.of(), "pom.xml"));
 
-    Set<String> visited = new LinkedHashSet<>();
-    visited.add("pom.xml");
+    // --- pass one: read the reactor ------------------------------------------------------------
+    Map<String, String> poms = new LinkedHashMap<>();
+    poms.put("pom.xml", rootPom.content());
     Deque<String> pending = new ArrayDeque<>();
     for (String module : PomParser.modules(rootPom.content())) {
       pending.add(modulePom("", module));
     }
-    while (!pending.isEmpty() && visited.size() < MAX_POMS) {
+    while (!pending.isEmpty() && poms.size() < MAX_POMS) {
       String path = pending.poll();
-      if (path == null || !visited.add(path)) {
+      if (path == null || poms.containsKey(path)) {
         continue;
       }
       if (path.contains(EMBEDDED_CLIENT)) {
@@ -161,10 +169,34 @@ public class ManifestScanner {
       if (!pom.found()) {
         continue;
       }
-      pins.addAll(PomParser.parse(path, pom.content(), rootProperties, "pom.xml"));
+      poms.put(path, pom.content());
       String directory = path.substring(0, path.length() - "pom.xml".length());
       for (String module : PomParser.modules(pom.content())) {
         pending.add(modulePom(directory, module));
+      }
+    }
+
+    // Every coordinate this repository builds. A dependency on one of these is the repository
+    // depending on itself, and a PARENT that is one of these is not a dependency at all.
+    Set<String> reactor = new LinkedHashSet<>();
+    for (String content : poms.values()) {
+      PomParser.coordinate(content).ifPresent(reactor::add);
+    }
+
+    // --- pass two: parse, and judge each pin against the reactor -------------------------------
+    Map<String, String> rootProperties = PomParser.properties(rootPom.content());
+    List<ParsedPin> pins = new ArrayList<>();
+    for (Map.Entry<String, String> pom : poms.entrySet()) {
+      Map<String, String> inherited = pom.getKey().equals("pom.xml") ? Map.of() : rootProperties;
+      for (ParsedPin pin : PomParser.parse(pom.getKey(), pom.getValue(), inherited, "pom.xml")) {
+        boolean ownArtifact = reactor.contains(pin.name());
+        if (ownArtifact && pin.location().startsWith(PARENT_LOCATION)) {
+          // A module inheriting this repository's own root pom is the reactor's shape, not a
+          // dependency anybody could upgrade. A parent from OUTSIDE the reactor — a shared
+          // qits-parent from the registry — is not in this set and stays a pin.
+          continue;
+        }
+        pins.add(pin.withReactorOwn(pin.reactorOwn() || ownArtifact));
       }
     }
     return pins;

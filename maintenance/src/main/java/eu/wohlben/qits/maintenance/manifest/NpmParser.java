@@ -66,8 +66,7 @@ public final class NpmParser {
           continue;
         }
         pins.add(
-            new ParsedPin(
-                Ecosystem.NPM, manifestPath, name, version, range.asText(), block));
+            ParsedPin.of(Ecosystem.NPM, manifestPath, name, version, range.asText(), block));
       }
     }
     return List.copyOf(pins);

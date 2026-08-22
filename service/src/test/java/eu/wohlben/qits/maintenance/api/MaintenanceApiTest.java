@@ -203,6 +203,90 @@ class MaintenanceApiTest {
         .body("pins.find { it.name == 'qits/build-images/maven-base' }.latest", equalTo("2026.821.2"));
   }
 
+  /**
+   * THE FOUR SHAPES THE FIRST LIVE SCAN GOT WRONG, on one repository.
+   *
+   * <p>Nineteen pins of qits-ci came back with `${project.groupId}:qits-arch-rules` classified
+   * EXTERNAL, sibling modules offered as upgrades, and the repository's own root pom listed as a
+   * parent to bump — after the scan itself had already died turning the first of those into a URL.
+   */
+  @Test
+  void anExpressionInTheGroupIdIsResolvedAndTheArtifactIsInternal() {
+    scan();
+    given()
+        .when()
+        .get(BASE + "/repositories/" + Fixture.REPOSITORY)
+        .then()
+        .statusCode(200)
+        // Written as ${project.groupId}:qits-arch-rules in service/pom.xml.
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-arch-rules' }.kind", equalTo("INTERNAL"))
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-arch-rules' }.version",
+            equalTo("2026.817.175344"))
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-arch-rules' }.latest",
+            equalTo("2026.822.1"))
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-arch-rules' }.pending", equalTo(true))
+        // The version IS a declared property, so it keeps an editable location.
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-arch-rules' }.location",
+            equalTo("property:qits.arch-rules.version"))
+        // Both halves of the BOM's coordinate were properties too.
+        .body("pins.find { it.name == 'io.quarkus.platform:quarkus-bom' }.kind", equalTo("EXTERNAL"))
+        // Nothing anywhere still carries an expression in its name.
+        .body("pins.findAll { it.name.contains('$') }", equalTo(java.util.List.of()));
+  }
+
+  @Test
+  void aSiblingModuleIsTheRepositorysOwnAndIsNeverPending() {
+    scan();
+    given()
+        .when()
+        .get(BASE + "/repositories/" + Fixture.REPOSITORY)
+        .then()
+        .statusCode(200)
+        // Pinned at ${project.version}: it moves with this repository's own release train.
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-ci-domain' }.kind", equalTo("REACTOR"))
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-ci-domain' }.version", equalTo("2026.821.1"))
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-ci-domain' }.latest", nullValue())
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-ci-domain' }.pending", equalTo(false));
+  }
+
+  @Test
+  void theRepositorysOwnRootPomIsNotADependencyButAnOutsideParentIs() {
+    scan();
+    given()
+        .when()
+        .get(BASE + "/repositories/" + Fixture.REPOSITORY)
+        .then()
+        .statusCode(200)
+        // service/pom.xml inherits eu.wohlben.qits:qits-ci — the reactor's shape, not a dependency.
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-ci' }", nullValue())
+        // The ROOT's parent comes from the registry, so it stays a pin and can be bumped.
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-parent' }.location",
+            equalTo("parent:eu.wohlben.qits:qits-parent"))
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-parent' }.kind", equalTo("INTERNAL"))
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-parent' }.pending", equalTo(true));
+  }
+
+  @Test
+  void anExpressionNobodyDeclaredIsVisibleAndIsNeverAskedAboutOrBumped() {
+    scan();
+    given()
+        .when()
+        .get(BASE + "/repositories/" + Fixture.REPOSITORY)
+        .then()
+        .statusCode(200)
+        .body("pins.find { it.name == 'g:mystery' }.kind", equalTo("UNRESOLVED"))
+        .body("pins.find { it.name == 'g:mystery' }.version", equalTo("${nobody.declared.this}"))
+        .body("pins.find { it.name == 'g:mystery' }.latest", nullValue())
+        .body("pins.find { it.name == 'g:mystery' }.pending", equalTo(false));
+    // And no request was ever made for it — the scan that died was building exactly such a URL.
+    assertTrue(
+        peers.calls.stream().noneMatch(call -> call.url().contains("${")),
+        "no url may carry an unresolved expression");
+    assertTrue(
+        peers.calls.stream().noneMatch(call -> call.url().contains("mystery")),
+        "an unresolved pin must not be looked up at all");
+  }
+
   @Test
   void anExternalBaseImageIsRecordedAndNeverLookedUp() {
     scan();
@@ -323,8 +407,10 @@ class MaintenanceApiTest {
         .body("ciRunStatus", equalTo("SUCCESS"))
         .body("configPath", containsString("ci-platform-event-maintenance-bump.yml"))
         // The `dependencies` group claims everything `angular` did not: the eventstream property,
-        // the quarkus BOM, the @qits npm package and the internal build image.
-        .body("changes.size()", equalTo(4))
+        // the quarkus BOM, the outside parent, qits-arch-rules, the @qits npm package and the
+        // internal build image. The sibling module, the unresolved expression and the external base
+        // image are not among them.
+        .body("changes.size()", equalTo(6))
         .body("finishedAt", notNullValue());
 
     given()
@@ -432,7 +518,7 @@ class MaintenanceApiTest {
         .then()
         .body("status", equalTo("REQUESTED"))
         .body("finishedAt", nullValue())
-        .body("changes.size()", equalTo(4));
+        .body("changes.size()", equalTo(6));
 
     // qits-ci is back. The sweep sends the SAME payload under the SAME event id.
     Fixture.scriptCiAccepts(peers, "run-4");
@@ -495,7 +581,7 @@ class MaintenanceApiTest {
         .then()
         .statusCode(200)
         .body("id", hasItem(id))
-        .body("find { it.id == '" + id + "' }.changes.size()", equalTo(4));
+        .body("find { it.id == '" + id + "' }.changes.size()", equalTo(6));
     given()
         .when()
         .get(BASE + "/bumps?repository=" + Fixture.REPOSITORY)

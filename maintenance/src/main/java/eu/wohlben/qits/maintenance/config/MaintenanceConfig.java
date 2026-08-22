@@ -1,5 +1,6 @@
 package eu.wohlben.qits.maintenance.config;
 
+import eu.wohlben.qits.maintenance.manifest.ParsedPin;
 import eu.wohlben.qits.maintenance.model.PinKind;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.util.List;
@@ -62,6 +63,26 @@ public class MaintenanceConfig {
   /** Whether a SCHEDULED scan asks for a bump of every group that has pending changes. */
   public boolean bumpAuto() {
     return bumpAuto;
+  }
+
+  /**
+   * What can be done with one pin.
+   *
+   * <p><b>The two "nothing" answers come first, and they are not about who published it.</b> A pin
+   * carrying an expression this service could not resolve is UNRESOLVED; one that is this
+   * repository's own artifact — a version from maven's coordinates, or a coordinate that is a
+   * module of this same reactor — is REACTOR. Both are recorded, because a person reading a
+   * repository expects to see every dependency it declares, and neither is ever looked up or
+   * bumped.
+   */
+  public PinKind kindOf(ParsedPin pin) {
+    if (pin.unresolved()) {
+      return PinKind.UNRESOLVED;
+    }
+    if (pin.reactorOwn()) {
+      return PinKind.REACTOR;
+    }
+    return kindOf(pin.ecosystem(), pin.name());
   }
 
   /**

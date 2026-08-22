@@ -69,9 +69,26 @@ line-based reader cannot tell a `<version>` inside `dependencyManagement` from o
 or a commented-out block from a live one. `manifest/Xml` is the DOM, with external entities and the
 DOCTYPE off: every document comes off another service over HTTP.
 
+**Expressions are resolved in the groupId and the artifactId, not only the version.** That is not a
+refinement: the first live scan over 49 repositories DIED on `${project.groupId}` reaching
+`URI.create` verbatim, because only the version was ever expanded. Maven's built-in coordinates are
+resolved from the pom's own — with a module inheriting its parent's groupId and version, which is
+maven's rule — and every spelling is known, `project.*`, the deprecated `pom.*` and the bare ones.
+
 **A property is remembered, not merely expanded**, and a property defined in the ROOT pom makes the
 pin belong to the ROOT pom. Recording the module would send the step to a file that does not hold
-the value.
+the value. A BUILT-IN is never a `property:` location: no file holds `${project.version}`.
+
+**Anything still carrying `${` after that is RECORDED, not dropped and not guessed at.** It is
+visible on the repository page as `kind: UNRESOLVED`, and nothing is asked of a registry about it.
+A value that never became a version must never become a URL.
+
+**THE REACTOR IS READ BEFORE IT IS PARSED, and that ordering is load-bearing.** "Is this dependency
+one of our own modules" cannot be answered from a single pom, and it is what decides whether a pin
+is bumpable at all. A one-pass parser offered `eu.wohlben.qits:qits-ci-domain` as an upgrade to
+qits-ci — an offer to overwrite what its own release door stamps. Two consequences, both in
+`ManifestScanner`: a dependency whose `g:a` is in the reactor is `REACTOR`, and a **parent** that is
+in the reactor is not recorded at all. A parent from outside it stays a pin.
 
 **Only what has a line is a pin.** A maven dependency with no version takes one from a BOM; an npm
 dependency the lock does not resolve is a lock out of step with its manifest; a `FROM` with a digest
@@ -107,6 +124,20 @@ arriving together is the ordinary case, not a race worth losing.
 
 **A task never throws out of `WorkQueue`.** A thrown exception would lose the sentence; every task
 logs its own failure and ends.
+
+**AND THE ROW IS CLOSED BY THE TASK, not by the queue.** `WorkQueue` logs and moves on, which is all
+it can do — it does not know what a task was writing. The first live scan died inside a latest
+lookup, the queue logged it, and the scan row stayed RUNNING for ever: a scan that is not running
+and does not say so is worse than a failed one, because nothing can tell it from a slow one. Every
+level now closes what it opened — the lookup answers with an error column, the repository loop marks
+one row UNREACHABLE, and `ScanService.run` closes the scan FAILED with the sentence.
+
+**A restart FAILS scans and RESUMES bumps** (`work/RestartRecovery`), because the work lives in
+different places. A scan's is in the process — reads it made, a position in a loop nothing recorded
+— so a successor cannot resume it and must not pretend to; the next schedule is minutes away. A
+bump's is qits-ci's: the run outlived this service and its answer is still there to read, so failing
+the row would throw away a branch that may already have been pushed. The ordinary sweep is the
+recovery, and recovery only starts it early.
 
 **`awaitIdle` is a barrier task, not a queue-length check.** The executor is single-threaded, so
 work that reaches the front after the barrier does not exist yet.

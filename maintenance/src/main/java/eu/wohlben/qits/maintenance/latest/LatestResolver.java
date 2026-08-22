@@ -10,6 +10,7 @@ import eu.wohlben.qits.maintenance.peer.PeerExchange;
 import eu.wohlben.qits.maintenance.peer.PeerTarget;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -38,6 +39,8 @@ import org.w3c.dom.Element;
 @ApplicationScoped
 public class LatestResolver {
 
+  private static final Logger LOG = Logger.getLogger(LatestResolver.class);
+
   /** How many pages of an OCI tag listing are followed. A page is 1000 tags; ten is far past any
    * image on this platform, and a bound is what keeps one runaway repository from being an
    * unbounded read. */
@@ -45,19 +48,56 @@ public class LatestResolver {
 
   private static final int TAG_PAGE_SIZE = 1000;
 
+  /**
+   * What a dependency name may contain before it is allowed to reach a URL.
+   *
+   * <p>Every character here occurs in a real name: the colon in {@code groupId:artifactId} and in a
+   * registry host's port, the at-sign and the slash in {@code @scope/name}, the slashes in an image
+   * path. Anything else is refused as an error ROW rather than sent — the platform's first live
+   * scan died on {@code ${project.groupId}} reaching {@code URI.create}, and a name that never
+   * became a name must never become a request.
+   */
+  private static final java.util.regex.Pattern ADDRESSABLE =
+      java.util.regex.Pattern.compile("[A-Za-z0-9._:@/-]+");
+
   @Inject PeerClient peers;
 
-  /** The newest version of one dependency, or why there is none. */
+  /**
+   * The newest version of one dependency, or why there is none.
+   *
+   * <p><b>NOTHING THROWS OUT OF HERE.</b> A scan asks this hundreds of times and one bad answer
+   * must cost one row, not the run — which is exactly what the first live scan over 49 repositories
+   * did when an unresolved expression reached {@code URI.create}. A malformed url, a timeout, a
+   * refusal, a document that does not parse: each becomes this dependency's {@code error} column,
+   * where the UI shows it beside the pin.
+   */
   public LatestLookup resolve(Ecosystem ecosystem, PinKind kind, String name) {
-    return switch (ecosystem) {
-      case MAVEN -> maven(kind, name);
-      case NPM -> npm(kind, name);
-      case DOCKER -> docker(kind, name);
-    };
+    if (name == null || name.isBlank() || !ADDRESSABLE.matcher(name).matches()) {
+      return LatestLookup.failed(
+          null, "'" + name + "' is not a name this service can address; nothing was asked");
+    }
+    try {
+      return switch (ecosystem) {
+        case MAVEN -> maven(kind, name);
+        case NPM -> npm(kind, name);
+        case DOCKER -> docker(kind, name);
+      };
+    } catch (RuntimeException e) {
+      LOG.warnf("The latest of %s %s could not be looked up: %s", ecosystem.wireName(), name, e.toString());
+      return LatestLookup.failed(null, "the lookup failed: " + e);
+    }
   }
 
-  /** Whether this service looks a pin of that shape up at all. */
+  /**
+   * Whether this service looks a pin of that shape up at all.
+   *
+   * <p>A REACTOR or UNRESOLVED pin is never looked up: the first is this repository's own artifact
+   * and the second has no name to address. External images are not ordered in v1.
+   */
   public boolean resolvable(Ecosystem ecosystem, PinKind kind) {
+    if (!kind.actionable()) {
+      return false;
+    }
     return ecosystem != Ecosystem.DOCKER || kind == PinKind.INTERNAL;
   }
 
