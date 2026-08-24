@@ -15,15 +15,21 @@
 # environment is a config entry rather than a schema change.
 deployment_target: platform
 
-# One route for the whole segment: the client at /maintenance/, the API at /maintenance/api and the
-# document at /maintenance/q. qits-gateway routes verbatim by prefix, so this one line reaches all
-# three.
+# One route for the whole WIRE segment: the API at /maintenance/api and the document at
+# /maintenance/q. The edge path-routes verbatim by prefix on every vhost, so this one line reaches
+# both from anywhere. The client is no longer under it — it is served at the root of this service's
+# own host, which the edge derives from the application name.
 routes: /maintenance
 
-# The left-navigation entry, and the number is its position. 13 puts it after Orchestrator:12 at the
-# end of the platform block the operator screens form — Githost:9, Mirror:10, Configuration:11,
-# Orchestrator:12 — rather than among the per-project doors.
-navigation: Maintenance:13
+# WHERE THE EDGE APPEARS THIS APPLICATION IN THE SIDEBAR. One entry per slot: `platform` is the
+# project-scoped group, and this is its second row. The label and the position are the whole
+# statement — the host is derived from the application name (`qits-platform-maintenance` minus its
+# `qits-platform-` prefix is `maintenance`), so there is no `host:` line to keep in step.
+#
+# This replaces `navigation: Maintenance:13`, the flat list every application shared. The old key
+# still parses — a spec is read at the built sha, so it can never become unknown — and maps to
+# `system.Maintenance`, which is the wrong group for pages a project scopes.
+navigation-entries: platform.Maintenance:2
 
 # THE STORE, DECLARED RATHER THAN CONFIGURED. The line below is what provisions it: a role and a
 # database of its own on the tier's postgres, created before the successor container starts and

@@ -45,12 +45,12 @@ import org.junit.jupiter.api.Test;
  *       queued scan is exactly such a response;
  *   <li><b>the client is served, and does not swallow the API.</b> Quinoa is disabled by default in
  *       test mode, so no {@code @QuarkusTest} builds or serves the SPA and every assertion about
- *       {@code /maintenance/} would pass against a process with no client in it.
+ *       the served client would pass against a process with no client in it.
  * </ul>
  *
  * <p><b>This is also the only place the identity contract is real.</b> A {@code @QuarkusTest} runs
  * under the {@code test} profile, where qits-auth-core ships a dev user; the launched artifact runs
- * as a deployment does, so the roles have to arrive the way qits-gateway sends them — in {@code
+ * as a deployment does, so the roles have to arrive the way the edge sends them — in {@code
  * X-Qits-User} and {@code X-Qits-Roles}. A request with neither is asserted to be refused.
  *
  * <p><b>And the peers here are REAL calls to a port nothing listens on.</b> The profile points every
@@ -70,11 +70,11 @@ public class PackagedSurfaceIT {
 
   /**
    * The one string that identifies a response as the CLIENT's index.html rather than anything else
-   * this process serves. It is also the string that has to agree with {@code
-   * quarkus.quinoa.ui-root-path} here and with {@code baseHref} in qits-platform-spa-maintenance's
-   * angular.json, so the probes below double as the check that all three still do.
+   * this process serves. The client is mounted at the root of this service's own host now, so this
+   * is what {@code baseHref} in qits-platform-spa-maintenance's angular.json spells — the one value
+   * set in another repository, which is why the probes below still assert it.
    */
-  private static final String BASE_HREF = "<base href=\"/maintenance/\">";
+  private static final String BASE_HREF = "<base href=\"/\">";
 
   /**
    * Hands the launched artifact a database the way a deployment does — as the generic resource
@@ -178,13 +178,20 @@ public class PackagedSurfaceIT {
   }
 
   @Test
-  public void theRoutesAreWhereTheGatewayRoutesThemAndAMistypedOneIsNever200() {
+  public void theRoutesAreWhereTheEdgeRoutesThemAndAMistypedOneIsNever200() {
     asAdmin().when().get("/maintenance/api/repositories").then().statusCode(200);
     asAdmin().when().get("/maintenance/api/dependencies").then().statusCode(200);
     asAdmin().when().get("/maintenance/api/bumps").then().statusCode(200);
 
-    // qits-gateway routes verbatim by prefix, so there is no unprefixed form to fall back to.
-    asAdmin().when().get("/api/repositories").then().statusCode(404);
+    // The edge path-routes verbatim by prefix, so there is no unprefixed form to fall back to — and
+    // at the root an unprefixed /api/repositories is the CLIENT's ground, which is why the check is
+    // that it never answers as the API.
+    asAdmin()
+        .when()
+        .get("/api/repositories")
+        .then()
+        .statusCode(200)
+        .body(Matchers.containsString(BASE_HREF));
 
     String body =
         asAdmin().when().get("/maintenance/api/nope").then().statusCode(404).extract().asString();
@@ -192,11 +199,11 @@ public class PackagedSurfaceIT {
   }
 
   /**
-   * The client is mounted, and its {@code <base href>} agrees with where it is mounted. The two are
-   * configured in different repositories — {@code quarkus.quinoa.ui-root-path} here, {@code
-   * baseHref} in qits-platform-spa-maintenance's angular.json — and a disagreement serves a page
-   * that loads and then fetches its own JavaScript from a path that 404s. Nothing on this side
-   * notices, which is why the string is asserted rather than the status alone.
+   * The client is mounted at the root, and its {@code <base href>} agrees. The two are configured
+   * in different repositories — {@code quarkus.quinoa.ui-root-path} here, {@code baseHref} in
+   * qits-platform-spa-maintenance's angular.json — and a disagreement serves a page that loads and
+   * then fetches its own JavaScript from a path that 404s. Nothing on this side notices, which is
+   * why the string is asserted rather than the status alone.
    *
    * <p><b>It answers anonymously, and that is not a hole in "no anonymous surface".</b> That rule is
    * about this service's DATA: every route in the four controllers is {@code @RolesAllowed} and the
@@ -204,10 +211,10 @@ public class PackagedSurfaceIT {
    * no configuration in it.
    */
   @Test
-  public void theClientIsServedAtTheSegmentWithABaseHrefThatMatches() {
+  public void theClientIsServedAtTheRootWithABaseHrefThatMatches() {
     given()
         .when()
-        .get("/maintenance/")
+        .get("/")
         .then()
         .statusCode(200)
         .contentType(ContentType.HTML)
@@ -215,15 +222,24 @@ public class PackagedSurfaceIT {
   }
 
   /**
-   * A deep link is the SPA fallback doing its job: {@code /maintenance/repositories/qits-ci} has no
-   * file behind it, and {@code enable-spa-routing} is what makes a reload or a pasted link reach
-   * the Angular router instead of a 404. An operator shares exactly these addresses.
+   * A deep link is the SPA fallback doing its job: {@code /repositories/qits-ci} has no file behind
+   * it, and {@code enable-spa-routing} is what makes a reload or a pasted link reach the Angular
+   * router instead of a 404. An operator shares exactly these addresses — and the project-scoped
+   * form of the same page, {@code /qits/dependencies}, has to survive a reload the same way.
    */
   @Test
   public void aDeepLinkFallsBackToTheClientSoTheAngularRouterOwnsIt() {
     given()
         .when()
-        .get("/maintenance/repositories/qits-ci")
+        .get("/repositories/qits-ci")
+        .then()
+        .statusCode(200)
+        .contentType(ContentType.HTML)
+        .body(Matchers.containsString(BASE_HREF));
+
+    given()
+        .when()
+        .get("/qits/dependencies")
         .then()
         .statusCode(200)
         .contentType(ContentType.HTML)
@@ -232,8 +248,9 @@ public class PackagedSurfaceIT {
 
   /**
    * THE HALF THAT COSTS SOMETHING IF IT IS WRONG. The SPA fallback is a late-order catch-all, so a
-   * path under {@code /maintenance} that matches no route is rerouted to index.html and answers
-   * {@code 200 text/html} — unless {@code quarkus.quinoa.ignored-path-prefixes} claims it first.
+   * path that matches no route is rerouted to index.html and answers {@code 200 text/html} — unless
+   * {@code quarkus.quinoa.ignored-path-prefixes} claims it first. The one entry there is the whole
+   * {@code /maintenance} prefix, which is what makes both probes below 404s.
    *
    * <p>The stake here is the client's own polling: {@code GET /maintenance/api/bumps/<id>} while a
    * bump runs, which would hand a JSON parser an HTML document.
@@ -263,15 +280,19 @@ public class PackagedSurfaceIT {
   }
 
   /**
-   * A KNOWN WART, PINNED RATHER THAN FIXED. Quinoa mounts the client at {@code ui-root-path + "*"} —
-   * {@code /maintenance/*} — which does not match the bare segment, so {@code /maintenance} without
-   * the trailing slash is a 404 while {@code /maintenance/} is the page (upstream quinoa issue
-   * #960). It affects every client on the platform identically and a redirect would be a
-   * gateway-level decision, so it is deliberately not solved per-service.
+   * THE OLD ADDRESS IS NO LONGER A DOOR INTO THE CLIENT. The whole {@code /maintenance} prefix is
+   * ignored by SPA routing, so neither the bare segment nor the trailing-slash form serves the page.
+   * An old bookmark is the edge's problem, answered there with a redirect to this host's root.
    */
   @Test
-  public void theBareSegmentWithNoTrailingSlashIsStillA404() {
+  public void theOldSegmentIsNoLongerADoorIntoTheClient() {
     given().when().get("/maintenance").then().statusCode(404);
+    given()
+        .when()
+        .get("/maintenance/")
+        .then()
+        .statusCode(404)
+        .body(Matchers.not(Matchers.containsString(BASE_HREF)));
   }
 
   @Test

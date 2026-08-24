@@ -151,8 +151,8 @@ node/docker step each clone, commit and push.
 
 ## API
 
-Under `/maintenance/api`. Every route takes `qits:admin` (a person, via qits-gateway's `X-Qits-User`
-/ `X-Qits-Roles`) or `qits:system` (a machine, via a bearer). There is no anonymous route. Every
+Under `/maintenance/api`, path-routed on every vhost. Every route takes `qits:admin` (a person, via
+the edge's `X-Qits-User` / `X-Qits-Roles`) or `qits:system` (a machine, via a bearer). There is no anonymous route. Every
 error body is `{"message": "..."}`.
 
 ```
@@ -195,7 +195,8 @@ GET  /bumps/{id}                                  → {id, repository, group, br
 - `GET /bumps` carries `changes` too; a change list is small.
 
 The document is at `/maintenance/q/openapi`, the browsable UI at `/maintenance/q/swagger-ui`, and
-readiness at `/maintenance/q/health/ready`. The client is served at `/maintenance/`.
+readiness at `/maintenance/q/health/ready`. The client is served at `/` — this service has a host of
+its own, `maintenance.<env>.<domain>`, and the `/maintenance` segment is the wire surface alone.
 
 ## Configuration
 
