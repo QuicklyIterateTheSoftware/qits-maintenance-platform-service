@@ -49,3 +49,8 @@ resources: postgresql:db
 # repository name and would land on exactly this path; it is written out because a probe that 404s
 # fails a deployment for a reason nobody would look for in a config file.
 health_path: /maintenance/q/health/ready
+
+# Where the browsable API document lives: swagger-ui under this service's non-application
+# root, which sits under the primary route above. The shell's Api Docs viewer reads it off
+# /main-navigation and frames it for this repository.
+api-docs: /maintenance/q/swagger-ui
