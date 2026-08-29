@@ -65,8 +65,14 @@ import org.junit.jupiter.api.Test;
 @TestProfile(PackagedSurfaceIT.PackagedUnderTarget.class)
 public class PackagedSurfaceIT {
 
-  /** The database this IT hands the launched process, on a name of its own. */
-  private static final String DATABASE = "maintenance_packaged_it";
+  /**
+   * The database this IT hands the launched process, on a name of its own.
+   *
+   * <p>Package-private rather than private because {@link TokenValidationBootstrapIT} extends the
+   * profile below and reads the very same store back over JDBC — one name for one database, in the
+   * class that owns it.
+   */
+  static final String DATABASE = "maintenance_packaged_it";
 
   /**
    * The one string that identifies a response as the CLIENT's index.html rather than anything else

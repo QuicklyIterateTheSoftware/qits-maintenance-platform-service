@@ -35,7 +35,7 @@
          is meant to be edited by hand. Deliberately NOT a -SNAPSHOT: the image build resolves this
          reactor from source, so a snapshot coordinate would only invite a resolver to look for one
          in a repository that will never hold it. -->
-    <version>2026.824.220003</version>
+    <version>2026.829.123308</version>
     <packaging>pom</packaging>
     <name>qits-platform-maintenance</name>
 
@@ -46,17 +46,28 @@
     </modules>
 
     <properties>
-        <!-- THE PLATFORM'S OWN MAVEN REPOSITORY, and this repo's three artifacts from it:
-             qits-db-core (PatientPgDriver, which the datasource opens every connection through, and
+        <!-- THE PLATFORM'S OWN MAVEN REPOSITORY, and this repo's artifacts from it: qits-db-core
+             (PatientPgDriver, which the datasource opens every connection through, and
              DbRetry.inNewTx, which every write path runs in), qits-auth-core (the forward-auth
-             mechanism and the machine-token gate) and qits-arch-rules (the test that refuses to let
-             the datasource baseline go missing). All three are published by
-             qits-integrations-quarkus. The url is a property so the image build can point it at the
-             address the builder container can actually reach — see docker/Dockerfile and
-             .qits-maven-settings.xml. -->
+             mechanism and the machine-token gate), qits-arch-rules (the test that refuses to let
+             the datasource baseline go missing), and — test scope, service/ only — qits-userflows
+             and qits-service-mock, the story framework and the recording mocks its far side is. All
+             five come from qits-integrations-quarkus except qits-userflows, which publishes itself.
+             The url is a property so the image build can point it at the address the builder
+             container can actually reach — see docker/Dockerfile and .qits-maven-settings.xml. -->
         <qits.db-core.version>2026.817.175344</qits.db-core.version>
         <qits.auth-core.version>2026.817.175344</qits.auth-core.version>
         <qits.arch-rules.version>2026.817.175344</qits.arch-rules.version>
+        <!-- The user-story framework (test scope, service/ only): TokenValidationBootstrapIT is a
+             userflow, so a `mvn verify -DskipITs=false "-Dit.test=TokenValidationBootstrapIT"` also
+             regenerates service/target/userstories/ — the story's documentation, sequence diagram
+             included. Published by qits-userflows into the same platform Maven repository as the
+             three above. -->
+        <qits.userflows.version>2026.828.153026</qits.userflows.version>
+        <!-- The recording service mocks that IT boots against (the generic MockService plus
+             idp.MockIdp), published by qits-integrations-quarkus beside qits-auth-core and
+             qits-arch-rules. -->
+        <qits.service-mock.version>2026.827.71232</qits.service-mock.version>
         <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -193,6 +204,20 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-arch-rules</artifactId>
                 <version>${qits.arch-rules.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The userflow framework. Test scope, in `service/` only: the story runs against
+                     the PACKAGED artifact, and that is the one module that produces one. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-userflows</artifactId>
+                <version>${qits.userflows.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The recording mocks the story's far side is. Test scope, `service/` only, for
+                     the same reason. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-service-mock</artifactId>
+                <version>${qits.service-mock.version}</version>
             </dependency>
             <dependency>
                 <!-- Managed here rather than versioned at the use site because Quinoa is in no BOM;
