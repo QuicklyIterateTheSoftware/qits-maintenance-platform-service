@@ -1,6 +1,6 @@
-[submodule "qits-platform-spa-maintenance"]
+[submodule "qits-maintenance-platform-frontend"]
 	path = service/src/main/webui
-	url = https://github.com/QuicklyIterateTheSoftware/qits-platform-spa-maintenance.git
+	url = https://github.com/QuicklyIterateTheSoftware/qits-maintenance-platform-frontend.git
 	ignore = all
 	update = merge
 	branch = main

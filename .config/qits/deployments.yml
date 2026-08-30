@@ -13,6 +13,13 @@
 # It talks to ONE qits-ci, which IS per environment: `qits.maintenance.targets.ci-url` is injected
 # with the environment's alias and every bump row records which environment ran it, so a second
 # environment is a config entry rather than a schema change.
+
+# THE NAME THIS DEPLOYS AS, spelled because the repository is renamed and the application is not.
+# Every derivation the deployer makes hangs off this name — the wire alias peers dial, the container
+# it manages, the extras family, the database — so letting it follow the repository would
+# decommission the running service and start a stranger beside it.
+application: qits-platform-maintenance
+
 deployment_target: platform
 
 # One route for the whole WIRE segment: the API at /maintenance/api and the document at
