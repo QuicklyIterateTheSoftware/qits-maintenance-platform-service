@@ -238,16 +238,105 @@ a JWKS, and a clone-alone build needs no issuer. There is no third state.
   The drain first, or the delete lands between a running task's read and its write.
 - **The scheduler is off in the suite** (`quarkus.scheduler.enabled=false`). The crons would fire
   once a day for nobody's reason; the bump sweep is an INTERVAL and would fire, racing every test
-  that drives a bump by hand.
+  that drives a bump by hand. **The story catalogue is the one exception and it is deliberate**: a
+  bump is closed by the sweep and by nothing else, so `StoryProfile` turns the scheduler back on and
+  removes every other timer at its own key. See "The userflows".
 - A `@QuarkusTest` runs under the `test` profile, where qits-auth-core ships a dev user carrying
   `qits:admin` and `qits:system` — so the shipped `@RolesAllowed` pair is exercised rather than
   bypassed, with no `@TestSecurity` fabricating an identity no deployment produces.
-- **`PackagedSurfaceIT` is the only test that runs against the artifact**, and the only place the
-  identity contract is real. It hands the process `QITS_RESOURCE_DB_*` rather than restating the
-  datasource keys, so the jar's own indirection is under test, and it reads the rows back over JDBC.
-  **Its peers are real calls to a dead loopback port** — the honest end-to-end proof that a failure
-  reaches a readable row with none of the suite's fakes involved. ITs are skipped by default;
+- **Every `@QuarkusTest` here is a fake identity away from a deployment; the six ITs are not.** An IT
+  runs against the ARTIFACT, so the roles arrive the way the edge sends them and the datasource
+  arrives as the shipped `QITS_RESOURCE_DB_*` indirection rather than as the datasource keys.
+  `PackagedSurfaceIT` is the one that is about the artifact itself — the route prefixes, Flyway's
+  migration surviving as a classpath resource, the client at the root, and **peers that are real
+  calls to a dead loopback port**, which is the honest end-to-end proof that a failure reaches a
+  readable row with none of the suite's fakes involved. The other five are the story catalogue
+  below, and they point those same peers at recording stand-ins instead. ITs are skipped by default;
   `-DskipITs=false` runs against the fast-jar and `-Dnative` against the binary.
+- **`TokenValidationBootstrapIT` is the second, and the only place the OIDC tenant is ever ON.** The
+  shipped tenant is gated on `qits.auth.machine.required`, which every other suite here leaves
+  false, so the whole `quarkus.oidc.*` block runs nowhere else. Its far side is qits-service-mock's
+  `MockIdp`, which serves a real JWKS for a generated keypair, mints tokens against it and records
+  what it answered — so "the service fetched the keys at startup" is an assertion, not an inference.
+  It is also the **first class of the story catalogue** below.
+
+## The userflows
+
+Nine `@UserStory` methods across five classes, emitting `service/target/userstories/` and published
+per commit by `.config/qits/ci-event-userflows.yml` as `@userflows/qits-platform-maintenance`.
+`skipITs` stays true and the pipeline names the classes:
+`-DskipITs=false "-Dit.test=TokenValidationBootstrapIT,ScanCycleIT,InventoryIT,BumpIT,MaintenanceRefusalIT"`.
+
+| class | category | what it is about |
+|---|---|---|
+| `api/TokenValidationBootstrapIT` | authentication | the JWKS fetched at boot, and the three tokens that open nothing |
+| `stories/scan/ScanCycleIT` | the scan | every manifest at one commit, every registry asked by KIND — and a git host that goes dark mid-story |
+| `stories/inventory/InventoryIT` | the inventory | what an operator reads, and the five arrows that are not there |
+| `stories/bump/BumpIT` | the bump | a payload for somebody else's pipeline, and the two endings a green run has |
+| `stories/refusals/MaintenanceRefusalIT` | refusals | 401, 403, and the requests that start no work |
+
+**ONE PROFILE, ONE LAUNCH, ONE DATABASE.** `stories/support/StoryProfile` extends
+`PackagedSurfaceIT.PackagedUnderTarget` and every story class names it, the bootstrap IT included. A
+second profile would be a second boot with a second inventory, and every story after the first reads
+what an earlier story's scan wrote. The database is `maintenance_userflows_it`, its own, because
+`PackagedSurfaceIT` is a different launch of the same artifact and a shared schema would have each
+reading the other's rows.
+
+**The network diagram is observed, never narrated.** `Interactions.happened()` was removed from the
+framework in 2026.829 and there is nothing to replace it with. `stories/support/StoryNetwork.install()`
+is the whole wiring in one call: the framework's **shipped** `NetworkTaps.restAssured(SERVICE)` for
+what a story sends in (the per-repo `StoryNetworkFilter` copy this repo used to carry is deleted —
+`NetworkTaps` is where it lives now), and six cumulative `NetworkCapture.source` registrations for
+what left. A story sets `NetworkCapture.actor(...)` **before** each call, because the tap sees a
+request and never a narrative role, and then only asserts and notes.
+
+**The five peers are real sockets that record.** `stories/support/StoryPeers` is a `com.sun`
+HttpServer per service — qits-projects, qits-githost, qits-ci, qits-platform-artifacts,
+qits-platform-mirror — armed by `StoryCatalog` with a two-repository platform, and the launched
+process is handed their addresses as its eight shipped `qits.maintenance.*-url` keys. It is **not**
+`FakePeers` and it is not a `MockService`, for three reasons that are each independently fatal: a
+CDI alternative does not exist in a launched fast-jar; a recording of the CALL cannot label an edge
+with the status that came BACK; and neither can stop answering mid-story, which is what
+`reachable(false)` does — the connection goes away with no status, recorded as the word `dropped`.
+A path is armed by its DECODED form and recorded in its RAW one, because `%2f` is one segment to a
+registry and two to `URI.getPath()`.
+
+**The store is the one declared edge, everywhere.** Every JDBC read happens inside the launched
+process where no tap of ours stands, so each story `network.declare`s it; declared edges carry
+`"declared": true` and render muted and dashed, so a claim never reads like evidence. **An absence
+is never an edge** — it is `assertNoEdgesTo(<peer>)`, which is the assertion that pays: the
+inventory story's whole subject is that five peers were up and answering and none of them was asked.
+Every story also pins `assertEdgeCount` and `assertOnlyEdgesFrom`, so a call appearing later shows
+rather than passing quietly.
+
+**Ordering is load-bearing rather than tidy.** A cumulative source is attributed by a cursor, so
+pre-story traffic — the startup JWKS fetch — lands in whichever story drains first, and a "no peer
+was asked" claim is only checkable once the story that DID ask has drained. Every story method
+carries `@UserflowRunsAfter` and `UserflowClassOrderer` (junit's secondary orderer, registered in
+`service/src/test/resources/application.properties`) turns that into the chain
+`TokenValidationBootstrapIT → ScanCycleIT → InventoryIT → BumpIT → MaintenanceRefusalIT`. Two
+multi-story classes also pin `@TestMethodOrder`.
+
+**Namespacing, not resetting.** `InventoryReset` has no equivalent in a launched process, so the
+catalogue keeps stories apart by giving them different repositories: `qits-ci` carries the rich
+reactor and every reading story, `qits-eventstream` exists so the second bump story has a branch of
+its own — a bump holds its (repository, group) lock until it ends.
+
+**The clock: one timer alive, and a story drives it.** A bump is closed by `BumpPollSchedule`'s
+sweep and by nothing else, so `StoryProfile` turns the scheduler back **on** and then removes every
+other timer at its own shipped key — both scan crons are `off` (the scheduler's own value for "do
+not register this trigger"), `scan.enabled=false`, and `bump.poll-interval=1s`. The sweep is a no-op
+whenever no bump is in flight, so the only stories it can reach are the two holding one open.
+**Two paths are therefore not covered by a story**: a SCHEDULED scan asking for the bumps it found
+(`bump.auto`), and `RestartRecovery` resuming a bump across a restart, which needs a second boot.
+Both keep their coverage in `MaintenanceApiTest`, which drives `bumps.sweep()` by hand.
+
+**What the catalogue does not show, because this service does not do it.** There is no story of a
+commit being made, a file being written or a ref being pushed: this service decides and a CI step
+applies, so the furthest arrow out of it is a `MaintenanceBump` trigger. There is no `event` edge
+anywhere — the `SoftwareRelease` bus listener is deliberately a later release and v1 polls. And
+nothing here transitively resolves, orders an external base image or runs `ng update`; each is a
+decision recorded under "Deliberately not here yet", not a gap in the stories.
 
 ## The client
 
