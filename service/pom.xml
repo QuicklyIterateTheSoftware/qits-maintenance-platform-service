@@ -111,20 +111,28 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <!-- The user-story framework: TokenValidationBootstrapIT is written as a @UserStory, so
-                 the gate-on packaged-boot proof doubles as documentation — steps, interactions and
-                 a sequence diagram emitted under target/userstories/. Both stories are browserless
-                 (no Flow parameter), so the transitive Playwright never launches anything and
-                 nothing downloads a browser. Version from the root pom's dependencyManagement. -->
+            <!-- The user-story framework. Nine @UserStory methods across five classes — the
+                 packaged-boot proof, the scan cycle, the inventory reads, the bump and the
+                 refusals — each emitting steps and a network diagram under target/userstories/.
+                 The diagram is observed rather than narrated: NetworkTaps.restAssured (shipped by
+                 the framework, which is why no StoryNetworkFilter is copied here any more) sees
+                 what a story sends in, and the recording stand-ins under stories/support supply
+                 what this service sent out; only the store's JDBC edge is declared. Every story is
+                 browserless (no Flow parameter), so the transitive Playwright never launches
+                 anything and nothing downloads a browser. Version from the root pom's
+                 dependencyManagement. -->
             <groupId>${project.groupId}</groupId>
             <artifactId>qits-userflows</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
-            <!-- The recording service mocks. That IT points quarkus.oidc at idp.MockIdp — a
-                 MockService plus key material: it serves the JWKS for a generated keypair, mints
-                 tokens, and records what it answered, which is what makes the startup fetch
-                 assertable from the IDP's end rather than only from this service's. -->
+            <!-- The recording service mocks. The story profile points quarkus.oidc at idp.MockIdp —
+                 a MockService plus key material: it serves the JWKS for a generated keypair, mints
+                 the bearers every story presents, and records what it answered, which is what makes
+                 the startup fetch assertable from the IDP's end rather than only from this
+                 service's. The five PEERS are not MockServices: a peer here has to answer xml as
+                 well as json and has to stop answering mid-story, which is stories/support's
+                 StoryPeers. -->
             <groupId>${project.groupId}</groupId>
             <artifactId>qits-service-mock</artifactId>
             <scope>test</scope>
