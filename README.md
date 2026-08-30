@@ -117,7 +117,7 @@ A latest that could not be read offers nothing and says so: the pin carries `lat
 
 ```json
 { "name": "MaintenanceBump", "eventId": "<mt_bump.id>",
-  "payload": { "repository": "qits-ci", "group": "dependencies",
+  "payload": { "repository": "qits-ci-service", "group": "dependencies",
                "branch": "maintenance/dependencies", "baseRef": "main",
                "changes": [ {"ecosystem":"maven","manifestPath":"pom.xml",
                              "name":"eu.wohlben.qits:qits-eventstream",
