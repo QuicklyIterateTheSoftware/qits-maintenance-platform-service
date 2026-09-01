@@ -114,6 +114,12 @@ public class MaintenanceConfig {
    * every scan a round trip per dependency, and a registry that is briefly down would reclassify
    * half the inventory as external — which would then be looked up against Maven Central, where
    * {@code eu.wohlben.qits} does not exist, and every internal pin would report no latest at all.
+   *
+   * <p><b>A GITLINK is INTERNAL by construction and has no key.</b> A submodule is a repository on
+   * this platform's own git host — nothing else can be one — so there is no name rule to configure
+   * and no external half for the answer to be wrong about. A key for it would be a knob whose only
+   * correct setting is the default, and setting it would send gitlink pins to a registry that has
+   * never heard of a git repository.
    */
   public PinKind kindOf(eu.wohlben.qits.maintenance.model.Ecosystem ecosystem, String name) {
     if (name == null) {
@@ -125,6 +131,7 @@ public class MaintenanceConfig {
           case MAVEN -> matchesGroup(value);
           case NPM -> startsWithAny(value, internalNpmScopes, true);
           case DOCKER -> startsWithAny(value, internalImagePrefixes, false);
+          case GITLINK -> true;
         };
     return internal ? PinKind.INTERNAL : PinKind.EXTERNAL;
   }

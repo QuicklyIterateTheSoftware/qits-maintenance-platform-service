@@ -139,6 +139,12 @@ public class GitHostReader {
     return revision.replace("/", "%2F");
   }
 
+  /** One optional textual field of a tree entry, null when the host does not report it. */
+  private static String text(JsonNode entry, String field) {
+    JsonNode value = entry.get(field);
+    return value != null && value.isTextual() && !value.asText().isBlank() ? value.asText() : null;
+  }
+
   private static List<TreeLookup.TreeEntry> entries(JsonNode body) {
     List<TreeLookup.TreeEntry> entries = new ArrayList<>();
     if (body == null || !body.hasNonNull("entries") || !body.get("entries").isArray()) {
@@ -148,7 +154,14 @@ public class GitHostReader {
       JsonNode name = entry.get("name");
       JsonNode type = entry.get("type");
       if (name != null && name.isTextual() && type != null && type.isTextual()) {
-        entries.add(new TreeLookup.TreeEntry(name.asText(), type.asText()));
+        // `mode` and `sha` are OPTIONAL, and a host that answers neither is the shipped one: the
+        // two-field listing has been the contract since this reader was written. They are read
+        // rather than required so a git host that starts reporting them arms the gitlink half
+        // without a second release here — and so that until it does, no gitlink is pinned at a sha
+        // this service made up. See TreeLookup.TreeEntry.
+        entries.add(
+            new TreeLookup.TreeEntry(
+                name.asText(), type.asText(), text(entry, "mode"), text(entry, "sha")));
       }
     }
     return entries;

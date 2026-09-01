@@ -4,6 +4,7 @@ import eu.wohlben.qits.maintenance.catalog.CatalogEntry;
 import eu.wohlben.qits.maintenance.githost.FileLookup;
 import eu.wohlben.qits.maintenance.githost.GitHostReader;
 import eu.wohlben.qits.maintenance.githost.TreeLookup;
+import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.RepositoryStatus;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -14,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.jboss.logging.Logger;
 
@@ -34,6 +36,11 @@ import org.jboss.logging.Logger;
  * right; scanning it here would double every pin it holds and attribute the copy to the wrong
  * repository. The module walk refuses such a path outright, so a pom that ever named one still
  * cannot pull it in.
+ *
+ * <p><b>The gitlink ITSELF is a pin, and that is a different fact from what it contains.</b>
+ * {@code .gitmodules} plus the mode-{@code 160000} entry in the tree say which repository is
+ * embedded and at which commit — one line this repository owns and can move. Its contents belong to
+ * the submodule's own row, which is why the two never meet.
  */
 @ApplicationScoped
 public class ManifestScanner {
@@ -52,6 +59,13 @@ public class ManifestScanner {
 
   /** What PomParser writes as the location of a {@code <parent>} pin. */
   private static final String PARENT_LOCATION = "parent:";
+
+  /** A cap on the submodule walk. A wrapper repository declares dozens and nothing declares this
+   * many; the bound is what keeps one malformed file from being an unbounded read. */
+  private static final int MAX_GITLINKS = 128;
+
+  /** What a gitlink pin's location says: the path the {@code 160000} entry sits at. */
+  static final String GITLINK_LOCATION = "gitlink:";
 
   @Inject GitHostReader gitHost;
 
@@ -103,6 +117,7 @@ public class ManifestScanner {
     pins.addAll(mavenPins(project, name, headSha, root));
     pins.addAll(npmPins(project, name, headSha, root));
     pins.addAll(dockerPins(project, name, headSha, root));
+    pins.addAll(gitlinkPins(project, name, headSha, root));
     // ONE ROW PER LINE. Every module of a reactor names the same root property, and each one
     // produced a pin against the root pom above. They are one line and one change; without this
     // the payload would carry the same edit once per module and the commit message would repeat it.
@@ -246,6 +261,101 @@ public class ManifestScanner {
       if (file.found()) {
         pins.addAll(DockerParser.parse(entry.name(), file.content()));
       }
+    }
+    return pins;
+  }
+
+  /**
+   * Every submodule {@code .gitmodules} declares, pinned at the sha its gitlink records.
+   *
+   * <p><b>The file names the submodule; the TREE holds the version.</b> {@code .gitmodules} is a
+   * committed text file and carries a path, a url and nothing about what is checked out there — the
+   * commit a submodule is pinned at lives in the parent's tree, as a mode-{@code 160000} entry at
+   * that path. So this reads both: the file for the name (the url's basename) and the directory
+   * listing above the path for the sha.
+   *
+   * <p><b>A gitlink whose sha the git host does not report is SKIPPED, and that is the whole
+   * safety of this pass.</b> The tree route collapses every non-directory entry to {@code blob} and
+   * has never reported an object name, so on such a host this produces nothing at all — which is
+   * the honest answer. A pin recorded with a made-up version would be one the pending rule compares
+   * and the bump step then applies, into somebody else's repository.
+   *
+   * <p><b>A file that will not parse is not a CONFIG_ERROR.</b> {@code .config/qits/maintenance.yml}
+   * is this service's own configuration surface and a repository that writes it wrongly is told so
+   * on its row; {@code .gitmodules} is git's file, written by {@code git submodule add}, and a
+   * repository whose whole scan failed over one unreadable line in it would be this service
+   * claiming ownership of a format it does not own. Unreadable entries are dropped and the rest of
+   * the scan stands.
+   */
+  private List<ParsedPin> gitlinkPins(String project, String name, String sha, TreeLookup root) {
+    if (!root.hasBlob(GitmodulesParser.PATH)) {
+      return List.of();
+    }
+    FileLookup file = gitHost.blob(project, name, sha, GitmodulesParser.PATH);
+    if (!file.found()) {
+      return List.of();
+    }
+    List<GitmodulesParser.Submodule> modules = GitmodulesParser.parse(file.content());
+    if (modules.isEmpty()) {
+      return List.of();
+    }
+    // One listing per DIRECTORY, not per submodule: a wrapper repository declares dozens, and the
+    // ones sharing a parent share the read that answers for all of them.
+    Map<String, TreeLookup> listings = new LinkedHashMap<>();
+    List<ParsedPin> pins = new ArrayList<>();
+    List<String> unpinned = new ArrayList<>();
+    for (GitmodulesParser.Submodule module : modules) {
+      if (pins.size() >= MAX_GITLINKS) {
+        LOG.warnf(
+            "%s declares more than %d submodules; the rest of .gitmodules is not read",
+            name, MAX_GITLINKS);
+        break;
+      }
+      int slash = module.path().lastIndexOf('/');
+      String directory = slash < 0 ? "" : module.path().substring(0, slash);
+      String entryName = slash < 0 ? module.path() : module.path().substring(slash + 1);
+      TreeLookup listing =
+          directory.isEmpty()
+              ? root
+              : listings.computeIfAbsent(directory, path -> gitHost.tree(project, name, sha, path));
+      if (!listing.found()) {
+        LOG.debugf(
+            "%s declares the submodule %s at %s, which this revision does not list",
+            name, module.name(), module.path());
+        continue;
+      }
+      Optional<TreeLookup.TreeEntry> entry = listing.entry(entryName);
+      if (entry.isEmpty()) {
+        // Declared in the file and not present in the tree: an ordinary state for a submodule
+        // removed in a commit that left the section behind.
+        LOG.debugf(
+            "%s declares the submodule %s at %s, where the tree holds nothing",
+            name, module.name(), module.path());
+        continue;
+      }
+      String pinned = entry.get().isGitlink() ? entry.get().sha() : null;
+      if (pinned == null || pinned.isBlank()) {
+        // ONE line per repository rather than one per submodule: on a git host that reports no
+        // object names this is every submodule of every repository, every scan, and a wrapper
+        // declares dozens.
+        unpinned.add(module.name());
+        continue;
+      }
+      pins.add(
+          new ParsedPin(
+              Ecosystem.GITLINK,
+              module.path(),
+              module.name(),
+              pinned.trim(),
+              null,
+              GITLINK_LOCATION + module.path(),
+              false));
+    }
+    if (!unpinned.isEmpty()) {
+      LOG.warnf(
+          "%s declares %d submodule(s) the git host reports no gitlink sha for (%s);"
+              + " they are not inventoried",
+          name, unpinned.size(), String.join(", ", unpinned));
     }
     return pins;
   }

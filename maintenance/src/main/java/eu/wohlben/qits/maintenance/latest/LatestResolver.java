@@ -81,6 +81,12 @@ public class LatestResolver {
         case MAVEN -> maven(kind, name);
         case NPM -> npm(kind, name);
         case DOCKER -> docker(kind, name);
+        // Unreachable through a scan, which asks `resolvable` first. It is an answer rather than a
+        // throw because this method's whole contract is that nothing escapes it: a caller that
+        // forgets the gate gets one row's error column, not a dead scan.
+        case GITLINK ->
+            LatestLookup.failed(
+                null, "a gitlink has no registry; its latest arrives as SCMRelease on the bus");
       };
     } catch (RuntimeException e) {
       LOG.warnf("The latest of %s %s could not be looked up: %s", ecosystem.wireName(), name, e.toString());
@@ -93,9 +99,20 @@ public class LatestResolver {
    *
    * <p>A REACTOR or UNRESOLVED pin is never looked up: the first is this repository's own artifact
    * and the second has no name to address. External images are not ordered in v1.
+   *
+   * <p><b>A GITLINK is never looked up, and the daily scan therefore neither refreshes nor CLEARS
+   * one.</b> There is no registry to ask — a submodule is a git repository and nothing publishes
+   * it — so its {@code mt_latest} row has exactly one writer, {@code bus/ScmEventListener}, off the
+   * {@code SCMRelease} the frontend's own release publishes. Two consequences worth stating: a
+   * repository released before that listener was deployed has NO latest until its next release, and
+   * a scan will never write an {@code error} column over one, which is what keeps a bus-written row
+   * from being reset to "we could not find out" every night.
    */
   public boolean resolvable(Ecosystem ecosystem, PinKind kind) {
     if (!kind.actionable()) {
+      return false;
+    }
+    if (ecosystem == Ecosystem.GITLINK) {
       return false;
     }
     return ecosystem != Ecosystem.DOCKER || kind == PinKind.INTERNAL;

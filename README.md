@@ -8,7 +8,9 @@ is newest, groups the pending upgrades per each repository's own configuration, 
 apply one group as one branch. **This service decides *what* changes; a CI step applies them.**
 
 It replaces the 71 per-repository `.config/qits/ci-event-upstream-*.yml` hop files: those followed
-one internal release each, one branch per dependency, and force-pushed.
+one internal release each, one branch per dependency, and force-pushed. The fifteen
+`ci-event-upstream-frontend.yml` files are the same story one layer down — a service following its
+own SPA submodule — and they are what the `gitlink` ecosystem retires.
 
 The contract — routes, model, config keys, schedules and the bump payload — is pinned by
 `qits-maintenance-plan.md` in the qits-qits wrapper. Three repositories build against it.
@@ -43,6 +45,7 @@ path" identically, so the root tree at the same sha is what tells ABSENT from GO
 | `pom.xml` + the poms its `<modules>` name | maven | `dependencies`, `dependencyManagement`, `parent` | `property:<name>`, `dependency:<g>:<a>`, `parent:<g>:<a>` |
 | `package.json` + `package-lock.json` | npm | `dependencies`, `devDependencies` | `dependencies` / `devDependencies` |
 | `Dockerfile`, `*.Dockerfile` | docker | every `FROM <image>:<tag>` | `line:<n>` |
+| `.gitmodules` + the tree's `160000` entries | gitlink | every submodule | `gitlink:<path>` |
 
 `kind` says what can be done with a pin, which is not the same question as who published it:
 
@@ -53,10 +56,26 @@ path" identically, so the root tree at the same sha is what tells ABSENT from GO
 | `UNRESOLVED` | an expression this service could not resolve. Recorded so a person sees what the repository wrote. |
 
 `REACTOR` and `UNRESOLVED` pins are shown, and are never looked up, never pending and never in a
-bump payload.
+bump payload. **A gitlink is always `INTERNAL`, by construction rather than by a name rule** — a
+submodule is a repository on this platform's own git host and nothing else can be one, so there is
+no key to configure and no external half.
 
-Discovery is the repository ROOT plus the reactor, and nothing else. `service/src/main/webui` is a
-gitlink to the SPA's own repository, which the catalog lists in its own right.
+Discovery is the repository ROOT plus the reactor, and nothing else. `service/src/main/webui` is
+never *scanned*: it is a gitlink to the SPA's own repository, which the catalog lists in its own
+right. **The gitlink itself is a pin**, which is a different fact from what it contains — one line
+this repository owns and can move, where its contents belong to the submodule's own row.
+
+- **A gitlink's name is the URL's basename**, `qits-artifacts-frontend`, not the `[submodule "..."]`
+  entry's: a rename leaves the section behind and the url is what a clone resolves. Both spellings on
+  this platform give the same answer — the wrapper writes them relative, the service repositories
+  absolute.
+- **A gitlink's version is a COMMIT SHA**, read from the mode-`160000` entry in the tree rather than
+  from `.gitmodules`, which names a submodule and never its version. A git host that does not report
+  that sha yields **no gitlink pin at all** rather than one at a guessed version — see *Rollout
+  needs*.
+- **An unparseable `.gitmodules` is not `CONFIG_ERROR`.** That status is for
+  `.config/qits/maintenance.yml`, this service's own configuration surface. `.gitmodules` is git's
+  file: what parses is used and the rest is dropped.
 
 **The whole reactor is read before any of it is parsed**, because two of the rules below cannot be
 answered from a single pom.
@@ -126,6 +145,14 @@ sitting in it would — by rule 2 — hide three stable upgrades from everyone.
 A latest that could not be read offers nothing and says so: the pin carries `latestError`, because
 "we could not find out" must not look like a green tick.
 
+**Neither rule reaches a `gitlink`, and forcing one would be arithmetic on a hash.** A gitlink pin is
+a commit sha, which no order ranks and which is neither a release nor a prerelease. So the question
+is the only one that can be asked honestly — *is the submodule pinned at the commit the newest
+release was cut from* — and **both shas have to be known** for the answer to be no: `mt_latest`
+carries the release's commit in `source_url` as `sha:<hex>`, and a row without one offers nothing.
+The change's `to` is then the calver **version** (the step fetches `refs/tags/<to>`) while its `from`
+is the sha the tree holds now.
+
 ## The bump
 
 **Two callers ask for one: a person, and the clock.** `POST
@@ -154,8 +181,10 @@ release request and one release — not five of each. That is the whole of the s
                              "location":"property:qits.eventstream.version"} ] } }
 ```
 
-`location` is honoured for maven only; npm edits whichever section holds the entry and docker
-anchors on the image name. It is sent anyway. `from` is never a precondition — a manifest already at
+`location` is honoured for maven only; npm edits whichever section holds the entry, docker anchors on
+the image name, and gitlink restates the path. It is sent anyway. **A gitlink change is the one whose
+`manifestPath` names no file**: it is the directory the submodule sits at, and the step writes a
+`160000` index entry there after fetching the tag from the sibling repository its `name` addresses. `from` is never a precondition — a manifest already at
 `to` is a quiet no-op. Every value is validated on this side against what the step enforces, so a
 bad payload is a sentence on the bump row rather than a step log somebody has to read.
 
@@ -235,7 +264,7 @@ where v1 waited up to six hours for a poll.
 | listener | `consumerId` (storage — never change it) | events | what it does |
 |---|---|---|---|
 | `bus/SoftwareReleaseListener` | `maintenance-internal-latest` | `SoftwareRelease` (qits-ci) | moves `mt_latest` **forward only**, so every pin of that dependency is pending the moment the package is in the registry |
-| `bus/ScmEventListener` | `maintenance-branch-tracking` | `SCMRelease` (qits-workspaces), `SCMDeleteBranch`, `SCMPublishCommit` (qits-githost) | writes a maintenance branch's state, and re-reads one repository's manifests after a push to its main branch |
+| `bus/ScmEventListener` | `maintenance-branch-tracking` | `SCMRelease` (qits-workspaces), `SCMDeleteBranch`, `SCMPublishCommit` (qits-githost) | writes a maintenance branch's state, records every release as the latest of a **gitlink**, and re-reads one repository's manifests after a push to its main branch |
 
 - **`SoftwareRelease` is the only writer of `mt_latest` that moves it forward only**, and that is the
   difference between an announcement and a poll. A poll ASKS a registry what the newest version is
@@ -245,6 +274,18 @@ where v1 waited up to six hours for a poll.
   that dependency as up to date until the next scan. `packageName` joins `mt_pin`'s naming directly:
   maven `g:a`, npm `@scope/name`, docker `qits/<name>`. `daemon` and `docs` releases settle — they
   are real facts and nothing pins them.
+- **`SCMRelease` is also the ONLY source of a gitlink's latest.** There is no registry to poll — a
+  submodule is a git repository and nothing publishes one — so the daily scan neither fills that row
+  nor clears it, and `LatestResolver.resolvable` refuses the ecosystem outright. Every release is
+  recorded, not only those of repositories something pins today: the gate would be wrong in the one
+  direction that costs, leaving a repository that grew a submodule between two releases with no
+  latest for weeks. Two facts are written — the calver `version`, which is what the step fetches as
+  `refs/tags/<version>`, and the **commit that tag resolves to**, carried in `source_url` as
+  `sha:<hex>`. The tag is read from the git host rather than correlated with the `SCMPublishCommit`
+  a moment earlier: a release is an atomic push of the branch and its tag, so one read answers it,
+  while pairing two publishers' frames by repository and time is wrong exactly when two releases are
+  close together. A tag the git host does not hold is settled; a git host that cannot be *asked* is
+  thrown, because nothing else ever writes this row.
 - **`SCMRelease` is the only thing that can ever write `BranchState.RELEASED`.** The release is
   qits-workspaces' door: it tags, pushes, and deletes the source branch. Polling would see the branch
   disappear, which is indistinguishable from a person deleting it by hand — only the door knows a
@@ -505,6 +546,16 @@ claim is not optional — it is a route this service cannot use without it.
 In `qits-configuration` / `.qits-bootstrap.env` terms that is a client with
 `_ROLES` carrying `qits:system,qits-platform:system` (unchanged), `_CLAIMS_PROJECT: "*"`, and
 `_AUDIENCES` listing the four services above.
+
+**Gitlinks need the git host to report a tree entry's sha, and today it does not.** `GET
+/git/<project>/<repo>/tree/<rev>[/<path>]` answers `{"entries":[{"name","type"}]}` and collapses
+every non-directory entry to `blob` — a symlink and a submodule alike — with no `mode` and no object
+name anywhere, and `blob`/`tree` of a gitlink path both 404. So a submodule's pinned commit cannot be
+read at all: this service reads `mode` and `sha` off a tree entry when they are there and pins
+**nothing** when they are not, which is why the whole gitlink half is inert until qits-githost's
+`GitHostRoutes.serveTree` adds them. Additive is enough — an extra `"sha"` on every entry and either
+`"mode":"160000"` or `"type":"commit"` for a gitlink; both spellings are accepted here. Until then
+the fifteen `ci-event-upstream-frontend.yml` hop files still do the work and nothing is lost.
 
 **The wrapper needs `.config/qits/ci-platform-event-maintenance-bump.yml`** — the platform-level
 pipeline that answers `MaintenanceBump` — and a qits-ci release carrying platform pipelines. Until

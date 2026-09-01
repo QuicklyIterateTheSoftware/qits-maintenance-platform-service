@@ -5,7 +5,12 @@ import eu.wohlben.qits.eventstream.control.CanonicalJson;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
+import eu.wohlben.qits.maintenance.githost.FileLookup;
+import eu.wohlben.qits.maintenance.githost.GitHostReader;
+import eu.wohlben.qits.maintenance.githost.TreeLookup;
+import eu.wohlben.qits.maintenance.latest.GitlinkSha;
 import eu.wohlben.qits.maintenance.model.BranchState;
+import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.ScanScope;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
 import eu.wohlben.qits.maintenance.scan.ScanService;
@@ -26,8 +31,11 @@ import org.jboss.logging.Logger;
  *   <caption>The three events and what each one moves</caption>
  *   <tr><th>event</th><th>publisher</th><th>what it means here</th></tr>
  *   <tr><td>{@code SCMRelease}</td><td>qits-workspaces</td>
- *       <td>a {@code maintenance/<group>} branch went through the release door — the branch row
- *           becomes RELEASED, which nothing else on the platform could ever tell this service</td></tr>
+ *       <td>TWO things. A {@code maintenance/<group>} branch went through the release door — the
+ *           branch row becomes RELEASED, which nothing else on the platform could ever tell this
+ *           service. And, whatever the branch was, a repository has a new released commit, so every
+ *           GITLINK pinned at it has somewhere to move: {@code mt_latest} is written with the
+ *           version and the sha its tag resolves to</td></tr>
  *   <tr><td>{@code SCMDeleteBranch}</td><td>qits-githost</td>
  *       <td>a {@code maintenance/<group>} branch is gone — the branch row becomes NONE, so the next
  *           bump starts fresh from main</td></tr>
@@ -125,6 +133,15 @@ public class ScmEventListener implements QitsDurableEventListener {
   static final String BRANCH_PREFIX = "maintenance/";
 
   /**
+   * A release's tag, spelled in full.
+   *
+   * <p>Fully qualified rather than bare: git's own ref search would try {@code refs/<version>} and
+   * a branch of that name before it reached the tag, and a release version is exactly the kind of
+   * string somebody once made a branch out of.
+   */
+  static final String TAG_PREFIX = "refs/tags/";
+
+  /**
    * The {@code SCMRelease} fields this listener consumes, transcribed from qits-workspaces'
    * {@code workspaces-events/…/SCMRelease.java}.
    *
@@ -169,6 +186,14 @@ public class ScmEventListener implements QitsDurableEventListener {
 
   @Inject ScanService scans;
 
+  /**
+   * The git host, for one question only: which commit does a released tag name?
+   *
+   * <p>It is the same reader every scan resolves a head with, so a released tag is read exactly the
+   * way a branch is — one tree of the root, and the {@code Git-Commit-Sha} the answer carries.
+   */
+  @Inject GitHostReader gitHost;
+
   @Override
   public String consumerId() {
     return CONSUMER_ID;
@@ -194,12 +219,22 @@ public class ScmEventListener implements QitsDurableEventListener {
 
   // --- SCMRelease -----------------------------------------------------------------------------
 
-  /** A maintenance branch went through the release door. */
+  /** A maintenance branch went through the release door — and, whatever branch it was, a gitlink's
+   * latest. */
   private void onRelease(EventFrame frame) {
     ScmReleasePayload release = decode(frame, ScmReleasePayload.class);
     if (release == null) {
       return;
     }
+    onMaintenanceBranchReleased(frame, release);
+    // AFTER the branch row, and on EVERY release rather than only a maintenance one: the branch
+    // write is this listener's first duty and must not be lost to a git host that will not answer
+    // the second. Both writes are idempotent, so a redelivery caused by the read below replays the
+    // first harmlessly.
+    onGitlinkReleased(frame, release);
+  }
+
+  private void onMaintenanceBranchReleased(EventFrame frame, ScmReleasePayload release) {
     String branch = trimmed(release.branch());
     if (branch == null || !branch.startsWith(BRANCH_PREFIX)) {
       // The ordinary case by a long way: every release of every repository on the platform rides
@@ -209,12 +244,9 @@ public class ScmEventListener implements QitsDurableEventListener {
           frame.name(), frame.id(), release.branch());
       return;
     }
-    String repository = trimmed(release.repositoryName());
-    if (repository == null) {
-      // The registry answered with no name. The id is the same string for a manifest repository,
-      // which is what makes the fallback worth having rather than a refusal.
-      repository = trimmed(release.repository());
-    }
+    // The registry may answer with no name. The id is the same string for a manifest repository,
+    // which is what makes the fallback worth having rather than a refusal.
+    String repository = repositoryName(release);
     String group = branch.substring(BRANCH_PREFIX.length());
     Optional<MtGroup> known = group(repository, group);
     if (known.isEmpty()) {
@@ -232,6 +264,104 @@ public class ScmEventListener implements QitsDurableEventListener {
     LOG.infof(
         "%s %s released %s of %s as %s; the branch row is RELEASED",
         frame.name(), frame.id(), branch, repository, release.version());
+  }
+
+  // --- SCMRelease, the gitlink half -----------------------------------------------------------
+
+  /**
+   * <b>A repository was released, so every gitlink pointing at it has a newer commit to move to.</b>
+   *
+   * <p>This is the whole of "what is the latest" for {@link Ecosystem#GITLINK}: there is no registry
+   * to poll — a submodule is a git repository and nothing publishes one — so the daily scan neither
+   * fills this row nor clears it, and {@code LatestResolver.resolvable} refuses the ecosystem
+   * outright. It replaces the fifteen per-repository {@code ci-event-upstream-frontend.yml} hop
+   * files, each of which watched exactly one sibling's {@code SCMRelease} and force-pushed a branch
+   * of its own.
+   *
+   * <p><b>It records for EVERY release, not only for repositories something pins today.</b> The
+   * gate would be a read of {@code mt_pin}, and it would be wrong in the one direction that costs:
+   * a repository that grows a submodule between two releases would have no latest at all until the
+   * sibling released again, which on a frontend is weeks. A row per released repository is a
+   * hundred rows.
+   *
+   * <p><b>Two facts are stored and the second is the load-bearing one.</b> {@code latest} is the
+   * calver version — what the bump step fetches, {@code refs/tags/<version>} — and {@code
+   * source_url} carries the COMMIT that tag resolves to, as {@code sha:<hex>}. Without the sha
+   * there is nothing to compare a gitlink pin against: a pin is a commit and a release is a name,
+   * and the pending rule refuses to guess across that gap.
+   *
+   * <p><b>The tag is resolved rather than correlated with a push.</b> A release is an atomic
+   * push of the default branch and its tag and the {@code SCMRelease} is published after it, so the
+   * tag is there when this frame arrives; reading it is one call whose answer is the release's own
+   * commit. The alternative — remembering the {@code SCMPublishCommit} that came past a moment
+   * earlier and pairing it up by repository and time — is a correlation over two publishers'
+   * clocks, and it is wrong exactly when two releases of one repository are close together.
+   *
+   * <p><b>The failure split is the seam's.</b> A git host that cannot be ASKED is retryable, so it
+   * is thrown and the frame stays owed; a tag the git host does not HOLD is poison — the same
+   * question has the same answer for ever — so it is a WARN and a return.
+   */
+  private void onGitlinkReleased(EventFrame frame, ScmReleasePayload release) {
+    String repository = repositoryName(release);
+    String version = trimmed(release.version());
+    if (repository == null || version == null) {
+      LOG.debugf(
+          "%s %s names no (repository, version) to record a gitlink latest under",
+          frame.name(), frame.id());
+      return;
+    }
+    // The inventory's own project first: it is the value every other read of this repository is
+    // addressed with. The payload's is the fallback for a repository no scan has reached yet.
+    String project =
+        store.repository(repository).map(row -> row.project).orElse(trimmed(release.projectId()));
+    if (project == null) {
+      LOG.debugf(
+          "%s %s released %s under no project this service can address",
+          frame.name(), frame.id(), repository);
+      return;
+    }
+    TreeLookup tag = gitHost.head(project, repository, TAG_PREFIX + version);
+    if (tag.status() == FileLookup.Status.UNREACHABLE) {
+      // Retryable, and thrown on purpose: the claim rolls back and the next sweep offers this
+      // release again, which is the only thing that can recover a latest nothing else ever writes.
+      throw new IllegalStateException(
+          "the git host could not resolve " + repository + " " + version + ": " + tag.message());
+    }
+    if (!tag.found() || tag.headSha() == null || tag.headSha().isBlank()) {
+      LOG.warnf(
+          "%s %s released %s %s, which the git host does not hold as a tag; no gitlink latest is"
+              + " recorded",
+          frame.name(), frame.id(), repository, version);
+      return;
+    }
+    boolean moved =
+        store.recordLatestIfNewer(
+            Ecosystem.GITLINK,
+            repository,
+            version,
+            GitlinkSha.of(tag.headSha()),
+            Instant.now());
+    if (moved) {
+      LOG.infof(
+          "%s %s moved the latest gitlink %s to %s (%s)",
+          frame.name(), frame.id(), repository, version, tag.headSha());
+    } else {
+      LOG.debugf(
+          "%s %s announced %s at %s, which is not newer than the gitlink latest recorded",
+          frame.name(), frame.id(), repository, version);
+    }
+  }
+
+  /**
+   * The repository a release names.
+   *
+   * <p>{@code repositoryName} is the coordinate this service is keyed by; {@code repository} is the
+   * registry's row id, which for a repository the platform manifest declares is the same string.
+   * The same tolerance the branch half carries, in one place because both halves need it.
+   */
+  private static String repositoryName(ScmReleasePayload release) {
+    String name = trimmed(release.repositoryName());
+    return name == null ? trimmed(release.repository()) : name;
   }
 
   // --- SCMDeleteBranch ------------------------------------------------------------------------

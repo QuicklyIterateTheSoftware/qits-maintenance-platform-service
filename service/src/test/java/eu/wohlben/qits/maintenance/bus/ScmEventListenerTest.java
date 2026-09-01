@@ -11,9 +11,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.maintenance.entity.MtBranch;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
+import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
+import eu.wohlben.qits.maintenance.githost.GitHostReader;
+import eu.wohlben.qits.maintenance.githost.TreeLookup;
+import eu.wohlben.qits.maintenance.latest.GitlinkSha;
+import eu.wohlben.qits.maintenance.latest.VersionOrder;
 import eu.wohlben.qits.maintenance.model.BranchState;
+import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.ScanScope;
+import eu.wohlben.qits.maintenance.pending.PendingChanges;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
 import eu.wohlben.qits.maintenance.scan.ScanService;
 import eu.wohlben.qits.maintenance.scan.ScanTrigger;
@@ -128,6 +135,52 @@ class ScmEventListenerTest {
     MtBranch branchRow(String repository, String group) {
       return branches.get(repository + "/" + group);
     }
+
+    /** {@code mt_latest}, as the forward-only writer sees it: a version and its provenance. */
+    final Map<String, MtLatest> latest = new LinkedHashMap<>();
+
+    @Override
+    public boolean recordLatestIfNewer(
+        Ecosystem ecosystem, String name, String version, String sourceUrl, Instant now) {
+      String key = PendingChanges.key(ecosystem.wireName(), name);
+      MtLatest row = latest.get(key);
+      if (row != null && row.latest != null && !VersionOrder.newer(ecosystem, row.latest, version)) {
+        return false;
+      }
+      MtLatest written = new MtLatest();
+      written.ecosystem = ecosystem.wireName();
+      written.name = name;
+      written.latest = version;
+      written.sourceUrl = sourceUrl;
+      written.checkedAt = now;
+      latest.put(key, written);
+      return true;
+    }
+
+    MtLatest latestRow(Ecosystem ecosystem, String name) {
+      return latest.get(PendingChanges.key(ecosystem.wireName(), name));
+    }
+  }
+
+  /** A git host answering one question: which commit does this revision name? */
+  private static final class RecordingGitHost extends GitHostReader {
+
+    final List<String> asked = new ArrayList<>();
+    final Map<String, TreeLookup> answers = new LinkedHashMap<>();
+
+    void holds(String repository, String revision, String sha) {
+      answers.put(repository + " " + revision, TreeLookup.found(sha, List.of()));
+    }
+
+    void unreachable(String repository, String revision) {
+      answers.put(repository + " " + revision, TreeLookup.unreachable("the git host is not there"));
+    }
+
+    @Override
+    public TreeLookup head(String project, String repository, String revision) {
+      asked.add(project + "/" + repository + " " + revision);
+      return answers.getOrDefault(repository + " " + revision, TreeLookup.gone());
+    }
   }
 
   /** A scan service that records the request instead of opening a row and queueing work. */
@@ -147,14 +200,17 @@ class ScmEventListenerTest {
   private ScmEventListener listener;
   private RecordingStore store;
   private RecordingScans scans;
+  private RecordingGitHost gitHost;
 
   @BeforeEach
   void setUp() {
     store = new RecordingStore();
     scans = new RecordingScans();
+    gitHost = new RecordingGitHost();
     listener = new ScmEventListener();
     listener.store = store;
     listener.scans = scans;
+    listener.gitHost = gitHost;
     store.repository(REPOSITORY, MAIN, GROUP, "external");
   }
 
@@ -226,6 +282,101 @@ class ScmEventListenerTest {
     released(REPOSITORY, "maintenance/a-group-this-repository-does-not-have");
 
     assertTrue(store.branches.isEmpty());
+  }
+
+  // --- the gitlink latest -----------------------------------------------------------------------
+
+  private static final String FRONTEND = "qits-artifacts-frontend";
+  private static final String VERSION = "2026.901.1";
+  private static final String RELEASE_SHA = "0011223344556677889900aabbccddeeff001122";
+
+  private void released(String repository, String branch, String version) {
+    listener.onFrame(frame("SCMRelease", scmReleasePayload(repository, branch, version)));
+  }
+
+  /**
+   * THE HOP FILES' REPLACEMENT. A frontend releases on its own main branch — no maintenance branch
+   * anywhere in it — and every gitlink pinned at that repository now has somewhere to move.
+   */
+  @Test
+  void anyReleaseRecordsTheGitlinkLatestWithTheCommitItsTagResolvesTo() {
+    gitHost.holds(FRONTEND, "refs/tags/" + VERSION, RELEASE_SHA);
+
+    released(FRONTEND, MAIN, VERSION);
+
+    MtLatest row = store.latestRow(Ecosystem.GITLINK, FRONTEND);
+    assertEquals(VERSION, row.latest, "the version is what the bump step fetches as a tag");
+    assertEquals(
+        RELEASE_SHA,
+        GitlinkSha.read(row.sourceUrl).orElseThrow(),
+        "and the sha is what the pending rule compares a pin against");
+    assertEquals(
+        List.of("qits/" + FRONTEND + " refs/tags/" + VERSION),
+        gitHost.asked,
+        "the tag is spelled in full, so no branch of that name can answer for it");
+  }
+
+  /** Both halves of a release run, and the branch row is the one that must not be lost. */
+  @Test
+  void aMaintenanceBranchReleaseWritesTheBranchRowAndTheGitlinkLatest() {
+    store.branch(REPOSITORY, GROUP, BranchState.PUSHED, "abc1234");
+    gitHost.holds(REPOSITORY, "refs/tags/" + VERSION, RELEASE_SHA);
+
+    released(REPOSITORY, BRANCH, VERSION);
+
+    assertEquals(BranchState.RELEASED.name(), store.branchRow(REPOSITORY, GROUP).state);
+    assertEquals(VERSION, store.latestRow(Ecosystem.GITLINK, REPOSITORY).latest);
+  }
+
+  /**
+   * A tag the git host does not hold is POISON — the same question has the same answer for ever —
+   * so it is settled rather than left owed.
+   */
+  @Test
+  void aReleaseWhoseTagTheGitHostDoesNotHoldRecordsNothingAndIsSettled() {
+    released(FRONTEND, MAIN, VERSION);
+
+    assertNull(store.latestRow(Ecosystem.GITLINK, FRONTEND));
+  }
+
+  /**
+   * A git host that cannot be ASKED is retryable, and it is the only thing that can recover a
+   * latest nothing else ever writes — no scan refreshes a gitlink.
+   */
+  @Test
+  void aGitHostThatWillNotAnswerIsLeftToThrowSoTheReleaseStaysOwed() {
+    gitHost.unreachable(FRONTEND, "refs/tags/" + VERSION);
+
+    assertThrows(IllegalStateException.class, () -> released(FRONTEND, MAIN, VERSION));
+  }
+
+  /** The bus's write is forward-only, gitlinks included: a catch-up frame rewinds nothing. */
+  @Test
+  void anOlderReleaseArrivingLateDoesNotRewindTheGitlinkLatest() {
+    gitHost.holds(FRONTEND, "refs/tags/2026.902.1", RELEASE_SHA);
+    gitHost.holds(FRONTEND, "refs/tags/2026.801.1", "cccccccccccccccccccccccccccccccccccccccc");
+
+    released(FRONTEND, MAIN, "2026.902.1");
+    released(FRONTEND, MAIN, "2026.801.1");
+
+    MtLatest row = store.latestRow(Ecosystem.GITLINK, FRONTEND);
+    assertEquals("2026.902.1", row.latest);
+    assertEquals(RELEASE_SHA, GitlinkSha.read(row.sourceUrl).orElseThrow());
+  }
+
+  /**
+   * A repository no scan has reached has no {@code mt_repository} row to take a project from, and
+   * the payload's own is the fallback — otherwise the first release of a new repository would be
+   * the one that could not be recorded.
+   */
+  @Test
+  void aRepositoryTheInventoryDoesNotHoldIsAddressedByThePayloadsProject() {
+    gitHost.holds(FRONTEND, "refs/tags/" + VERSION, RELEASE_SHA);
+
+    released(FRONTEND, MAIN, VERSION);
+
+    assertEquals(List.of("qits/" + FRONTEND + " refs/tags/" + VERSION), gitHost.asked);
+    assertEquals(VERSION, store.latestRow(Ecosystem.GITLINK, FRONTEND).latest);
   }
 
   // --- the push ---------------------------------------------------------------------------------

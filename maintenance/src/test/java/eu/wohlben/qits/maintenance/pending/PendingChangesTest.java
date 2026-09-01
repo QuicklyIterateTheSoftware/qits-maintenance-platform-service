@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.maintenance.entity.MtGroup;
+import eu.wohlben.qits.maintenance.latest.GitlinkSha;
 import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
@@ -290,6 +291,98 @@ class PendingChangesTest {
   void everyDeclaredGroupIsCountedEvenAtZero() {
     Map<String, Integer> counts = PendingChanges.countByGroup(List.of(), Map.of(), GROUPS);
     assertEquals(Map.of("angular", 0, "dependencies", 0), counts);
+  }
+
+  // --- gitlinks: a difference between two shas, never a comparison of two versions ---------------
+
+  private static final String PINNED_SHA = "aa11bb22cc33dd44ee55ff6677889900aabbccdd";
+  private static final String RELEASED_SHA = "0011223344556677889900aabbccddeeff001122";
+
+  private static MtPin gitlinkPin(String sha) {
+    MtPin pin = pin(Ecosystem.GITLINK, "qits-artifacts-frontend", sha, "service/src/main/webui");
+    pin.location = "gitlink:service/src/main/webui";
+    return pin;
+  }
+
+  private static MtLatest gitlinkLatest(String version, String sourceUrl) {
+    MtLatest row = latest(Ecosystem.GITLINK, "qits-artifacts-frontend", version);
+    row.sourceUrl = sourceUrl;
+    return row;
+  }
+
+  /**
+   * The whole gitlink rule: the submodule is pinned at a commit that is not the one the newest
+   * release was cut from, so it moves — and it moves to the VERSION, because the step fetches a tag.
+   */
+  @Test
+  void aGitlinkPinnedAtAnotherCommitThanTheReleaseIsPendingAtTheVersion() {
+    Map<String, MtLatest> latest =
+        PendingChanges.index(
+            List.of(gitlinkLatest("2026.901.1", GitlinkSha.of(RELEASED_SHA))));
+
+    List<PendingChanges.Pending> pending =
+        PendingChanges.of(List.of(gitlinkPin(PINNED_SHA)), latest, SPLIT);
+
+    assertEquals(1, pending.size());
+    assertEquals("dependencies", pending.get(0).group(), "a gitlink is INTERNAL, so it rides the internal half");
+    Change change = pending.get(0).change();
+    assertEquals("gitlink", change.ecosystem());
+    assertEquals(PINNED_SHA, change.from(), "from is the commit the tree holds now");
+    assertEquals("2026.901.1", change.to(), "to is the tag the step fetches, not a sha");
+    assertEquals("service/src/main/webui", change.manifestPath());
+  }
+
+  @Test
+  void aGitlinkAlreadyAtTheReleasesCommitIsNotPending() {
+    Map<String, MtLatest> latest =
+        PendingChanges.index(List.of(gitlinkLatest("2026.901.1", GitlinkSha.of(PINNED_SHA))));
+
+    assertTrue(PendingChanges.of(List.of(gitlinkPin(PINNED_SHA)), latest, SPLIT).isEmpty());
+  }
+
+  /**
+   * A release nothing could tie to a commit offers NOTHING. The version alone would be a guess, and
+   * the step would move the gitlink to a commit this service never compared.
+   */
+  @Test
+  void aGitlinkLatestCarryingNoShaOffersNothing() {
+    Map<String, MtLatest> noSha = PendingChanges.index(List.of(gitlinkLatest("2026.901.1", null)));
+    Map<String, MtLatest> otherWriter =
+        PendingChanges.index(List.of(gitlinkLatest("2026.901.1", "http://a-registry/somewhere")));
+    Map<String, MtLatest> notHex =
+        PendingChanges.index(List.of(gitlinkLatest("2026.901.1", "sha:not-a-commit")));
+
+    assertTrue(PendingChanges.of(List.of(gitlinkPin(PINNED_SHA)), noSha, SPLIT).isEmpty());
+    assertTrue(PendingChanges.of(List.of(gitlinkPin(PINNED_SHA)), otherWriter, SPLIT).isEmpty());
+    assertTrue(PendingChanges.of(List.of(gitlinkPin(PINNED_SHA)), notHex, SPLIT).isEmpty());
+  }
+
+  /**
+   * NEITHER OF THE TWO VERSION RULES REACHES A GITLINK, and this is what would break if one did: a
+   * sha reading as a lower "version" than another would make an up-to-date submodule look behind
+   * for ever, and a release version's shape would decide whether a commit is a prerelease.
+   */
+  @Test
+  void theShaComparisonIsADifferenceAndNotAnOrder() {
+    // ff… would rank ABOVE 00… in every version order there is, and 00… below it. Both are pending,
+    // because both differ from the released commit; neither is "older".
+    Map<String, MtLatest> latest =
+        PendingChanges.index(List.of(gitlinkLatest("2026.901.1", GitlinkSha.of(RELEASED_SHA))));
+    String high = "ff" + PINNED_SHA.substring(2);
+    String low = "00" + PINNED_SHA.substring(2);
+
+    assertEquals(1, PendingChanges.of(List.of(gitlinkPin(high)), latest, SPLIT).size());
+    assertEquals(1, PendingChanges.of(List.of(gitlinkPin(low)), latest, SPLIT).size());
+  }
+
+  /** An abbreviation is git's own way of naming the same commit, and it is not a difference. */
+  @Test
+  void anAbbreviatedShaIsTheSameCommit() {
+    Map<String, MtLatest> latest =
+        PendingChanges.index(
+            List.of(gitlinkLatest("2026.901.1", GitlinkSha.of(PINNED_SHA.substring(0, 12)))));
+
+    assertTrue(PendingChanges.of(List.of(gitlinkPin(PINNED_SHA)), latest, SPLIT).isEmpty());
   }
 
   @Test

@@ -47,6 +47,10 @@ adds it. See "The event bus".
 repository is readable in one call. A scan that read manifests at `main` would produce an inventory
 of whatever moved while it ran — pins that correspond to no commit that ever existed.
 
+**A tree entry carries a name, a type and — where the host reports them — a mode and a sha.** The
+last two are optional and absent on the deployed git host, which is what makes a gitlink readable in
+principle and unpinnable in practice. Read them; never require them; never substitute for them.
+
 **A 404 is not an answer until it has been asked twice.** The git host spells "no such revision" and
 "no such path" the same way, so a 404 on a file is followed by the root tree at the same sha:
 answered means ABSENT, 404 means GONE. The five-outcome vocabulary is qits-ci's
@@ -55,7 +59,8 @@ answered means ABSENT, 404 means GONE. The five-outcome vocabulary is qits-ci's
 **Discovery is the ROOT plus the reactor and nothing else.** A recursive walk would read every
 vendored file in every repository on the platform for a handful of pins, and it would pull in
 `service/src/main/webui` — a gitlink to an SPA's own repository, which the catalog lists in its own
-right. The module walk refuses any path containing `src/main/webui` outright.
+right. The module walk refuses any path containing `src/main/webui` outright. The gitlink ITSELF is
+a pin — see GITLINK under "Parsers" — and that is a different fact from what it contains.
 
 **Nothing over the wire throws.** A scan reads every repository in the catalog; one unreachable git
 host must cost one row's status, not the run. Every failure comes back as a `PeerAnswer` carrying
@@ -103,7 +108,28 @@ every page it appears on.
 **Adding an ecosystem is a parser, a resolver and a pipeline step together.** Two of the three is a
 column that fills up and never moves.
 
+**GITLINK is the fourth, and its "resolver" is the BUS.** `manifest/GitmodulesParser` reads
+`.gitmodules` for a submodule's path and — off the URL's basename, never the `[submodule "..."]`
+entry — its repository name; the VERSION is the mode-`160000` entry the tree carries at that path,
+because `.gitmodules` names a submodule and never its version. There is no registry to poll, so
+`LatestResolver.resolvable` refuses the ecosystem and `bus/ScmEventListener` is the only writer of
+its `mt_latest` row. `kindOf` hardcodes INTERNAL: a submodule is a repository on this platform's own
+git host, so a config key for it would be a knob whose only correct setting is the default.
+
+**And the git host does not report a tree entry's sha today**, so the whole half is inert on the
+deployed one: `serveTree` answers `name` and a two-valued `type` and collapses a gitlink to `blob`.
+`GitHostReader` reads an optional `mode`/`sha` when they are there; `ManifestScanner` pins nothing
+when they are not, which is deliberate — a made-up version here is compared by the pending rule and
+then applied by the step, into somebody else's repository. `ManifestScannerTest` pins both arms.
+
 ## Versions
+
+**A GITLINK PIN HAS NO ORDER AT ALL, and that is the one to get right.** It is a commit sha; nothing
+ranks two of those, and maven's order would happily call one "newer" by reading the leading hex as
+digits. `pending/PendingChanges.gitlink` therefore asks a DIFFERENCE — is the pin the commit the
+newest release was cut from — over `latest/GitlinkSha`, and refuses to answer when either half is
+missing. What *is* ordered is the gitlink's `mt_latest.latest`, a calver release version, which rides
+maven's order so `recordLatestIfNewer` stays forward-only.
 
 **Three orders, because three ecosystems disagree.** Maven's is `ComparableVersion` — the class a
 resolver ranks with, so this service and a build agree. npm's is real semver, which ranks
@@ -280,9 +306,11 @@ shared instance field (a static one is the native-image hazard), the shipped `ca
 forward-auth pair, the optional bearer, the response bound — and `FakePeers`, which is how the whole
 suite replaces the network.
 
-**No `mt_artifact` row is ever a `daemon`.** Daemon SBOMs exist upstream; `Ecosystem` has three
-constants because three manifests pin three things, and nothing this service parses pins a daemon.
-`SoftwareReleaseListener.ECOSYSTEMS` is where the type is filtered out, one step before either write.
+**No `mt_artifact` row is ever a `daemon` or a `gitlink`.** Daemon SBOMs exist upstream; a gitlink is
+a submodule rather than a published package and no release announces one as its `packageType`.
+`SoftwareReleaseListener.ECOSYSTEMS` maps the three qits-ci publishes and is where everything else is
+filtered out, one step before either write — GITLINK reaches `mt_latest` through the OTHER listener,
+off the same `SCMRelease` a branch's state is read from.
 
 ## The event bus
 
@@ -305,6 +333,13 @@ subscribes and publishes nothing.**
   morning's scan filled, and every pin of that dependency would read as up to date until the next
   scan. The guard is `VersionOrder`'s, the same comparison the pending rule makes. A frame that is not
   newer writes **nothing at all**, `checked_at` included: stamping it would say a lookup happened.
+- **`SCMRelease` does TWO things now, and the branch row is the one that must not be lost.** Beside
+  the maintenance-branch state it records every release as the latest of a GITLINK — the version, and
+  the commit `refs/tags/<version>` resolves to, in `source_url` as `sha:<hex>`. The gitlink half runs
+  **after** the branch write and on every release whatever the branch was; both writes are
+  idempotent, so the redelivery an unreachable git host causes replays the first harmlessly. The
+  failure split is the seam's: a tag the host does not HOLD is poison (WARN, settle), a host that
+  cannot be ASKED is retryable and thrown, because no scan ever refreshes this row.
 - **`BranchState.RELEASED` is only ever written from an event, and it could not be written any other
   way.** The release is qits-workspaces' door — it tags, pushes and deletes the source branch — so
   polling sees a branch disappear, which is exactly what a person deleting it by hand looks like. The

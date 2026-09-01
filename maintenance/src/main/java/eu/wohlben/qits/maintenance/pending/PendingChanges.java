@@ -3,6 +3,7 @@ package eu.wohlben.qits.maintenance.pending;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
+import eu.wohlben.qits.maintenance.latest.GitlinkSha;
 import eu.wohlben.qits.maintenance.latest.VersionOrder;
 import eu.wohlben.qits.maintenance.manifest.Globs;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
@@ -42,6 +43,9 @@ import java.util.Optional;
  *
  * <p><b>A latest that could not be read offers nothing</b>, and that is deliberately different from
  * "up to date". The repository page shows the error beside the pin so the two never look alike.
+ *
+ * <p><b>GITLINK answers neither rule and is decided by {@link #gitlink} instead.</b> Its pin is a
+ * commit sha, and there is no order over shas — the two rules above would be arithmetic on a hash.
  */
 public final class PendingChanges {
 
@@ -135,11 +139,46 @@ public final class PendingChanges {
     if (ecosystem.isEmpty()) {
       return Optional.empty();
     }
+    if (ecosystem.get() == Ecosystem.GITLINK) {
+      return gitlink(pin, row);
+    }
     if (!VersionOrder.newer(ecosystem.get(), pin.version, row.latest)) {
       return Optional.empty();
     }
     if (VersionOrder.prerelease(ecosystem.get(), row.latest)
         && !VersionOrder.prerelease(ecosystem.get(), pin.version)) {
+      return Optional.empty();
+    }
+    return Optional.of(row.latest);
+  }
+
+  /**
+   * A gitlink's verdict: <b>a difference between two shas, never a comparison of two versions</b>.
+   *
+   * <p>Neither of this class's two rules can be applied to one, and forcing them would be worse
+   * than useless. A gitlink PIN is a commit sha — 40 hex characters that no order ranks, and that
+   * maven's order would happily declare "newer" or "older" by reading the leading digits of a hash.
+   * And rule 2 has nothing to work on: a sha is neither a release nor a prerelease.
+   *
+   * <p>So the question is the only one that can be asked honestly — <b>is the submodule pinned at
+   * the commit the newest release of that repository was cut from</b> — and both halves have to be
+   * KNOWN for the answer to be no. The latest row carries the release's sha in
+   * {@code source_url} ({@code latest/GitlinkSha}); a row without one is a release this service
+   * could not tie to a commit, and pending must not be guessed from a version alone: the step
+   * fetches a tag and would move the gitlink to a commit nothing here compared.
+   *
+   * <p><b>The change's {@code to} is the calver VERSION and its {@code from} is the sha.</b> They
+   * are deliberately not the same kind of thing, because they address different sides: the step
+   * fetches {@code refs/tags/<to>} from the sibling repository and writes whatever commit that
+   * resolves to, and {@code from} is what the tree holds now — the commit-message half, exactly as
+   * it is for every other ecosystem.
+   */
+  private static Optional<String> gitlink(MtPin pin, MtLatest row) {
+    Optional<String> released = GitlinkSha.read(row.sourceUrl);
+    if (released.isEmpty() || pin.version == null || pin.version.isBlank()) {
+      return Optional.empty();
+    }
+    if (GitlinkSha.same(pin.version, released.get())) {
       return Optional.empty();
     }
     return Optional.of(row.latest);
