@@ -1,12 +1,17 @@
 package eu.wohlben.qits.maintenance.api;
 
+import eu.wohlben.qits.maintenance.dto.ArtifactDto;
 import eu.wohlben.qits.maintenance.dto.BumpDto;
 import eu.wohlben.qits.maintenance.dto.DependencyDto;
+import eu.wohlben.qits.maintenance.dto.DependentDto;
+import eu.wohlben.qits.maintenance.dto.DependentsDto;
 import eu.wohlben.qits.maintenance.dto.GroupDto;
 import eu.wohlben.qits.maintenance.dto.PinDto;
+import eu.wohlben.qits.maintenance.dto.RepositoryDependentsDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDetailDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDto;
 import eu.wohlben.qits.maintenance.dto.ScanDto;
+import eu.wohlben.qits.maintenance.dto.TransitiveDto;
 import eu.wohlben.qits.maintenance.pending.Change;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -29,12 +34,24 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       RepositoryController.AcceptedResponse.class,
       ScanController.StartScanRequest.class,
       ScanController.StartScanRequest.Response.class,
+      ArtifactController.IngestRequest.class,
+      ArtifactController.IngestRequest.Accepted.class,
       RepositoryDto.class,
       RepositoryDetailDto.class,
       GroupDto.class,
       PinDto.class,
       DependencyDto.class,
       DependencyDto.DependencyPinDto.class,
+      // The sbom side. `IngestRequest.Accepted` above is the one that is strictly required — it
+      // rides in a Response.entity — and the rest join it for the reason the note above gives:
+      // which of these the build-time analysis happens to find is an implementation detail no test
+      // guards, and the failure mode is a 500 in the binary while the JVM suite stays green.
+      ArtifactDto.class,
+      DependentsDto.class,
+      DependentDto.class,
+      RepositoryDependentsDto.class,
+      RepositoryDependentsDto.ArtifactDependentsDto.class,
+      TransitiveDto.class,
       BumpDto.class,
       ScanDto.class,
       Change.class

@@ -25,6 +25,7 @@ The contract — routes, model, config keys, schedules and the bump payload — 
 | the bump's outcome | qits-ci + qits-githost | `GET /ci/api/runs/{id}`, then the branch head |
 | an internal release | qits-events | `SoftwareRelease` off the durable bus — see **The event bus** |
 | a branch's life | qits-events | `SCMRelease`, `SCMDeleteBranch`, `SCMPublishCommit` |
+| what a release CONTAINS | qits-artifacts | `GET /artifacts/sboms/<type>/<name>/-/<version>` — one CycloneDX document per released artifact; see **The dependency graph** |
 
 **The head sha is resolved once per repository and every manifest is read at it.** The git host
 stamps `Git-Commit-Sha` on every tree and blob answer, so one read of the root tree at `main` both
@@ -195,6 +196,10 @@ where v1 waited up to six hours for a poll.
   manifest, and whether the pending set becomes a branch is still the clock's standing instruction or
   a person's press. A burst of pushes is debounced against a scan of that repository already queued
   or running.
+- **`SoftwareRelease` makes a SECOND write, and it is a different fact.** `mt_latest` says a version
+  EXISTS; an `mt_artifact` row says THIS release has contents worth reading, PENDING, picked up off
+  the worker queue afterwards. The row is written whether or not the column moved — a catch-up frame
+  is not the newest version and its contents are still unrecorded. See **The dependency graph**.
 - **The daily scans are the reconciliation belt, not the mechanism.** The internal cron moved from
   every six hours to 00:30 daily when these landed. It still covers three things no listener can: an
   event that was never published or was settled as poison, a repository added to the catalog (which
@@ -214,6 +219,42 @@ where v1 waited up to six hours for a poll.
   (`qits.eventstream.enabled=false`), and **dark is not absent**: the datasource is opened and
   migrated at boot regardless.
 
+## The dependency graph — what a release CONTAINS
+
+**An SBOM says what a released artifact CONTAINS; `mt_pin` says what a bump EDITS.** They are
+related by `(ecosystem, name)` and they never merge, because neither can answer the other's
+question:
+
+- **an SBOM cannot name a pom property.** It holds resolved coordinates and versions; a bump needs
+  the LINE — `property:qits.eventstream.version` — which only a manifest read gives.
+- **a pin cannot see a transitive.** A manifest holds what its author wrote down; everything the
+  resolver pulled in behind it exists only in the built artifact's bill of materials.
+
+So an inventory built from SBOMs would be unbumpable, and an inventory built from manifests cannot
+answer "who ships a copy of this". Both are kept, joined at read time, and neither is derived from
+the other.
+
+**The row is the OUTBOX.** A `SoftwareRelease` frame writes an `mt_artifact` row PENDING and
+returns; the document is fetched afterwards on the one worker thread. A listener that fetched inline
+would hold a bus claim open across another service's HTTP call, and a slow qits-artifacts would turn
+one release into an event redelivered for ever.
+
+**A 404 is MISSING, it is the ORDINARY answer, and nothing retries it.** The SBOM route is newer than
+most of what this platform has released, so most coordinates have no document — and a released
+version is immutable, so asking again tomorrow asks about the same bytes. What supplies an answer is
+the NEXT release of that artifact, which brings its own row; a person who knows a document has since
+been stored asks by hand with `POST /artifacts/ingest`.
+
+**Direct is the root component's own `dependsOn` list and nothing else.** That is the whole value of
+reading the document: a direct component is something a manifest could hold a line for, and a
+transitive one is something no line anywhere names. A component whose purl names a world this
+service does not inventory (`pkg:golang/…`) is stored with a **null ecosystem** — shown, never
+matched.
+
+Three tables, and the only foreign keys in this schema: `mt_artifact` (one row per released
+version), `mt_artifact_component` (what it contains, with the purl verbatim), `mt_artifact_edge`
+(who pulled in whom — adjacency, not a closure, because the question is the PATH).
+
 ## API
 
 Under `/maintenance/api`, path-routed on every vhost. Every route takes `qits:admin` (a person, via
@@ -228,10 +269,25 @@ GET  /repositories                                → [{name, project, lastScanA
 GET  /repositories/{name}                         → the above, plus
                                                     pins:[{manifestPath, ecosystem, name, version,
                                                            range, kind, latest, latestError,
-                                                           pending, group, location}]
-GET  /dependencies?name=<glob>                    → [{ecosystem, name, latest, checkedAt, error,
+                                                           pending, group, location,
+                                                           scope: "DIRECT"}]
+                                                    transitives:[{ecosystem, name, version, via,
+                                                                  behind}]
+GET  /dependencies?name=<glob>[&kind=]            → [{ecosystem, name, latest, checkedAt, error,
                                                       pins:[{repository, version, manifestPath,
                                                              pending}]}]
+GET  /dependencies/dependents?ecosystem=&name=    → {ecosystem, name, latest,
+     [&all=true]                                     dependents:[{artifactEcosystem, artifactName,
+                                                                  artifactVersion, repository,
+                                                                  embeddedVersion, direct,
+                                                                  occurredAt, sbomStatus}]}
+GET  /artifacts                                   → [{ecosystem, name, repository, latest, version,
+                                                      occurredAt, sbomStatus, dependentCount,
+                                                      behindCount}]
+POST /artifacts/ingest {ecosystem,name,version}   → 202 {id}    400 unknown ecosystem
+GET  /repositories/{name}/dependents              → {repository,
+                                                     artifacts:[{ecosystem, name,
+                                                                 dependents:[…as above]}]}
 POST /scans {scope, repository?}                  → 202 {id}    400 unknown scope
 GET  /scans/{id}                                  → {id, scope, repository, trigger, status,
                                                      startedAt, finishedAt, message}
@@ -258,6 +314,25 @@ GET  /bumps/{id}                                  → {id, repository, group, br
   after boot re-dispatches a REQUESTED bump under the same event id or polls a RUNNING one to its
   end.
 - `GET /bumps` carries `changes` too; a change list is small.
+- **`kind` on `/dependencies` is INTERNAL or EXTERNAL and nothing else.** REACTOR and UNRESOLVED are
+  refused with a 400 rather than answered with an empty list: neither is a half of the split the
+  filter serves, and an empty list would read as "there are none of those". The filter is
+  server-side because the two halves are two pages — the same split every default group, every
+  branch and both scan schedules already make.
+- **`/dependencies` and `/dependencies/dependents` are two routes because they are two facts.** A
+  pin is a line a bump can edit; a dependent is a component inside a published package, transitives
+  included. The default view of `dependents` is the NEWEST released version of each dependent —
+  forty-nine older releases of one library are answers about versions nobody can change any more —
+  and `all=true` is the archaeology.
+- **`transitives` on the repository detail is what its RELEASES contain that no manifest names.** It
+  is read from the newest INGESTED document of each artifact the repository publishes, with anything
+  that is also a pin removed (that row is already on the page, with a verdict). `via` is the direct
+  component whose subtree pulled it in — the first by name where several do, because a graph has
+  many paths and a page needs one. **Empty means "we do not know"**, not "there are none": a
+  repository whose releases have no stored document is the ordinary state during the rollout.
+- **`scope` on a pin is always `DIRECT`, and it is a constant on purpose.** The detail now serves two
+  lists whose rows look alike, and a client rendering them in one table needs the distinction on the
+  row rather than derived from which array it came out of.
 
 The document is at `/maintenance/q/openapi`, the browsable UI at `/maintenance/q/swagger-ui`, and
 readiness at `/maintenance/q/health/ready`. The client is served at `/` — this service has a host of
@@ -274,6 +349,7 @@ environment without a rebuild.
 | `qits.maintenance.targets.projects-url` | `http://qits-projects:8080` | where the catalog is |
 | `qits.maintenance.targets.githost-url` | `http://qits-githost:8080` | where the manifests are |
 | `qits.maintenance.targets.ci-url` | `http://qits-ci:8080` | which CI applies a bump |
+| `qits.maintenance.targets.artifacts-url` | `http://qits-artifacts:8080` | where the SBOM documents are — a bare host, because the route's whole path belongs to the caller |
 | `qits.maintenance.registries.maven-url` | `http://qits-artifacts:8080/artifacts/maven/maven` | internal maven |
 | `qits.maintenance.registries.npm-url` | `http://qits-artifacts:8080/artifacts/npm/npm` | internal npm |
 | `qits.maintenance.registries.oci-url` | `http://qits-artifacts:8080/v2` | internal images |
@@ -286,6 +362,7 @@ environment without a rebuild.
 | `qits.maintenance.scan.enabled` | `true` | whether the CLOCK may scan |
 | `qits.maintenance.scan.internal.cron` | `0 30 0 * * ?` | the internal scan, 00:30 daily — the reconciliation belt behind the bus |
 | `qits.maintenance.scan.external.cron` | `0 0 1 * * ?` | the external scan, 01:00 daily |
+| `qits.maintenance.sbom.sweep-cron` | `0 5 * * * ?` | re-queue artifact rows still PENDING, hourly. It never retries MISSING or FAILED |
 | `qits.maintenance.time-zone` | `UTC` | the zone both crons are read in |
 | `qits.maintenance.bump.enabled` | `true` | whether a branch may be pushed at all |
 | `qits.maintenance.bump.auto` | `true` | whether a SCHEDULED scan asks for the bumps it found |
@@ -295,6 +372,8 @@ environment without a rebuild.
 
 **The registry keys carry a PATH as well as a host**, because a registry is mounted under a prefix
 and the prefix names the repository row it serves. Moving a row is then a deployment's decision.
+**`targets.artifacts-url` deliberately does not**: `/artifacts/sboms/…` is qits-artifacts' own API
+rather than a mount, so its whole path belongs to the caller and lives in the code.
 
 **`bump.enabled` stops the button as well as the schedule**, which is the point: a platform that
 wants to watch what *would* change for a week reads the inventory and pushes nothing. `bump.auto`
@@ -320,9 +399,12 @@ Off, calls go out with the forward-auth pair alone (`X-Qits-User: qits-platform-
 `X-Qits-Roles: qits:system`), which every call carries regardless.
 
 **The store** is its own PostgreSQL database, `qits_platform_maintenance`, declared by
-`resources: postgresql:db` in `.config/qits/deployments.yml`. Seven tables: `mt_repository`,
-`mt_pin`, `mt_group`, `mt_latest` (an inventory a scan replaces wholesale) and `mt_scan`,
-`mt_branch`, `mt_bump` (a log of what was asked and what came back, derivable from nothing).
+`resources: postgresql:db` in `.config/qits/deployments.yml`. Ten tables in three families:
+`mt_repository`, `mt_pin`, `mt_group`, `mt_latest` (an inventory a scan replaces wholesale);
+`mt_scan`, `mt_branch`, `mt_bump` (a log of what was asked and what came back, derivable from
+nothing); and `mt_artifact`, `mt_artifact_component`, `mt_artifact_edge` (what each released
+artifact CONTAINS, replaced per artifact by each ingest — and the only foreign keys in the schema,
+because both ends are this context's own).
 
 **A second database, `qits_platform_maintenance_eventstream`**, declared by
 `postgresql:eventstream:<name>` beside it, holds the bus's outbox and the two durable consumers'

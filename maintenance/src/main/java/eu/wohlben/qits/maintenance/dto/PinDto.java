@@ -19,6 +19,7 @@ package eu.wohlben.qits.maintenance.dto;
  * @param pending whether a bump would move this line
  * @param group the group whose branch would carry it, null when nothing claims it
  * @param location where the version is set
+ * @param scope always {@code DIRECT}, and it is a constant on purpose — see below
  */
 public record PinDto(
     String manifestPath,
@@ -31,4 +32,50 @@ public record PinDto(
     String latestError,
     boolean pending,
     String group,
-    String location) {}
+    String location,
+    String scope) {
+
+  /**
+   * <b>Every pin is DIRECT, by definition, and the field says so rather than letting the client
+   * infer it.</b>
+   *
+   * <p>The repository detail now serves two lists whose rows look alike on a page: pins, which a
+   * manifest declares and a bump can edit, and transitives, which a released artifact contains and
+   * nothing can edit. A reader with both in front of them needs the distinction spelled on the row,
+   * not derived from which array it came out of — and a client that renders them in one table
+   * (which is the point of showing both) has nothing else to render it from.
+   *
+   * <p>It is a constant because {@code mt_pin} holds direct pins and only those: a manifest holds
+   * what its author wrote down. If a transitive ever became bumpable, it would become a pin with
+   * this field saying otherwise, and the field is where that would be said.
+   */
+  public static final String DIRECT = "DIRECT";
+
+  /** A pin with its scope filled in, which is the only way one is built. */
+  public static PinDto direct(
+      String manifestPath,
+      String ecosystem,
+      String name,
+      String version,
+      String range,
+      String kind,
+      String latest,
+      String latestError,
+      boolean pending,
+      String group,
+      String location) {
+    return new PinDto(
+        manifestPath,
+        ecosystem,
+        name,
+        version,
+        range,
+        kind,
+        latest,
+        latestError,
+        pending,
+        group,
+        location,
+        DIRECT);
+  }
+}

@@ -1,7 +1,9 @@
 package eu.wohlben.qits.maintenance.api;
 
 import eu.wohlben.qits.maintenance.bump.BumpService;
+import eu.wohlben.qits.maintenance.control.ArtifactGraph;
 import eu.wohlben.qits.maintenance.control.Inventory;
+import eu.wohlben.qits.maintenance.dto.RepositoryDependentsDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDetailDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDto;
 import eu.wohlben.qits.maintenance.model.BumpTrigger;
@@ -42,6 +44,9 @@ public class RepositoryController {
 
   @Inject BumpService bumps;
 
+  /** What this repository's RELEASES contain, and who contains them. See {@link ArtifactGraph}. */
+  @Inject ArtifactGraph graph;
+
   /** What a 202 answers with — the id to poll. */
   public record AcceptedResponse(UUID id) {}
 
@@ -67,6 +72,29 @@ public class RepositoryController {
   @RolesAllowed({"qits:admin", "qits:system"})
   public RepositoryDetailDto repository(@PathParam("name") String name) {
     return inventory.repository(name);
+  }
+
+  /**
+   * <b>Who depends on what this repository publishes</b> — the blast radius of its next release.
+   *
+   * <p>The mirror of {@code GET /repositories/{name}}: that one is what this repository depends ON,
+   * read from its manifests; this one is who depends on IT, read from the bills of materials of
+   * every artifact it has released. Grouped by artifact, because a repository publishing a jar, an
+   * npm package and an image out of one reactor is the ordinary shape here and "which of my things
+   * are they on" is the actual question.
+   *
+   * <p><b>No 404, and that is deliberate.</b> A repository that has released nothing this service
+   * has a document for answers with an empty list — which is true — and one that is not in the
+   * catalog at all answers the same way, because {@code mt_artifact.repository} is a string another
+   * service owns and this route asks nothing of the inventory.
+   */
+  @GET
+  @jakarta.ws.rs.Path("/{name}/dependents")
+  @Operation(summary = "Who embeds the artifacts this repository publishes")
+  @APIResponse(responseCode = "200", description = "The dependents, per published artifact")
+  @RolesAllowed({"qits:admin", "qits:system"})
+  public RepositoryDependentsDto dependents(@PathParam("name") String name) {
+    return graph.repositoryDependents(name);
   }
 
   /**

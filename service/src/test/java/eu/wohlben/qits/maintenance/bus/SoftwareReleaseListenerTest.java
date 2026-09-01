@@ -10,12 +10,14 @@ import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.maintenance.latest.VersionOrder;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
+import eu.wohlben.qits.maintenance.sbom.SbomIngestService;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -63,14 +65,44 @@ class SoftwareReleaseListenerTest {
     }
   }
 
+  /**
+   * The other half of the write seam: the outbox row an announced release leaves behind.
+   *
+   * <p>It records the ARGUMENTS rather than doing anything, because what this test is about is
+   * which frames reach it and with what — the row's own behaviour (idempotent by coordinate,
+   * PENDING, fetched off the queue afterwards) is {@code SbomIngestServiceTest}'s, against a real
+   * PostgreSQL.
+   */
+  private static final class RecordingIngest extends SbomIngestService {
+
+    record Announced(
+        Ecosystem ecosystem,
+        String name,
+        String version,
+        String repository,
+        Instant occurredAt) {}
+
+    final List<Announced> announced = new ArrayList<>();
+
+    @Override
+    public UUID announced(
+        Ecosystem ecosystem, String name, String version, String repository, Instant occurredAt) {
+      announced.add(new Announced(ecosystem, name, version, repository, occurredAt));
+      return UUID.randomUUID();
+    }
+  }
+
   private SoftwareReleaseListener listener;
   private RecordingStore store;
+  private RecordingIngest sboms;
 
   @BeforeEach
   void setUp() {
     store = new RecordingStore();
+    sboms = new RecordingIngest();
     listener = new SoftwareReleaseListener();
     listener.store = store;
+    listener.sboms = sboms;
   }
 
   private void release(String packageType, String packageName, String version) {
@@ -187,5 +219,95 @@ class SoftwareReleaseListenerTest {
     assertThrows(
         IllegalStateException.class,
         () -> release("maven", "eu.wohlben.qits:qits-eventstream", "2026.901.1"));
+  }
+
+  // --- the second write: the sbom outbox ----------------------------------------------------------
+
+  /**
+   * <b>A release leaves TWO facts behind and they are different ones.</b> {@code mt_latest} says a
+   * version EXISTS; the artifact row says THIS release has contents worth reading. Neither is
+   * derivable from the other, and the row is written whether or not the column moved.
+   */
+  @Test
+  void aReleaseAlsoOpensThePendingArtifactRowTheIngestPicksUp() {
+    EventFrame published =
+        frame(
+            "SoftwareRelease",
+            softwareReleasePayload("maven", "eu.wohlben.qits:qits-eventstream", "2026.901.1"));
+
+    listener.onFrame(published);
+
+    assertEquals(1, sboms.announced.size());
+    RecordingIngest.Announced row = sboms.announced.get(0);
+    assertEquals(Ecosystem.MAVEN, row.ecosystem());
+    assertEquals("eu.wohlben.qits:qits-eventstream", row.name());
+    assertEquals("2026.901.1", row.version());
+    assertEquals(
+        "qits-eventstream-javalib",
+        row.repository(),
+        "SoftwareRelease.repository is a string from another context and is recorded verbatim");
+    assertEquals(
+        published.occurredAt(),
+        row.occurredAt(),
+        "the publisher's moment, never this service's clock: it is what 'newest per dependent' "
+            + "is ordered by, and a catch-up frame announces yesterday's release");
+  }
+
+  /**
+   * The redelivery arm. The listener offers the coordinate again — it has no way to know it is a
+   * second offer — and the STORE is what makes that harmless, by leaving a row it already knows
+   * exactly as it was. That half is proved against a real database in {@code
+   * SbomIngestServiceTest}; here the claim is that the listener does not decide it for itself.
+   */
+  @Test
+  void aRedeliveredReleaseOffersTheSameCoordinateAndNothingElse() {
+    release("maven", "eu.wohlben.qits:qits-eventstream", "2026.901.1");
+    release("maven", "eu.wohlben.qits:qits-eventstream", "2026.901.1");
+
+    assertEquals(2, sboms.announced.size(), "the listener offers; the store is what dedupes");
+    assertEquals(sboms.announced.get(0).name(), sboms.announced.get(1).name());
+    assertEquals(sboms.announced.get(0).version(), sboms.announced.get(1).version());
+    assertEquals(1, store.writes.size(), "and the latest column moved exactly once");
+  }
+
+  /**
+   * A CATCH-UP FRAME still opens a row even though it moves no column. The two writes answer
+   * different questions: an older release is not the newest version and its contents are still
+   * unrecorded.
+   */
+  @Test
+  void aFrameThatMovesNoColumnStillOpensItsArtifactRow() {
+    release("maven", "eu.wohlben.qits:qits-eventstream", "2026.901.5");
+    sboms.announced.clear();
+
+    release("maven", "eu.wohlben.qits:qits-eventstream", "2026.825.74539");
+
+    assertEquals(1, store.writes.size(), "the column did not move");
+    assertEquals(1, sboms.announced.size(), "and the older release's contents are still a fact");
+    assertEquals("2026.825.74539", sboms.announced.get(0).version());
+  }
+
+  /** Poison is settled before either write, so nothing is opened for a frame nothing can read. */
+  @Test
+  void poisonOpensNoArtifactRowEither() {
+    listener.onFrame(frame("SoftwareRelease", "not json at all"));
+    release("maven", "eu.wohlben.qits:qits-eventstream", "");
+    release("daemon", "qits-ci-daemon", "2026.901.1");
+
+    assertTrue(sboms.announced.isEmpty());
+  }
+
+  /**
+   * {@code daemon} SBOMs exist upstream and are unreachable from here on purpose: no mt_artifact row
+   * is ever a daemon, because nothing any manifest parses pins one. The filter is the ecosystem map
+   * above, one step before either write.
+   */
+  @Test
+  void noArtifactRowIsEverOpenedForATypeThisInventoryDoesNotHold() {
+    release("daemon", "qits-ci-daemon", "2026.901.1");
+    release("docs", "@apidocs/qits-ci", "2026.901.1");
+
+    assertTrue(sboms.announced.isEmpty());
+    assertTrue(store.writes.isEmpty());
   }
 }

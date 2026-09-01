@@ -3,7 +3,7 @@ package eu.wohlben.qits.maintenance.peer;
 /**
  * Every address this service reads or writes, and the credential each one takes.
  *
- * <p><b>Eight targets, five credentials.</b> A target is an ADDRESS — a configured base url a path
+ * <p><b>Nine targets, five credentials.</b> A target is an ADDRESS — a configured base url a path
  * is appended to — while a credential is an oidc client, and a token is cut for one SERVICE. The
  * three registry targets on qits-artifacts share one client because they are one service behind
  * three path prefixes; splitting them would be three tokens for one audience.
@@ -30,6 +30,16 @@ public enum PeerTarget {
 
   /** qits-artifacts' OCI registry: {@code /<name>/tags/list}. */
   OCI_REGISTRY("qits.maintenance.registries.oci-url", Credential.ARTIFACTS),
+
+  /**
+   * qits-artifacts' SBOM store: {@code /artifacts/sboms/<type>/<name>/-/<version>}.
+   *
+   * <p><b>A fourth address on the same service, and it carries no path prefix.</b> The three
+   * registry keys above each name a MOUNT — {@code /artifacts/maven/maven} is one repository row
+   * and moving it is a deployment's decision — while the SBOM route is qits-artifacts' own API and
+   * its whole path belongs to the caller. So the key is a bare host and the prefix is in the code.
+   */
+  ARTIFACTS_SBOM("qits.maintenance.targets.artifacts-url", Credential.ARTIFACTS),
 
   /** qits-platform-mirror's Maven Central pull-through. */
   MAVEN_MIRROR("qits.maintenance.mirror.maven-url", Credential.MIRROR),

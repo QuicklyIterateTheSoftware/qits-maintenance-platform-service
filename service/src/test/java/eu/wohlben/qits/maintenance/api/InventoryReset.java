@@ -1,5 +1,8 @@
 package eu.wohlben.qits.maintenance.api;
 
+import eu.wohlben.qits.maintenance.entity.MtArtifact;
+import eu.wohlben.qits.maintenance.entity.MtArtifactComponent;
+import eu.wohlben.qits.maintenance.entity.MtArtifactEdge;
 import eu.wohlben.qits.maintenance.entity.MtBranch;
 import eu.wohlben.qits.maintenance.entity.MtBump;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
@@ -26,6 +29,11 @@ public class InventoryReset {
 
   @Transactional
   public void clear() {
+    // The graph first: mt_artifact_component and mt_artifact_edge are the only rows in this schema
+    // with a real foreign key, and it points at mt_artifact.
+    MtArtifactEdge.deleteAll();
+    MtArtifactComponent.deleteAll();
+    MtArtifact.deleteAll();
     MtBump.deleteAll();
     MtBranch.deleteAll();
     MtScan.deleteAll();

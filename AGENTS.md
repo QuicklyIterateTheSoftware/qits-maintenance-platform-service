@@ -31,8 +31,8 @@ classes behind when a shape changes. Port 0 is not optional on the deployment ho
 platform's own npm registry there.
 
 **Anything returned as `Response.entity(...)` is invisible to the build-time Jackson analysis**,
-which is what `api/ApiWireReflection` exists for. The 202 from a queued scan and the 202 from a
-requested bump are exactly such responses. A new response type joins that list in the commit that
+which is what `api/ApiWireReflection` exists for. The 202 from a queued scan, the 202 from a
+requested bump and the 202 from a manual sbom ingest are exactly such responses. A new response type joins that list in the commit that
 adds it; the failure is a 500 in the native binary while every JVM test stays green.
 
 **`bus/EventWireReflection` is the second registration and the same rule from the other side**: the
@@ -193,10 +193,64 @@ failed the insert would leave a repository looking as though it pins nothing —
 Schema changes go in `maintenance/src/main/resources/db/maintenance/migration/`, hand-written, its
 own lineage on its own datasource. Keep appending, never edit an applied migration.
 
-**`ScanTrigger` and the four status enums are `@Enumerated`-style string columns under no check
+**`ScanTrigger` and the five status enums are `@Enumerated`-style string columns under no check
 constraint, so a new value is one enum constant and no migration.** `ScanTrigger.EVENT` arrived that
 way. The invariant lives where the writes are — `ScanService.request` is the only writer of
 `mt_scan.trigger` and it takes the enum.
+
+## The dependency graph
+
+**An SBOM says what a released artifact CONTAINS; `mt_pin` says what a bump EDITS. They relate by
+`(ecosystem, name)` and they never merge.** That sentence is written into `V3__sbom_graph.sql`,
+`MtArtifact`, `ArtifactGraph` and `RepositoryDetailDto` because it is the one thing a later change
+will be tempted to undo. Neither can answer the other's question: an SBOM holds resolved coordinates
+and cannot name `property:qits.eventstream.version`, and a manifest holds what its author wrote down
+and cannot see what the resolver pulled in behind it. Merging them would produce either an inventory
+nothing can bump or a page that cannot answer an advisory.
+
+**THE ROW IS THE OUTBOX AND THE FETCH IS NEVER INSIDE THE CLAIM.** `SoftwareReleaseListener` writes
+an `mt_artifact` row PENDING and submits to `WorkQueue`; `SbomIngestService` does the call. A
+listener that fetched inline would hold a durable claim open across another service's HTTP call, and
+a qits-artifacts that was slow would make one release an event redelivered for ever with this
+consumer's watermark stuck behind it.
+
+**404 is MISSING, it is TERMINAL, and that is not laziness.** The route is newer than most of what
+the platform has released and a released version is immutable, so a retry asks about the same bytes.
+The next release brings its own row; `POST /artifacts/ingest` is the manual move. `SbomSweepSchedule`
+and `RestartRecovery` re-queue **PENDING only**.
+
+**`direct` is the ROOT's own `dependsOn` list and nothing else.** It is the only reason to read the
+document at all. A parser that marked every listed component direct would leave the whole
+transitives section empty with nothing saying why.
+
+**A null `ecosystem` on a component is a purl type this service does not map**, and it is a state
+rather than a gap: stored, shown, never matched. `Purl.parse` answers empty for such a type rather
+than guessing a mapping, because a guessed name in a join key means something else.
+
+**The two reverse reads go through the store in TWO steps rather than one join**, because
+`mt_artifact_component.artifact_id` is a plain uuid like every other relation in this schema and a
+join would have to be native SQL. The default view is **newest per dependent artifact NAME**; `all`
+is the archaeology. Both are computed on every read, for the reason pending is.
+
+**`mt_artifact_component` and `mt_artifact_edge` carry the only FOREIGN KEYS in this schema.** Every
+other relation here is a string another context owns. These two are allowed because both ends are
+this context's own tables in this context's own database, and a component has no meaning at all
+apart from the artifact it was read out of.
+
+**`PeerTarget.ARTIFACTS_SBOM` is a ninth address and the fourth on qits-artifacts, and its key
+carries no path.** The three registry keys name a MOUNT whose prefix is a repository row a
+deployment may move; `/artifacts/sboms/…` is qits-artifacts' own API, so its prefix is code. The
+name goes into the path LITERALLY — slashes kept — because `/-/` is what separates it from the
+version, which is why that separator exists.
+
+**`SbomClient` goes through `PeerClient` rather than opening a second HttpClient.** That gets the
+shared instance field (a static one is the native-image hazard), the shipped `call-timeout`, the
+forward-auth pair, the optional bearer, the response bound — and `FakePeers`, which is how the whole
+suite replaces the network.
+
+**No `mt_artifact` row is ever a `daemon`.** Daemon SBOMs exist upstream; `Ecosystem` has three
+constants because three manifests pin three things, and nothing this service parses pins a daemon.
+`SoftwareReleaseListener.ECOSYSTEMS` is where the type is filtered out, one step before either write.
 
 ## The event bus
 
@@ -327,7 +381,9 @@ a JWKS, and a clone-alone build needs no issuer. There is no third state.
   between two writes and the first session answers the later reads from its cache, and an assertion
   about the last write fails against a store that is perfectly correct. Measured 2026-09-01 writing
   the forward-only latest tests.
-- **`InventoryReset` empties the store between methods, after `WorkQueue.awaitIdle`.** Flyway's
+- **`InventoryReset` empties the store between methods, after `WorkQueue.awaitIdle`.** The graph
+  goes first there — `mt_artifact_component` and `mt_artifact_edge` are the only rows in this schema
+  with a foreign key, and it points at `mt_artifact`. Flyway's
   `clean-at-start` runs per Quarkus start, not per test, and an active bump row holds its branch's
   lock: without the reset the second test of a class is answered 409 by the first test's leftovers.
   The drain first, or the delete lands between a running task's read and its write.
@@ -471,7 +527,13 @@ pom, because Quinoa is in no BOM and its version does not track the platform's.
 
 Each is a decision, not an omission:
 
-- **Transitive dependencies.** A manifest holds direct pins and only those have a line to edit.
+- **Bumping a transitive.** They are READ now — see "The dependency graph" — and shown on the
+  repository page beside the pins. What is still not here is doing anything about one: a manifest
+  holds direct pins and only those have a line to edit, so a transitive upgrade means somebody
+  adding a managed version, which is a decision about their own build.
+- **Retrying a MISSING sbom.** A released version is immutable and a 404 is the ordinary permanent
+  answer for anything published before qits-artifacts had that route. `POST /artifacts/ingest` is
+  the manual move and there is no schedule behind it.
 - **External base image tags.** `FROM eclipse-temurin:…` — ordering tags across vendors is a later
   decision, and the mirror would answer with an upstream's whole tag history with no rule to rank
   it by. `FROM qits/*` is in scope.

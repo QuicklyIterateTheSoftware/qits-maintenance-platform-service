@@ -150,6 +150,10 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
     overrides.put("qits.maintenance.scan.enabled", "false");
     overrides.put("qits.maintenance.scan.internal.cron", "off");
     overrides.put("qits.maintenance.scan.external.cron", "off");
+    // The sbom sweep is the third timer and it goes the same way as the two scans: no story drives
+    // an ingest, and a sweep firing on the hour mid-catalogue would draw an artifacts arrow into
+    // whichever story happened to be draining.
+    overrides.put("qits.maintenance.sbom.sweep-cron", "off");
     overrides.put("qits.maintenance.bump.poll-interval", "1s");
 
     overrides.put("qits.auth.machine.required", "true");

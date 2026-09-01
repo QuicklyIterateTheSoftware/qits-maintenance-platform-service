@@ -226,6 +226,10 @@ public class PackagedSurfaceIT {
     asAdmin().when().get("/maintenance/api/repositories").then().statusCode(200);
     asAdmin().when().get("/maintenance/api/dependencies").then().statusCode(200);
     asAdmin().when().get("/maintenance/api/bumps").then().statusCode(200);
+    // The dependency graph's own noun. It is under the same /maintenance/api prefix, so it needs no
+    // second entry in `quarkus.quinoa.ignored-path-prefixes` — but it is a fourth top-level route
+    // and the segment it claims is asserted here like the other three.
+    asAdmin().when().get("/maintenance/api/artifacts").then().statusCode(200);
 
     // The edge path-routes verbatim by prefix, so there is no unprefixed form to fall back to — and
     // at the root an unprefixed /api/repositories is the CLIENT's ground, which is why the check is

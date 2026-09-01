@@ -5,6 +5,7 @@ import eu.wohlben.qits.eventstream.control.CanonicalJson;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
+import eu.wohlben.qits.maintenance.sbom.SbomIngestService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
@@ -16,6 +17,13 @@ import org.jboss.logging.Logger;
  * <b>An internal package was published, so its latest version moves now rather than at the next
  * poll.</b> Consumes qits-ci's {@code SoftwareRelease} — one per declared artifact of a green
  * release pipeline — and writes it into {@code mt_latest}, forward only.
+ *
+ * <p><b>It makes TWO writes and they are two different facts.</b> {@code mt_latest} says a version
+ * EXISTS — one column per dependency, moved forward only. An {@code mt_artifact} row says THIS
+ * release has a bill of materials worth reading — one row per released version, PENDING, which the
+ * ingest picks up off the queue afterwards. Neither is derivable from the other: a column holding
+ * the newest version says nothing about what any release contained, and a graph of one release says
+ * nothing about whether a higher one exists. See {@code SbomIngestService}.
  *
  * <p>This is the fast path the six-hourly internal scan used to be. Everything downstream is
  * unchanged and needs no help: pending is computed from {@code mt_pin ⋈ mt_latest} on every read, so
@@ -133,6 +141,17 @@ public class SoftwareReleaseListener implements QitsDurableEventListener {
 
   @Inject MaintenanceStore store;
 
+  /**
+   * The second write this listener makes, and it is a different fact from the first.
+   *
+   * <p>{@code mt_latest} records that a version EXISTS — one column per dependency, moved forward
+   * only. The artifact row records that THIS release has contents worth reading, one row per
+   * released version, and it is what the whole dependency graph is built from afterwards. Neither
+   * is derivable from the other: a column holding the newest version says nothing about what any
+   * release contained, and a graph of one release says nothing about whether a higher one exists.
+   */
+  @Inject SbomIngestService sboms;
+
   @Override
   public String consumerId() {
     return CONSUMER_ID;
@@ -190,6 +209,30 @@ public class SoftwareReleaseListener implements QitsDurableEventListener {
           "%s %s announced %s %s at %s, which is not newer than what is recorded; nothing moved",
           frame.name(), frame.id(), ecosystem, name, version);
     }
+
+    // AND THE SECOND FACT, which is a different one. `mt_latest` says a version EXISTS; the artifact
+    // row says this release has a bill of materials worth reading. It is written whether or not the
+    // column above moved, because a catch-up frame that is not the newest release is still a
+    // release whose contents nothing has recorded.
+    //
+    // IT IS A ROW AND A QUEUE SUBMIT, never a fetch. The claim and this write are one transaction:
+    // holding it open across an HTTP call to qits-artifacts would make a slow peer into an event
+    // redelivered for ever, and this listener's watermark would sit behind it. The row IS the
+    // outbox — see SbomIngestService.
+    sboms.announced(
+        ecosystem, name, version, trimmed(release.repository()), occurredAt(frame));
+  }
+
+  /**
+   * The publisher's moment, off the frame.
+   *
+   * <p>Never this service's clock: {@code occurred_at} is what "the newest release of each
+   * dependent" is ordered by, and a catch-up frame processed today announces a release from
+   * yesterday. Stamping now would put every event a disconnect delayed at the front of an ordering
+   * it does not belong at the front of.
+   */
+  private static Instant occurredAt(EventFrame frame) {
+    return frame.occurredAt() == null ? Instant.now() : frame.occurredAt();
   }
 
   /** The type as the wire spells it, lower-cased so a publisher's capitalisation cannot matter. */

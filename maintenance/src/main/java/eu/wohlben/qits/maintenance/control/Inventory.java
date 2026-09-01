@@ -20,6 +20,7 @@ import eu.wohlben.qits.maintenance.error.NoSuchRepositoryException;
 import eu.wohlben.qits.maintenance.error.NoSuchScanException;
 import eu.wohlben.qits.maintenance.manifest.Globs;
 import eu.wohlben.qits.maintenance.model.BranchState;
+import eu.wohlben.qits.maintenance.model.PinKind;
 import eu.wohlben.qits.maintenance.pending.PendingChanges;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -48,6 +49,9 @@ public class Inventory {
 
   @Inject BumpService bumps;
 
+  /** The other half of the dependency picture — what the releases CONTAIN. See {@link ArtifactGraph}. */
+  @Inject ArtifactGraph graph;
+
   /** Every repository, with its groups and what each has pending. */
   public List<RepositoryDto> repositories() {
     Map<String, MtLatest> latest = PendingChanges.index(store.allLatest());
@@ -70,7 +74,15 @@ public class Inventory {
     return List.copyOf(listing);
   }
 
-  /** One repository with every pin it holds. */
+  /**
+   * One repository with every pin it holds, and what its releases contain that no pin names.
+   *
+   * <p><b>Two lists, two facts, one join key.</b> {@code pins} is read from manifests and every row
+   * has a line a bump can edit; {@code transitives} is read from the bills of materials of the
+   * artifacts this repository RELEASED, and no line anywhere names one. They meet on
+   * {@code (ecosystem, name)} — which is what removes a pin from the transitive list — and they are
+   * never merged into one array.
+   */
   public RepositoryDetailDto repository(String name) {
     MtRepository row = store.repository(name).orElseThrow(() -> new NoSuchRepositoryException(name));
     Map<String, MtLatest> latest = PendingChanges.index(store.allLatest());
@@ -90,7 +102,8 @@ public class Inventory {
         row.message,
         groupDtos.stream().mapToInt(GroupDto::pending).sum(),
         groupDtos,
-        List.copyOf(pinDtos));
+        List.copyOf(pinDtos),
+        graph.transitives(name, pins));
   }
 
   /**
@@ -98,13 +111,25 @@ public class Inventory {
    *
    * <p>A blank glob is every dependency: the page it serves is a searchable list, and an empty box
    * should show the list rather than nothing.
+   *
+   * <p><b>The kind filter is SERVER-SIDE and that is not an optimisation.</b> The two halves are two
+   * pages — the platform's own releases and everybody else's — and they are the same split every
+   * default group, every branch and both scan schedules already make. A client filtering an
+   * unfiltered list would be a fourth place the same rule is spelled, and the first to disagree.
+   *
+   * @param kind INTERNAL or EXTERNAL, or null for both. A pin whose kind is neither — REACTOR,
+   *     UNRESOLVED — is excluded by any filter and included by none, because it is not a half of
+   *     that split at all.
    */
-  public List<DependencyDto> dependencies(String glob) {
+  public List<DependencyDto> dependencies(String glob, PinKind kind) {
     String pattern = glob == null || glob.isBlank() ? "*" : glob.trim();
     Map<String, MtLatest> latest = PendingChanges.index(store.allLatest());
     Map<String, List<MtPin>> byDependency = new LinkedHashMap<>();
     for (MtPin pin : store.allPins()) {
       if (!Globs.matches(pattern, pin.name)) {
+        continue;
+      }
+      if (kind != null && PendingChanges.kindOf(pin) != kind) {
         continue;
       }
       byDependency
@@ -186,7 +211,9 @@ public class Inventory {
   private static PinDto pin(MtPin pin, Map<String, MtLatest> latest, List<MtGroup> groups) {
     MtLatest row = latest.get(PendingChanges.key(pin.ecosystem, pin.name));
     Optional<String> newer = PendingChanges.newerVersion(pin, latest);
-    return new PinDto(
+    // DIRECT, always: a pin is a line an author wrote. The field exists because the detail page now
+    // serves transitives beside these, and a row has to say which it is.
+    return PinDto.direct(
         pin.manifestPath,
         pin.ecosystem,
         pin.name,
