@@ -75,6 +75,16 @@ public class PackagedSurfaceIT {
   static final String DATABASE = "maintenance_packaged_it";
 
   /**
+   * The event bus's own database, on a name of its own, handed over as the second resource triple.
+   *
+   * <p><b>It is not optional, and that is the whole point of the second triple.</b> The bus jar is
+   * dark outside a deployment, and dark stops publishing and dialling rather than connecting — so a
+   * packaged process handed no eventstream url dies at Flyway naming the missing variable, which is
+   * exactly the refuse-to-boot stance this IT exists to keep honest.
+   */
+  static final String EVENTSTREAM_DATABASE = "maintenance_packaged_it_eventstream";
+
+  /**
    * The one string that identifies a response as the CLIENT's index.html rather than anything else
    * this process serves. The client is mounted at the root of this service's own host now, so this
    * is what {@code baseHref} in qits-platform-spa-maintenance's angular.json spells — the one value
@@ -83,16 +93,24 @@ public class PackagedSurfaceIT {
   private static final String BASE_HREF = "<base href=\"/\">";
 
   /**
-   * Hands the launched artifact a database the way a deployment does — as the generic resource
-   * triple, not as the datasource keys — and points every peer at a port nothing listens on.
+   * Hands the launched artifact its two databases the way a deployment does — as the generic
+   * resource triples {@code QITS_RESOURCE_DB_*} and {@code QITS_RESOURCE_EVENTSTREAM_*}, not as the
+   * datasource keys — and points every peer at a port nothing listens on.
    *
-   * <p>The url travels through a system property rather than a static field: a test profile is
+   * <p>Both the domain jar and qits-eventstream ship {@code jdbc.url=${QITS_RESOURCE_…_URL}} and its
+   * two siblings, so supplying the variables leaves the <b>shipped</b> expressions themselves under
+   * test.
+   *
+   * <p>The urls travel through system properties rather than static fields: a test profile is
    * instantiated in more than one classloader, so a field written by one copy is not the field the
    * other reads, while the process has exactly one property table.
    */
   public static class PackagedUnderTarget implements QuarkusTestProfile {
 
     private static final String URL_PROPERTY = "qits.test.packaged-surface-it.db-url";
+
+    private static final String EVENTSTREAM_URL_PROPERTY =
+        "qits.test.packaged-surface-it.eventstream-url";
 
     @Override
     public Map<String, String> getConfigOverrides() {
@@ -101,6 +119,16 @@ public class PackagedSurfaceIT {
           Map.entry("QITS_RESOURCE_DB_URL", databaseUrl()),
           Map.entry("QITS_RESOURCE_DB_USERNAME", EmbeddedPg.USER),
           Map.entry("QITS_RESOURCE_DB_PASSWORD", EmbeddedPg.PASSWORD),
+          Map.entry("QITS_RESOURCE_EVENTSTREAM_URL", eventstreamUrl()),
+          Map.entry("QITS_RESOURCE_EVENTSTREAM_USERNAME", EmbeddedPg.USER),
+          Map.entry("QITS_RESOURCE_EVENTSTREAM_PASSWORD", EmbeddedPg.PASSWORD),
+          // A launched artifact runs in NORMAL mode, where the shipped %dev/%test darkness does not
+          // apply — so the bus is turned off here by hand. There is no qits-events on the far side
+          // of this IT, and enabled the subscriber would redial a stream nobody serves while the
+          // sweeper paged a log that is not there. It stops publishing, sweeping and dialling; the
+          // datasource above is opened and migrated either way, which is why the triple is not
+          // optional.
+          Map.entry("qits.eventstream.enabled", "false"),
           Map.entry("qits.maintenance.targets.projects-url", dead),
           Map.entry("qits.maintenance.targets.githost-url", dead),
           Map.entry("qits.maintenance.targets.ci-url", dead),
@@ -124,6 +152,16 @@ public class PackagedSurfaceIT {
       // localhost resolves for the launched process too — it is a child of this JVM on this host.
       String url = EmbeddedPg.url(DATABASE);
       System.setProperty(URL_PROPERTY, url);
+      return url;
+    }
+
+    private static synchronized String eventstreamUrl() {
+      String recorded = System.getProperty(EVENTSTREAM_URL_PROPERTY);
+      if (recorded != null) {
+        return recorded;
+      }
+      String url = EmbeddedPg.url(EVENTSTREAM_DATABASE);
+      System.setProperty(EVENTSTREAM_URL_PROPERTY, url);
       return url;
     }
 

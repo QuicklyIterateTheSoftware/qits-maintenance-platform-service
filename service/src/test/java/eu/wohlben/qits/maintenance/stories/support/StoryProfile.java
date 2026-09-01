@@ -97,8 +97,18 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
   /** This catalogue's own database on the one embedded postgres. */
   public static final String DATABASE = "maintenance_userflows_it";
 
+  /**
+   * And its own outbox database, for the same reason the store is its own: two launches of one
+   * artifact must not share a claim ledger. The bus itself stays dark — the parent's
+   * {@code qits.eventstream.enabled=false} is inherited — so nothing here dials, and no story draws
+   * an event edge.
+   */
+  public static final String EVENTSTREAM_DATABASE = "maintenance_userflows_it_eventstream";
+
   /** Where the url is parked for whichever copy of this class is asked second. */
   private static final String URL_PROPERTY = "qits.test.userflows-it.db-url";
+
+  private static final String EVENTSTREAM_URL_PROPERTY = "qits.test.userflows-it.eventstream-url";
 
   @Override
   public Map<String, String> getConfigOverrides() {
@@ -113,6 +123,7 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
     Map<String, String> overrides = new LinkedHashMap<>(super.getConfigOverrides());
 
     overrides.put("QITS_RESOURCE_DB_URL", databaseUrl());
+    overrides.put("QITS_RESOURCE_EVENTSTREAM_URL", eventstreamUrl());
 
     overrides.put("qits.maintenance.targets.projects-url", url(StoryTarget.PROJECTS));
     overrides.put("qits.maintenance.targets.githost-url", url(StoryTarget.GITHOST));
@@ -163,6 +174,16 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
     // localhost resolves for the launched process too — it is a child of this JVM on this host.
     String url = EmbeddedPg.url(DATABASE);
     System.setProperty(URL_PROPERTY, url);
+    return url;
+  }
+
+  private static synchronized String eventstreamUrl() {
+    String recorded = System.getProperty(EVENTSTREAM_URL_PROPERTY);
+    if (recorded != null) {
+      return recorded;
+    }
+    String url = EmbeddedPg.url(EVENTSTREAM_DATABASE);
+    System.setProperty(EVENTSTREAM_URL_PROPERTY, url);
     return url;
   }
 }

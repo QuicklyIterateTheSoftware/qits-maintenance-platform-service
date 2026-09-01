@@ -33,7 +33,7 @@ public class MtScan extends PanacheEntityBase {
   @Column(length = 255)
   public String repository;
 
-  /** {@code ScanTrigger}'s names: MANUAL or SCHEDULED. */
+  /** {@code ScanTrigger}'s names: MANUAL, SCHEDULED or EVENT (a push to the repository's main). */
   @Column(name = "trigger", nullable = false, length = 32)
   public String trigger;
 

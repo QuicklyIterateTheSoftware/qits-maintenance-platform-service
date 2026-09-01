@@ -35,6 +35,11 @@ which is what `api/ApiWireReflection` exists for. The 202 from a queued scan and
 requested bump are exactly such responses. A new response type joins that list in the commit that
 adds it; the failure is a 500 in the native binary while every JVM test stays green.
 
+**`bus/EventWireReflection` is the second registration and the same rule from the other side**: the
+event bus binds through an `ObjectMapper` the library builds by hand, so every frame and payload type
+is invisible to the same analysis. A new listener's payload record joins that list in the commit that
+adds it. See "The event bus".
+
 ## Reading another repository
 
 **Resolve the head sha once, read every file at it.** `GitHostReader.head` reads the root tree at
@@ -188,6 +193,87 @@ failed the insert would leave a repository looking as though it pins nothing —
 Schema changes go in `maintenance/src/main/resources/db/maintenance/migration/`, hand-written, its
 own lineage on its own datasource. Keep appending, never edit an applied migration.
 
+**`ScanTrigger` and the four status enums are `@Enumerated`-style string columns under no check
+constraint, so a new value is one enum constant and no migration.** `ScanTrigger.EVENT` arrived that
+way. The invariant lives where the writes are — `ScanService.request` is the only writer of
+`mt_scan.trigger` and it takes the enum.
+
+## The event bus
+
+`service/…/bus/` is the whole of the wiring, and the machinery is the published `qits-eventstream`
+jar. Its rules live in that library's own repository and are not restated here. **This service
+subscribes and publishes nothing.**
+
+- **Two listeners, and their `consumerId()`s are STORAGE.** `maintenance-internal-latest`
+  (`SoftwareRelease`) and `maintenance-branch-tracking` (`SCMRelease`, `SCMDeleteBranch`,
+  `SCMPublishCommit`). Change one and you mint a brand-new consumer that initializes at the head of
+  the log, silently skipping everything in between; the old watermark is orphaned. Reuse one and a
+  listener inherits another's watermark, believing it has handled events it was never offered. Both
+  are pinned as literals in `bus/ForeignEventContractTest` for that reason.
+- **`mt_latest` has two writers now and they are deliberately different methods.**
+  `MaintenanceStore.recordLatest` is the POLL's and replaces the column whatever it says;
+  `recordLatestIfNewer` is the BUS's and only ever moves it forward. A poll asks a registry what the
+  newest version is — a downgrade is a real answer, because a package can be unpublished. An
+  announcement is evidence that THIS version exists and never that a higher one does not, so letting
+  the bus write through `recordLatest` would let a catch-up frame from yesterday rewind a column this
+  morning's scan filled, and every pin of that dependency would read as up to date until the next
+  scan. The guard is `VersionOrder`'s, the same comparison the pending rule makes. A frame that is not
+  newer writes **nothing at all**, `checked_at` included: stamping it would say a lookup happened.
+- **`BranchState.RELEASED` is only ever written from an event, and it could not be written any other
+  way.** The release is qits-workspaces' door — it tags, pushes and deletes the source branch — so
+  polling sees a branch disappear, which is exactly what a person deleting it by hand looks like. The
+  `SCMDeleteBranch` that follows moments later writes `NONE` over it, and that is correct rather than
+  a race: a released branch IS gone. `RELEASED` is the fact recorded in between. That same delete is
+  also the only thing that ever clears a `STALE` row.
+- **A main-branch push is a SCAN and never a bump.** `ScanTrigger.EVENT`, one repository, through
+  `ScanService.request` — the same path `POST /scans {repository}` takes, so it is a row a client can
+  follow, it is behind the one worker thread, and it closes itself on failure. What a push changes is
+  a manifest; whether the pending set becomes a branch is still the clock's standing instruction or a
+  person's press, and a bump per push would put a branch on every repository somebody touched today.
+  The debounce is `MaintenanceStore.scanPending`, against the store rather than a field, so it
+  survives a restart and sees a scan a person queued a second earlier.
+- **`selects()` is left at its default in both, and the filtering is inside `onFrame`.** The seam
+  wants a predicate that is PURE and cheap; every question worth asking here is a database read (is
+  this repository in the catalog, is that its main branch, is that group one of its own), it would be
+  asked once and then asked again in the handler, and one that threw on a blip would leave the event
+  owed for ever. The price is a claim row per frame of those four signatures, and it is bounded: the
+  library's sweeper prunes claims the watermark has passed by more than `prune-horizon`.
+- **Every handler failure is a decision between two.** A throw rolls the claim back and the event
+  stays owed — offered again for ever, with this listener's watermark stuck behind it, because the
+  seam has no dead letter. So: **poison** (a payload that will not parse, one naming no version, one
+  naming a repository or group this inventory does not hold) is a WARN or a DEBUG and a return;
+  **retryable** (the store will not answer) is left to throw. Both listener tests assert both arms.
+- **The consumed payloads are TRANSCRIPTIONS and `bus/ForeignEventContractTest` is where they are
+  kept.** qits-workspaces publishes no vocabulary jar at all, and taking qits-ci-events or
+  qits-githost-events would be a compile-time dependency on another context for four field lists. So
+  each record copies a component list, the canonical bytes are produced by the library's own
+  serializer rather than by a JSON fixture, and the tests drive those bytes through the listeners'
+  records. **A rename over there is a change to that file in the same campaign**; landing it there and
+  not here leaves this suite green and a listener deaf.
+- **`bus/EventWireReflection` is the second member of `api/ApiWireReflection`'s family** and is there
+  for a related but distinct reason: `CanonicalJson` builds its OWN `ObjectMapper` — deliberately and
+  permanently, because the canonical form is a wire contract another service compares byte for byte —
+  so everything it binds is invisible to the build step that scans for what needs reflecting on. On a
+  JVM these reflect whether anyone registered them or not, which is what lets the omission survive a
+  green suite; the failure is in the binary, on the first frame. `EventPage` and the
+  `CanonicalJson$QitsEventMixin` are named as STRINGS because both are non-public in the library, and
+  `EventWireReflectionTest` resolves both so a rename cannot rot silently. Leaving `EventPage` out
+  costs **catch-up alone** — the half that only matters after a cutover. Do not "fix" a recurrence by
+  injecting the CDI mapper.
+- **The jar brings a MANDATORY deployment resource, and the resource NAME is load-bearing.**
+  `.config/qits/deployments.yml` declares
+  `postgresql:eventstream:qits_platform_maintenance_eventstream`; the jar reads
+  `QITS_RESOURCE_EVENTSTREAM_*`, whose names follow it. `qits.eventstream.enabled=false` (`%dev`,
+  `%test`) stops publishing, sweeping and dialling — never the datasource, which Quarkus opens and
+  Flyway migrates at boot regardless. That is why the suite hands out a second database
+  (`testdb/EmbeddedPgConfigSource`) and why `PackagedSurfaceIT` supplies a second triple **and** turns
+  the bus off by hand: a launched artifact runs in NORMAL mode, where `%test` does not apply.
+- **Nothing about the bus is configured in `application.properties` except the darkness.**
+  `qits.events.url`, the outbox datasource and its resilience baseline, the timeouts, the retry budget
+  and the catch-up schedule are ordinal-100 defaults in the jar. A copy here would be a second place
+  to change. (That also means `DatasourceBaselineTest` passes for the second datasource without a line
+  in this repository — the jar ships the three.)
+
 ## Identity: two tracks, one set of roles
 
 A request with no `Authorization` header is USER traffic — qits-gateway performed the login and
@@ -219,7 +305,10 @@ a JWKS, and a clone-alone build needs no issuer. There is no third state.
   `EmbeddedPgConfigSource` hands its coordinates to every `@QuarkusTest` at an ordinal above
   `application.properties`, because the port is chosen at run time. Both are **copied** per module
   rather than shared: a test-jar dependency between two modules that have none is the higher price.
-  Each module names its own database.
+  **Every (module, datasource) pair names its own database** — `maintenance_domain`,
+  `maintenance_svc`, `maintenance_svc_eventstream`, and the two ITs' pairs — so no two suites can
+  mean one schema. `service` hands out six values rather than three because the bus jar opens a
+  second datasource whether it is dark or not.
 - **`FakePeers` is an `@Alternative` over `PeerClient.get` / `.post`** — replacing those two is
   replacing the network, at no port and no dependency, and the urls in the assertions stay the real
   ones because the inherited `url()` still resolves them from the shipped target configuration. It
@@ -232,6 +321,12 @@ a JWKS, and a clone-alone build needs no issuer. There is no third state.
   request context for the whole method, so one Hibernate session would answer every read from its
   first-level cache — the row would look unchanged for ever while the worker closed it in another
   session.
+- **The same rock reaches `MaintenanceStoreTest`, and the shape that avoids it is "every write, then
+  one read".** A store read outside a transaction is answered by the request-bound session, while
+  every store WRITE runs in `DbRetry.inNewTx` on a session bound to its own transaction. Read the row
+  between two writes and the first session answers the later reads from its cache, and an assertion
+  about the last write fails against a store that is perfectly correct. Measured 2026-09-01 writing
+  the forward-only latest tests.
 - **`InventoryReset` empties the store between methods, after `WorkQueue.awaitIdle`.** Flyway's
   `clean-at-start` runs per Quarkus start, not per test, and an active bump row holds its branch's
   lock: without the reset the second test of a class is answered 409 by the first test's leftovers.
@@ -333,10 +428,16 @@ Both keep their coverage in `MaintenanceApiTest`, which drives `bumps.sweep()` b
 
 **What the catalogue does not show, because this service does not do it.** There is no story of a
 commit being made, a file being written or a ref being pushed: this service decides and a CI step
-applies, so the furthest arrow out of it is a `MaintenanceBump` trigger. There is no `event` edge
-anywhere — the `SoftwareRelease` bus listener is deliberately a later release and v1 polls. And
-nothing here transitively resolves, orders an external base image or runs `ng update`; each is a
-decision recorded under "Deliberately not here yet", not a gap in the stories.
+applies, so the furthest arrow out of it is a `MaintenanceBump` trigger. And nothing here
+transitively resolves, orders an external base image or runs `ng update`; each is a decision recorded
+under "Deliberately not here yet", not a gap in the stories.
+
+**There is still no `event` edge in any story, and that is now a gap rather than an absence.** The
+two bus listeners are real (see "The event bus" above), and `StoryProfile` inherits the parent
+profile's `qits.eventstream.enabled=false` — so the launched process dials nothing and no story
+walks an arriving frame. Covering one would mean a qits-events stand-in on the far side of a
+websocket, which is a stand-in of a different kind from the five `StoryPeers` and a decision worth
+making deliberately. The listeners' own coverage is `bus/*Test`, driving `onFrame` directly.
 
 ## The client
 
@@ -370,9 +471,6 @@ pom, because Quinoa is in no BOM and its version does not track the platform's.
 
 Each is a decision, not an omission:
 
-- **A `SoftwareRelease` listener.** Polling only in v1 — the bus listener that turns an internal
-  release into "pending" within seconds is the second release, and it arrives with the eventstream
-  vocabulary jar every announcing service has.
 - **Transitive dependencies.** A manifest holds direct pins and only those have a line to edit.
 - **External base image tags.** `FROM eclipse-temurin:…` — ordering tags across vendors is a later
   decision, and the mirror would answer with an upstream's whole tag history with no rule to rank

@@ -23,6 +23,8 @@ The contract — routes, model, config keys, schedules and the bump payload — 
 | external latest | qits-platform-mirror | `central` maven-metadata, `npmjs` packument |
 | applying a bump | qits-ci | `POST /ci/api/events/trigger`, event `MaintenanceBump` |
 | the bump's outcome | qits-ci + qits-githost | `GET /ci/api/runs/{id}`, then the branch head |
+| an internal release | qits-events | `SoftwareRelease` off the durable bus — see **The event bus** |
+| a branch's life | qits-events | `SCMRelease`, `SCMDeleteBranch`, `SCMPublishCommit` |
 
 **The head sha is resolved once per repository and every manifest is read at it.** The git host
 stamps `Git-Commit-Sha` on every tree and blob answer, so one read of the root tree at `main` both
@@ -163,6 +165,55 @@ node/docker step each clone, commit and push.
 | red | unmoved | `FAILED` | `FAILED` |
 | red | **moved** | `FAILED` | `STALE` — the push is ff-only and never forced, so a branch that moved anyway is a person's commit. They own it now. |
 
+## The event bus
+
+**This service subscribes and publishes nothing.** Two durable listeners on the platform's
+`qits-eventstream` bus turn four facts other services know into inventory writes within seconds,
+where v1 waited up to six hours for a poll.
+
+| listener | `consumerId` (storage — never change it) | events | what it does |
+|---|---|---|---|
+| `bus/SoftwareReleaseListener` | `maintenance-internal-latest` | `SoftwareRelease` (qits-ci) | moves `mt_latest` **forward only**, so every pin of that dependency is pending the moment the package is in the registry |
+| `bus/ScmEventListener` | `maintenance-branch-tracking` | `SCMRelease` (qits-workspaces), `SCMDeleteBranch`, `SCMPublishCommit` (qits-githost) | writes a maintenance branch's state, and re-reads one repository's manifests after a push to its main branch |
+
+- **`SoftwareRelease` is the only writer of `mt_latest` that moves it forward only**, and that is the
+  difference between an announcement and a poll. A poll ASKS a registry what the newest version is
+  and the answer replaces what was there, downgrades included; an announcement is evidence that THIS
+  version exists and never that a higher one does not. Without the guard, a catch-up frame from
+  yesterday would rewind a column this morning's scan filled, and the whole inventory would report
+  that dependency as up to date until the next scan. `packageName` joins `mt_pin`'s naming directly:
+  maven `g:a`, npm `@scope/name`, docker `qits/<name>`. `daemon` and `docs` releases settle — they
+  are real facts and nothing pins them.
+- **`SCMRelease` is the only thing that can ever write `BranchState.RELEASED`.** The release is
+  qits-workspaces' door: it tags, pushes, and deletes the source branch. Polling would see the branch
+  disappear, which is indistinguishable from a person deleting it by hand — only the door knows a
+  release happened. The `SCMDeleteBranch` that follows writes `NONE` over it, which is correct (a
+  released branch IS gone, and `NONE` is "the next bump starts fresh from main"); `RELEASED` is the
+  fact recorded in between. The same delete is also the only thing that clears a `STALE` row.
+- **A push to a repository's own main branch queues a scan of that ONE repository**, through the same
+  path `POST /scans {repository}` takes, with `trigger: EVENT`. It **never bumps** — a push changes a
+  manifest, and whether the pending set becomes a branch is still the clock's standing instruction or
+  a person's press. A burst of pushes is debounced against a scan of that repository already queued
+  or running.
+- **The daily scans are the reconciliation belt, not the mechanism.** The internal cron moved from
+  every six hours to 00:30 daily when these landed. It still covers three things no listener can: an
+  event that was never published or was settled as poison, a repository added to the catalog (which
+  announces nothing here), and the window after a new consumer starts at the head of the log and
+  skips everything published before it.
+- **Delivery is durable, so a disconnect is a delay rather than a hole.** A claim and the handler run
+  in one transaction and a watermark is paged forward from qits-events' log at startup and on a
+  schedule. The failure rule is the seam's: a payload that will not parse, or one naming a repository
+  or group this inventory does not hold, is poison — a WARN and a settle; a database that will not
+  answer is left to throw, and the event stays owed for the next sweep.
+- **The consumed payloads are TRANSCRIPTIONS of records in three other repositories**, decoded into
+  local records so no foreign jar is on the path, and pinned by `bus/ForeignEventContractTest`. A
+  rename over there is a change to that file in the same campaign.
+- **The bus brings a second database.** `.config/qits/deployments.yml` declares
+  `postgresql:eventstream:qits_platform_maintenance_eventstream`, and the resource name is
+  load-bearing — the jar reads `QITS_RESOURCE_EVENTSTREAM_*`. It is dark in `%dev` and `%test`
+  (`qits.eventstream.enabled=false`), and **dark is not absent**: the datasource is opened and
+  migrated at boot regardless.
+
 ## API
 
 Under `/maintenance/api`, path-routed on every vhost. Every route takes `qits:admin` (a person, via
@@ -233,7 +284,7 @@ environment without a rebuild.
 | `qits.maintenance.internal.npm-scopes` | `@qits` | which npm scopes it publishes |
 | `qits.maintenance.internal.image-prefixes` | `qits/` | which images it publishes |
 | `qits.maintenance.scan.enabled` | `true` | whether the CLOCK may scan |
-| `qits.maintenance.scan.internal.cron` | `0 0 */6 * * ?` | the internal scan |
+| `qits.maintenance.scan.internal.cron` | `0 30 0 * * ?` | the internal scan, 00:30 daily — the reconciliation belt behind the bus |
 | `qits.maintenance.scan.external.cron` | `0 0 1 * * ?` | the external scan, 01:00 daily |
 | `qits.maintenance.time-zone` | `UTC` | the zone both crons are read in |
 | `qits.maintenance.bump.enabled` | `true` | whether a branch may be pushed at all |
@@ -273,6 +324,11 @@ Off, calls go out with the forward-auth pair alone (`X-Qits-User: qits-platform-
 `mt_pin`, `mt_group`, `mt_latest` (an inventory a scan replaces wholesale) and `mt_scan`,
 `mt_branch`, `mt_bump` (a log of what was asked and what came back, derivable from nothing).
 
+**A second database, `qits_platform_maintenance_eventstream`**, declared by
+`postgresql:eventstream:<name>` beside it, holds the bus's outbox and the two durable consumers'
+claim ledger and watermarks. It is qits-eventstream's, with its own Flyway lineage, and it is never
+shared with the store above.
+
 ## Rollout needs
 
 **The idp client `qits-platform-maintenance` is the orchestrator's shape plus one claim.** The
@@ -293,6 +349,25 @@ listing the three services above.
 pipeline that answers `MaintenanceBump` — and a qits-ci release carrying platform pipelines. Until
 both exist every bump ends FAILED with `no run recorded for MaintenanceBump`, which is the honest
 answer rather than a silent success.
+
+**The bus needs one deploy and one check, in that order.**
+
+- **Deploy A — the resource.** The second `resources:` line is read at the built sha, so the first
+  deployment carrying it is what creates `qits_platform_maintenance_eventstream` and injects
+  `QITS_RESOURCE_EVENTSTREAM_*`. The variables have no defaults on purpose: a container started
+  without them dies at Flyway naming what is missing, and the health gate keeps the previous one — a
+  loud, safe failure rather than a fallback store nobody meant. `QITS_EVENTS_URL` defaults to the
+  qits-net alias `http://qits-events:8080` and needs nothing.
+- **Deploy B — confirm the maven `packageName` against ONE live frame.** The three name spellings
+  the release listener assumes are read off the `artifacts:` declarations committed in the
+  platform's own `ci-event-release.yml` files, which qits-ci copies into the payload verbatim; maven
+  is the one worth checking by hand, because it is the only name carrying a separator and a frame
+  arriving as `qits-eventstream` rather than `eu.wohlben.qits:qits-eventstream` would write a row
+  nothing joins to and say nothing about it. After the first internal release following the deploy,
+  read that frame's payload and compare it with the same artifact's `mt_pin.name`.
+- **Both consumers start at the HEAD of the log.** `maintenance-internal-latest` and
+  `maintenance-branch-tracking` are new storage keys, so every release published before the deploy
+  is skipped. That is what the 00:30 scan is for; nothing has to be replayed by hand.
 
 ## Building and testing
 

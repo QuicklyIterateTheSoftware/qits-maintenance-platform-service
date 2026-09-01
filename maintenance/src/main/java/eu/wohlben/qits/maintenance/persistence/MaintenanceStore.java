@@ -11,6 +11,7 @@ import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.entity.MtScan;
 import eu.wohlben.qits.maintenance.error.BumpAlreadyActiveException;
 import eu.wohlben.qits.maintenance.latest.LatestLookup;
+import eu.wohlben.qits.maintenance.latest.VersionOrder;
 import eu.wohlben.qits.maintenance.manifest.GroupConfig;
 import eu.wohlben.qits.maintenance.manifest.ParsedPin;
 import eu.wohlben.qits.maintenance.model.BranchState;
@@ -191,6 +192,73 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
         });
   }
 
+  /**
+   * One dependency's latest, moved FORWARD ONLY — the bus's write, beside {@link #recordLatest}'s
+   * polled one.
+   *
+   * <p><b>Why a second method rather than a flag on the first.</b> A poll ASKS a registry what the
+   * newest version is and the answer replaces whatever was there, downgrades included: a package
+   * that was unpublished really is behind now. An event ANNOUNCES one release, and an announcement
+   * is only ever evidence that this version exists — never that a higher one does not. Letting the
+   * bus write through {@code recordLatest} would let a catch-up frame from yesterday rewind a column
+   * a scan filled this morning, and the whole inventory would show that dependency as up to date
+   * until the next scan.
+   *
+   * <p>So the guard is {@link VersionOrder}'s, in that ecosystem's own order, and it is the same
+   * comparison the pending rule makes. Three cases and only the first writes:
+   *
+   * <ul>
+   *   <li>no row at all, or a row whose lookup FAILED ({@code latest} null) — the announcement is
+   *       the first thing known about this dependency, so it is adopted;
+   *   <li>a strictly newer version — the column moves and {@code error} is cleared;
+   *   <li>anything else — an equal version (the ordinary redelivery), or an older one (a catch-up
+   *       frame behind a scan) — and <b>nothing at all is written</b>, {@code checked_at} included.
+   *       Stamping the timestamp would say a lookup happened, and none did.
+   * </ul>
+   *
+   * <p>That makes it idempotent under redelivery by construction: the second offer of one release is
+   * not newer than the first, so it is a read and a return.
+   *
+   * @param sourceUrl where the claim came from — the bus writes {@code event:<frame id>}, which is
+   *     what tells a surprising row from a registry read
+   * @return whether the column moved
+   */
+  @ActivateRequestContext
+  public boolean recordLatestIfNewer(
+      Ecosystem ecosystem, String name, String version, String sourceUrl, Instant now) {
+    if (version == null || version.isBlank()) {
+      return false;
+    }
+    return DbRetry.inNewTx(
+        "record the announced latest of " + name,
+        () -> {
+          MtLatest row =
+              MtLatest.find("ecosystem = ?1 and name = ?2", ecosystem.wireName(), name)
+                  .firstResult();
+          if (row != null
+              && row.latest != null
+              && !VersionOrder.newer(ecosystem, row.latest, version)) {
+            return false;
+          }
+          boolean fresh = row == null;
+          if (fresh) {
+            row = new MtLatest();
+            row.id = UUID.randomUUID();
+            row.ecosystem = ecosystem.wireName();
+            row.name = name;
+          }
+          row.latest = version;
+          row.sourceUrl = sourceUrl;
+          row.error = null;
+          row.checkedAt = now;
+          if (fresh) {
+            row.persist();
+          }
+          getEntityManager().flush();
+          return true;
+        });
+  }
+
   @ActivateRequestContext
   public List<MtRepository> repositories() {
     return listAll(Sort.by("name"));
@@ -294,6 +362,29 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
           getEntityManager().flush();
           return (long) open.size();
         });
+  }
+
+  /**
+   * Whether a scan of exactly this repository is already queued or running — the bus's debounce.
+   *
+   * <p>A push to a repository's main branch asks for that one repository to be re-read, and a burst
+   * of pushes is the ordinary shape of a merge. Without this, five pushes in a minute are five scan
+   * rows queued behind one worker thread, each re-reading a tree the one in front of it already
+   * read.
+   *
+   * <p><b>It is repository-scoped exactly, and a whole-catalog scan is deliberately NOT counted.</b>
+   * A full scan does cover this repository, so counting it would debounce correctly — but it runs
+   * for minutes, and suppressing an event's rescan for the length of one would mean a push landing
+   * during the nightly scan is read at whatever revision that scan happened to reach. One extra
+   * git-host read behind a single-threaded queue is the cheaper mistake.
+   */
+  @ActivateRequestContext
+  public boolean scanPending(String repository) {
+    return MtScan.count(
+            "repository = ?1 and status in ?2",
+            repository,
+            List.of(ScanStatus.REQUESTED.name(), ScanStatus.RUNNING.name()))
+        > 0;
   }
 
   @ActivateRequestContext
