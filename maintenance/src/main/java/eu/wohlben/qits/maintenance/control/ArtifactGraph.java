@@ -84,6 +84,7 @@ public class ArtifactGraph {
           new RepositoryDependentsDto.ArtifactDependentsDto(
               artifact.ecosystem,
               artifact.name,
+              store.latest(ecosystem.get(), artifact.name).map(row -> row.latest).orElse(null),
               store.dependents(ecosystem.get(), artifact.name, true).stream()
                   .map(ArtifactGraph::dependent)
                   .toList()));

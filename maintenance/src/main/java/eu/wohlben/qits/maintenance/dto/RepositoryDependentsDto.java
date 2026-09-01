@@ -21,8 +21,11 @@ public record RepositoryDependentsDto(String repository, List<ArtifactDependents
    *
    * @param ecosystem the artifact's world
    * @param name the artifact
+   * @param latest the newest version this service knows for it ({@code mt_latest}), null when no
+   *     lookup or event has answered yet — what lets a reader judge each dependent's embedded
+   *     version as current or behind without a second request
    * @param dependents the newest release of every artifact of ours that embeds it
    */
   public record ArtifactDependentsDto(
-      String ecosystem, String name, List<DependentDto> dependents) {}
+      String ecosystem, String name, String latest, List<DependentDto> dependents) {}
 }
