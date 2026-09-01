@@ -64,10 +64,11 @@ public class PeerTokens {
   OidcClient mirror;
 
   /**
-   * The release door's, and the one whose ROLES matter as well as its audience: qits-workspaces
-   * guards {@code /branches/release} with {@code qits:admin}, so this client's grant at
-   * qits-platform-idp has to carry it. A client that mints happily and is then refused 403 is the
-   * failure this note exists to make findable.
+   * The release door's. The door admits {@code qits:system} beside {@code qits:admin} — the pair
+   * its execute arm always carried — so this client's ordinary machine grant opens it. A client
+   * that mints happily and is then refused 403 means the deployed qits-workspaces predates that
+   * widening; the ask is retried until its release lands, and that is the failure this note exists
+   * to make findable.
    */
   @Inject
   @NamedOidcClient("workspaces")

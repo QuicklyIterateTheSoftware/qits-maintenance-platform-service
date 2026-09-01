@@ -467,13 +467,13 @@ QUARKUS_OIDC_CLIENT_CI_GRANT_OPTIONS_CLIENT_AUDIENCE=dev-qits-ci
 Off, calls go out with the forward-auth pair alone (`X-Qits-User: qits-platform-maintenance`,
 `X-Qits-Roles: qits:system`), which every call carries regardless.
 
-**The `workspaces` client is the one whose ROLES matter as well as its audience.**
-`POST /workspaces/api/branches/release` is `@RolesAllowed("qits:admin")` — every other peer route
-this service calls is a machine route that `qits:system` opens. So its audience is
-`qits-workspaces` (not environment-qualified: qits-workspaces is platform-wide) *and* this service's
-idp client has to be granted `qits:admin`. Without it the bearer authenticates and is refused 403,
-which `ReleaseDoorClient` classifies as retryable on purpose so the ask heals the moment the grant
-lands. See *Rollout needs*.
+**The `workspaces` client needs only its audience.** `POST /workspaces/api/branches/release`
+admits `qits:system` beside `qits:admin` — the same pair its execute arm always carried — precisely
+so this machine's ordinary grant opens it; the bootstrap's doctrine that `qits:admin` is a PERSON's
+role stands untouched. The audience is `qits-workspaces` (not environment-qualified:
+qits-workspaces is platform-wide). Against a qits-workspaces older than the widening the bearer
+authenticates and is refused 403, which `ReleaseDoorClient` classifies as retryable on purpose so
+the ask heals the moment that release lands. See *Rollout needs*.
 
 **The store** is its own PostgreSQL database, `qits_platform_maintenance`, declared by
 `resources: postgresql:db` in `.config/qits/deployments.yml`. Ten tables in three families:
@@ -496,14 +496,14 @@ claim is not optional — it is a route this service cannot use without it.
 | what | why |
 |---|---|
 | roles `qits:system`, `qits-platform:system` | the same pair qits-platform-orchestrator's client carries. It covers qits-projects' catalog, qits-githost's content policy, qits-ci's trigger and — since qits-ci a3ecce2 — the read-only run and repository routes the bump poller follows. |
-| role `qits:admin` | **NEW, and it is not optional.** qits-workspaces guards `POST /branches/release` with `@RolesAllowed("qits:admin")`; a bump that pushed a branch cannot hand it on without this. It is the same grant qits-ci's and qits-workspaces' own clients were given for exactly this door — the door is a human-shaped operation that a machine is being let through, not a machine route. Today `qits-bootstrap`'s `ComposeTemplate` gives this client `qits:system,qits-platform:system` only, so **the grant is an edit over there**. Until it lands every release ask is a 403; that is retried rather than fatal, and the per-repo `ci-event-maintenance-release.yml` trigger still releases the branch in the meantime. |
+| a qits-workspaces carrying the widened door | **NEW, and it is a release over there rather than a grant here.** `POST /branches/release` now admits `qits:system` beside `qits:admin` (the pair the execute arm always had), so this client's ordinary machine grant opens it and no `qits:admin` lands on a service — the bootstrap's "qits:admin is a person's role" doctrine stands. Until that qits-workspaces release is deployed every release ask is a 403; that is retried rather than fatal, and the per-repo `ci-event-maintenance-release.yml` trigger still releases the branch in the meantime. |
 | claim `project` = `*` | qits-ci's trigger calls `machineAuth.requireProject("*")`, which passes only for a token literally granted every project. The bump names one repository but the trigger route demands them all. Today the only such grant is qits-platform-artifacts'; this service needs its own. |
 | audiences `<env>-qits-ci`, `qits-projects`, `qits-githost` | a token is cut for one service. qits-githost ships `qits.auth.machine.required=true`, so its content reads need a real bearer addressed to it. |
 | audience `qits-workspaces` | the release door. Not environment-qualified — qits-workspaces is platform tier like this service. |
 | audiences `qits-platform-artifacts`, `qits-platform-mirror` | **not needed today** — the registry routes and the mirror's proxies are unguarded on qits-net. The two clients ship disabled for the day the edge's rule reaches the inside. |
 
 In `qits-configuration` / `.qits-bootstrap.env` terms that is a client with
-`_ROLES` carrying `qits:system,qits-platform:system,qits:admin`, `_CLAIMS_PROJECT: "*"`, and
+`_ROLES` carrying `qits:system,qits-platform:system` (unchanged), `_CLAIMS_PROJECT: "*"`, and
 `_AUDIENCES` listing the four services above.
 
 **The wrapper needs `.config/qits/ci-platform-event-maintenance-bump.yml`** — the platform-level
