@@ -5,9 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.GroupSource;
 import eu.wohlben.qits.maintenance.model.PinKind;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /** A repository's own grouping, and what happens when it is not one. */
@@ -133,5 +135,106 @@ class GroupConfigTest {
         GroupConfig.parse(
                 "groups:\n  - name: a\n    deps: [\"x\"]\n  - name: a\n    deps: [\"y\"]\n")
             .ok());
+  }
+
+  // --- ignore: a whole ecosystem taken off the repository -------------------------------------
+
+  /** THE WRAPPER'S CASE. Its gitlinks are bank markers the repository states are expected to lag. */
+  @Test
+  void ignoreTakesOneEcosystemOffTheRepository() {
+    GroupConfig.Parsed parsed = GroupConfig.parse("ignore: [gitlink]\n");
+
+    assertTrue(parsed.ok());
+    assertEquals(Set.of(Ecosystem.GITLINK), parsed.ignored());
+    assertTrue(parsed.ignores(Ecosystem.GITLINK));
+    assertFalse(parsed.ignores(Ecosystem.MAVEN), "one ecosystem, not the repository");
+    // It said nothing about grouping, so it gets the grouping a repository that said nothing gets.
+    assertEquals(GroupSource.DEFAULT, parsed.source());
+    assertEquals(
+        List.of(GroupConfig.DEFAULT_GROUP, GroupConfig.EXTERNAL_GROUP),
+        parsed.groups().stream().map(GroupConfig.Group::name).toList());
+  }
+
+  @Test
+  void severalEcosystemsMayBeIgnoredAtOnce() {
+    GroupConfig.Parsed parsed = GroupConfig.parse("ignore: [gitlink, docker]\n");
+
+    assertTrue(parsed.ok());
+    assertEquals(Set.of(Ecosystem.GITLINK, Ecosystem.DOCKER), parsed.ignored());
+    assertFalse(parsed.ignores(Ecosystem.NPM));
+  }
+
+  /**
+   * A TYPO IS NOT AN OPT-OUT. This file is this service's own configuration surface — unlike
+   * {@code .gitmodules}, which git owns — so a name it does not know is the file being wrong, and
+   * the repository is told so on its row. Dropping it silently would read as a working `ignore`
+   * while the ecosystem the author meant to protect went on being bumped nightly.
+   */
+  @Test
+  void anUnknownEcosystemNameIsAnInvalidFile() {
+    GroupConfig.Parsed parsed = GroupConfig.parse("ignore: [gitlinks]\n");
+
+    assertFalse(parsed.ok());
+    assertTrue(parsed.error().contains("gitlinks"), "the sentence names what it could not read");
+    assertTrue(parsed.ignored().isEmpty(), "an invalid file ignores nothing");
+    // One good name beside one bad one does not rescue the file.
+    assertFalse(GroupConfig.parse("ignore: [maven, npmm]\n").ok());
+  }
+
+  @Test
+  void ignoreMustBeAListOfNonEmptyNames() {
+    assertFalse(GroupConfig.parse("ignore: gitlink\n").ok());
+    assertFalse(GroupConfig.parse("ignore: [\"\"]\n").ok());
+    assertFalse(GroupConfig.parse("ignore: [{name: gitlink}]\n").ok());
+  }
+
+  /** The two keys are independent questions and one file may answer both. */
+  @Test
+  void ignoreAndGroupsTravelInOneFile() {
+    GroupConfig.Parsed parsed =
+        GroupConfig.parse(
+            """
+            ignore: [gitlink]
+            groups:
+              - name: angular
+                deps: ["@angular/*"]
+            """);
+
+    assertTrue(parsed.ok());
+    assertEquals(Set.of(Ecosystem.GITLINK), parsed.ignored());
+    assertEquals(GroupSource.CONFIG, parsed.source());
+    assertEquals(
+        List.of("angular", GroupConfig.DEFAULT_GROUP, GroupConfig.EXTERNAL_GROUP),
+        parsed.groups().stream().map(GroupConfig.Group::name).toList());
+    // The order the keys are written in is not the meaning: only the groups' own order is.
+    assertEquals(
+        parsed.groups().stream().map(GroupConfig.Group::name).toList(),
+        GroupConfig.parse(
+                """
+                groups:
+                  - name: angular
+                    deps: ["@angular/*"]
+                ignore: [gitlink]
+                """)
+            .groups()
+            .stream()
+            .map(GroupConfig.Group::name)
+            .toList());
+  }
+
+  /** A broken `groups` is still a broken file, whatever `ignore` said beside it. */
+  @Test
+  void aFileWithAGoodIgnoreAndABadGroupIsInvalid() {
+    assertFalse(GroupConfig.parse("ignore: [gitlink]\ngroups:\n  - name: has/slash\n    deps: [\"*\"]\n").ok());
+  }
+
+  @Test
+  void aRepositoryThatSaysNothingIgnoresNothing() {
+    assertTrue(GroupConfig.fallback().ignored().isEmpty());
+    assertTrue(GroupConfig.parse("").ignored().isEmpty());
+    assertTrue(
+        GroupConfig.parse("groups:\n  - name: angular\n    deps: [\"@angular/*\"]\n")
+            .ignored()
+            .isEmpty());
   }
 }

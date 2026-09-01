@@ -41,6 +41,12 @@ import org.jboss.logging.Logger;
  * {@code .gitmodules} plus the mode-{@code 160000} entry in the tree say which repository is
  * embedded and at which commit — one line this repository owns and can move. Its contents belong to
  * the submodule's own row, which is why the two never meet.
+ *
+ * <p><b>A repository may take a whole ecosystem off this scan.</b> {@code ignore:} in
+ * {@code .config/qits/maintenance.yml} names ecosystems by their wire name, and one named there is
+ * not parsed here at all — no reads, no pins, so nothing to store, group or offer. The motivating
+ * case is the qits-qits wrapper, whose forty-seven gitlinks are DELIBERATELY lagging bank markers
+ * rather than version pins; see {@link GroupConfig} for the whole of that argument.
  */
 @ApplicationScoped
 public class ManifestScanner {
@@ -74,7 +80,7 @@ public class ManifestScanner {
    *
    * @param status the row's status
    * @param headSha the commit every pin was read at, null unless the status is OK or CONFIG_ERROR
-   * @param pins every direct pin found, in discovery order
+   * @param pins every direct pin found, in discovery order — an ignored ecosystem contributes none
    * @param groups the repository's grouping, empty when the status is CONFIG_ERROR
    * @param message the sentence for the row, null when the status is OK
    */
@@ -113,23 +119,43 @@ public class ManifestScanner {
     }
 
     String headSha = root.headSha();
+
+    // THE CONFIG IS READ BEFORE THE MANIFESTS, because it may say not to read some of them at all.
+    // An ecosystem the repository named under `ignore` is skipped here rather than filtered later:
+    // there is no pin to filter, and the reads that would have found one are not made either. A
+    // file that will not parse ignores nothing — the set is empty on the error path — so a broken
+    // config still reports whatever the manifests hold, exactly as it did before `ignore` existed.
+    GroupConfig.Parsed config = groups(project, name, headSha);
+
     List<ParsedPin> pins = new ArrayList<>();
-    pins.addAll(mavenPins(project, name, headSha, root));
-    pins.addAll(npmPins(project, name, headSha, root));
-    pins.addAll(dockerPins(project, name, headSha, root));
-    pins.addAll(gitlinkPins(project, name, headSha, root));
+    if (!config.ignores(Ecosystem.MAVEN)) {
+      pins.addAll(mavenPins(project, name, headSha, root));
+    }
+    if (!config.ignores(Ecosystem.NPM)) {
+      pins.addAll(npmPins(project, name, headSha, root));
+    }
+    if (!config.ignores(Ecosystem.DOCKER)) {
+      pins.addAll(dockerPins(project, name, headSha, root));
+    }
+    if (!config.ignores(Ecosystem.GITLINK)) {
+      pins.addAll(gitlinkPins(project, name, headSha, root));
+    }
     // ONE ROW PER LINE. Every module of a reactor names the same root property, and each one
     // produced a pin against the root pom above. They are one line and one change; without this
     // the payload would carry the same edit once per module and the commit message would repeat it.
     pins = dedupe(pins);
 
-    GroupConfig.Parsed groups = groups(project, name, headSha);
-    if (!groups.ok()) {
+    if (!config.ok()) {
       return new Read(
-          RepositoryStatus.CONFIG_ERROR, headSha, List.copyOf(pins), List.of(), null, groups.error());
+          RepositoryStatus.CONFIG_ERROR, headSha, List.copyOf(pins), List.of(), null, config.error());
+    }
+    if (!config.ignored().isEmpty()) {
+      LOG.debugf(
+          "%s asks not to be scanned for %s",
+          name, config.ignored().stream().map(Ecosystem::wireName).toList());
     }
     return new Read(
-        RepositoryStatus.OK, headSha, List.copyOf(pins), groups.groups(), groups.source(), null);
+        RepositoryStatus.OK, headSha, List.copyOf(pins), config.groups(), config.source(), null);
   }
 
   private static Read absent(String name, String branch) {
@@ -374,7 +400,7 @@ public class ManifestScanner {
   }
 
   /**
-   * The repository's grouping.
+   * The repository's own file: its grouping, and the ecosystems it asks to be left out of.
    *
    * <p>An UNREACHABLE read of the file is treated as absent rather than as a config error: the
    * repository is readable — its manifests were just read at this sha — so a single failing blob is

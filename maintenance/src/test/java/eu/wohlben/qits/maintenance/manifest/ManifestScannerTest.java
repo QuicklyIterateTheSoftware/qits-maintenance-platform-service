@@ -23,6 +23,9 @@ import org.junit.jupiter.api.Test;
  * is also what makes the one thing worth proving here provable: <b>a gitlink whose sha the host
  * does not report produces no pin at all</b>. The shipped git host is exactly that host today; it
  * collapses every non-directory entry to {@code blob} and has never reported an object name.
+ *
+ * <p>The same seam carries the {@code ignore:} half at the end of the file: which ecosystems a
+ * repository is scanned for at all, proved by the reads that are and are not made.
  */
 class ManifestScannerTest {
 
@@ -195,6 +198,81 @@ class ManifestScannerTest {
         1,
         host.read.stream().filter(call -> call.equals("tree components/qits-ci")).count(),
         "one directory, one listing");
+  }
+
+  // --- ignore: the repository takes a whole ecosystem off its own scan -------------------------
+
+  /**
+   * A repository carrying both a gitlink and a Dockerfile. The wrapper is this shape at scale: its
+   * forty-seven gitlinks are bank markers it says outright are expected to lag, while everything
+   * else in it is an ordinary pin worth bumping.
+   */
+  private static Host mixed(String maintenanceYml) {
+    Host host =
+        new Host()
+            .tree(
+                "",
+                new TreeLookup.TreeEntry(".gitmodules", "blob"),
+                new TreeLookup.TreeEntry("Dockerfile", "blob"),
+                new TreeLookup.TreeEntry("service", "tree"))
+            .tree(
+                "service/src/main",
+                new TreeLookup.TreeEntry("webui", "blob", TreeLookup.TreeEntry.GITLINK_MODE, PINNED))
+            .blob(GitmodulesParser.PATH, GITMODULES)
+            .blob("Dockerfile", "FROM qits/build-images/maven-base:2026.813.1\n");
+    return maintenanceYml == null ? host : host.blob(GroupConfig.PATH, maintenanceYml);
+  }
+
+  /** The control: with no file, both ecosystems pin. */
+  @Test
+  void withoutAnIgnoreBothEcosystemsPin() {
+    List<ParsedPin> pins = read(mixed(null)).pins();
+
+    assertEquals(
+        List.of(Ecosystem.DOCKER, Ecosystem.GITLINK),
+        pins.stream().map(ParsedPin::ecosystem).toList());
+  }
+
+  /**
+   * AN IGNORED ECOSYSTEM'S PINS SIMPLY DO NOT EXIST. Not filtered afterwards and not stored and
+   * skipped later: there is no pin, and the reads that would have found one are never made either.
+   */
+  @Test
+  void anIgnoredEcosystemIsNotParsedWhileTheOthersStillPin() {
+    Host host = mixed("ignore: [gitlink]\n");
+
+    ManifestScanner.Read read = read(host);
+
+    assertEquals(RepositoryStatus.OK, read.status());
+    assertEquals(1, read.pins().size());
+    assertEquals(Ecosystem.DOCKER, read.pins().get(0).ecosystem());
+    assertTrue(
+        host.read.stream().noneMatch(call -> call.equals("blob " + GitmodulesParser.PATH)),
+        "an ignored ecosystem costs no read at all");
+    // The grouping is untouched: `ignore` is a different question from which branch a bump rides.
+    assertEquals(
+        List.of(GroupConfig.DEFAULT_GROUP, GroupConfig.EXTERNAL_GROUP),
+        read.groups().stream().map(GroupConfig.Group::name).toList());
+  }
+
+  /** Every ecosystem may be named, and a repository that names them all pins nothing. */
+  @Test
+  void aRepositoryMayIgnoreEveryEcosystemItHas() {
+    assertTrue(read(mixed("ignore: [maven, npm, docker, gitlink]\n")).pins().isEmpty());
+  }
+
+  /**
+   * A misspelled ecosystem is CONFIG_ERROR, and the manifests are still read: `ignore` could not be
+   * trusted to mean anything, so nothing is taken off the scan and the row says why.
+   */
+  @Test
+  void anUnknownEcosystemNameIsAConfigErrorOnTheRow() {
+    ManifestScanner.Read read = read(mixed("ignore: [gitlinks]\n"));
+
+    assertEquals(RepositoryStatus.CONFIG_ERROR, read.status());
+    assertTrue(read.message().contains("gitlinks"));
+    assertEquals(2, read.pins().size(), "a broken file ignores nothing");
+    assertTrue(read.groups().isEmpty(), "and nothing is bumped for it");
   }
 
   /** A file git wrote is not this service's configuration: an unreadable one is not CONFIG_ERROR. */

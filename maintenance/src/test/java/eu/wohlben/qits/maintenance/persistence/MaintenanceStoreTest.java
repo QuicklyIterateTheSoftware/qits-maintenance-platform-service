@@ -206,6 +206,64 @@ class MaintenanceStoreTest {
     assertNull(groups.get(0).kind);
   }
 
+  /**
+   * THE OPT-OUT NEEDS NO ERASE OF ITS OWN. A repository that adds {@code ignore: [gitlink]} is
+   * scanned again and the scan simply carries no gitlink pins; because an inventory is replaced
+   * wholesale rather than merged, the rows the earlier scans wrote are gone by the same delete that
+   * rewrites everything else. This is the qits-qits wrapper's case: forty-seven gitlink rows that
+   * stop existing the first night after the line is committed.
+   */
+  @Test
+  void pinsOfANewlyIgnoredEcosystemDisappearOnTheNextScan() {
+    String repository = "ignored-" + UUID.randomUUID();
+    ParsedPin gitlink =
+        ParsedPin.of(
+            Ecosystem.GITLINK,
+            "components/qits-ci/qits-ci-service",
+            "qits-ci-service",
+            "aa11bb22cc33dd44ee55ff6677889900aabbccdd",
+            null,
+            "gitlink:components/qits-ci/qits-ci-service");
+    store.replaceInventory(
+        repository,
+        "qits",
+        "main",
+        RepositoryStatus.OK,
+        "sha1",
+        null,
+        List.of(pin("g:a", "1.0.0", "dependency:g:a"), gitlink),
+        List.of(
+            GroupConfig.Group.ofKind(GroupConfig.DEFAULT_GROUP, PinKind.INTERNAL),
+            GroupConfig.Group.ofKind(GroupConfig.EXTERNAL_GROUP, PinKind.EXTERNAL)),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+
+    // The next scan read the same repository with `ignore: [gitlink]` in place: the maven pin is
+    // still there and the gitlink was never parsed, so it is not in what the scan hands over.
+    store.replaceInventory(
+        repository,
+        "qits",
+        "main",
+        RepositoryStatus.OK,
+        "sha2",
+        null,
+        List.of(pin("g:a", "1.0.0", "dependency:g:a")),
+        List.of(
+            GroupConfig.Group.ofKind(GroupConfig.DEFAULT_GROUP, PinKind.INTERNAL),
+            GroupConfig.Group.ofKind(GroupConfig.EXTERNAL_GROUP, PinKind.EXTERNAL)),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+
+    List<MtPin> pins = store.pins(repository);
+    assertEquals(1, pins.size());
+    assertEquals(Ecosystem.MAVEN.wireName(), pins.get(0).ecosystem);
+    assertTrue(
+        pins.stream().noneMatch(row -> Ecosystem.GITLINK.wireName().equals(row.ecosystem)),
+        "an ignored ecosystem's stored pins do not survive the rescan");
+  }
+
   @Test
   void aFailedLookupIsWrittenBecauseItIsNotTheSameAsUpToDate() {
     String name = "g:" + UUID.randomUUID();

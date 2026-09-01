@@ -129,6 +129,26 @@ grouping would put changes on a branch the author configured against.
 `GroupDto.kind` is `INTERNAL`, `EXTERNAL` or null: how the group claims, which is a different
 question from `source` (whether the repository asked for the grouping at all).
 
+The same file also carries `ignore:`, which takes a whole **ecosystem** off the repository:
+
+```yaml
+ignore: [gitlink]        # maven | npm | docker | gitlink
+```
+
+Grouping says which branch a bump rides on; `ignore` says the pin is not one at all. An ignored
+ecosystem is **not parsed, not stored, not grouped and never pending** — the manifests it would have
+read are not even fetched, and because an inventory is replaced wholesale, pins an earlier scan
+stored disappear on the first scan after the line is committed. **An unknown ecosystem name is
+`CONFIG_ERROR`**, like any other mistake in this file: a typo quietly dropped would read as a working
+opt-out while the ecosystem the author meant to protect went on being bumped nightly.
+
+The case it was built for is the **qits-qits wrapper**, whose forty-seven submodule gitlinks are
+deliberately lagging bank markers rather than version pins — its own README says they exist so
+`git submodule update --init` works on a fresh clone while the submodules follow their branches, and
+every entry carries `ignore = all` for the same reason. Without the opt-out this service would read
+those forty-seven lagging shas as forty-seven upgrades and open a nightly bump against a doctrine
+the repository states in writing. The mechanism is general; the wrapper is why it exists.
+
 ## Pending
 
 `mt_pin ⋈ mt_latest`, read through `mt_group`, computed on every read and never stored. A pin has to
