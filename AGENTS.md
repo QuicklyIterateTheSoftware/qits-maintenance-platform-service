@@ -116,8 +116,10 @@ because `.gitmodules` names a submodule and never its version. There is no regis
 its `mt_latest` row. `kindOf` hardcodes INTERNAL: a submodule is a repository on this platform's own
 git host, so a config key for it would be a knob whose only correct setting is the default.
 
-**And the git host does not report a tree entry's sha today**, so the whole half is inert on the
-deployed one: `serveTree` answers `name` and a two-valued `type` and collapses a gitlink to `blob`.
+**And the half arms only against a git host that reports a tree entry's sha** — qits-githost
+33b0ccf teaches `serveTree` to answer a gitlink as `type: "commit"` with `sha` and `mode: "160000"`;
+the DEPLOYED githost predates it and still answers `name` and a two-valued `type`, collapsing a
+gitlink to `blob`.
 `GitHostReader` reads an optional `mode`/`sha` when they are there; `ManifestScanner` pins nothing
 when they are not, which is deliberate — a made-up version here is compared by the pending rule and
 then applied by the step, into somebody else's repository. `ManifestScannerTest` pins both arms.
@@ -223,10 +225,12 @@ project's row *id* there, and the door resolves the segment by id first then by 
 addresses it, the same value `/git/<project>/<repo>` is read with. Nothing was added to
 `CatalogReader` for the door.
 
-**The door wants `qits:admin`, which no other call this service makes does.** Sixth oidc client,
-audience `qits-workspaces`, and a grant on the idp client that `qits-bootstrap` does not give today.
-A 401/403 is therefore classified RETRYABLE rather than refused, so the ask heals when the grant
-lands instead of needing the bump run again.
+**The door admits `qits:system` beside `qits:admin`** (qits-workspaces 7c0733b widened the ask arm
+to the pair its execute arm always had), so the sixth oidc client — audience `qits-workspaces` —
+needs only this service's ordinary machine grant and no person's role. Against a deployed
+qits-workspaces older than that widening the bearer authenticates and is refused; a 401/403 is
+therefore classified RETRYABLE rather than refused, so the ask heals when that release deploys
+instead of needing the bump run again.
 
 ## Persistence
 

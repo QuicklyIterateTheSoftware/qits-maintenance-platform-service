@@ -567,15 +567,16 @@ In `qits-configuration` / `.qits-bootstrap.env` terms that is a client with
 `_ROLES` carrying `qits:system,qits-platform:system` (unchanged), `_CLAIMS_PROJECT: "*"`, and
 `_AUDIENCES` listing the four services above.
 
-**Gitlinks need the git host to report a tree entry's sha, and today it does not.** `GET
-/git/<project>/<repo>/tree/<rev>[/<path>]` answers `{"entries":[{"name","type"}]}` and collapses
-every non-directory entry to `blob` — a symlink and a submodule alike — with no `mode` and no object
-name anywhere, and `blob`/`tree` of a gitlink path both 404. So a submodule's pinned commit cannot be
-read at all: this service reads `mode` and `sha` off a tree entry when they are there and pins
-**nothing** when they are not, which is why the whole gitlink half is inert until qits-githost's
-`GitHostRoutes.serveTree` adds them. Additive is enough — an extra `"sha"` on every entry and either
-`"mode":"160000"` or `"type":"commit"` for a gitlink; both spellings are accepted here. Until then
-the fifteen `ci-event-upstream-frontend.yml` hop files still do the work and nothing is lost.
+**Gitlinks need the git host to report a tree entry's sha — written (qits-githost 33b0ccf), not
+yet deployed.** That commit teaches `GET /git/<project>/<repo>/tree/<rev>[/<path>]` to answer a
+gitlink entry as `{"name","type":"commit","sha","mode":"160000"}` while every other entry keeps its
+two-field shape; `blob`/`tree` of a gitlink path stay 404 because the sha on the entry is the whole
+answer. Against the deployed githost, which still collapses a gitlink to `blob` with no `mode` and
+no object name, this service reads `mode` and `sha` off a tree entry when they are there and pins
+**nothing** when they are not — a made-up version would be compared by the pending rule and then
+applied into somebody else's repository. Both spellings (`mode` or `type`) are accepted here. Until
+that githost release deploys, the fifteen `ci-event-upstream-frontend.yml` hop files still do the
+work and nothing is lost.
 
 **The wrapper needs `.config/qits/ci-platform-event-maintenance-bump.yml`** — the platform-level
 pipeline that answers `MaintenanceBump` — and a qits-ci release carrying platform pipelines. Until
