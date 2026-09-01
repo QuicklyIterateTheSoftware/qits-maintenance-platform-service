@@ -5,7 +5,7 @@ package eu.wohlben.qits.maintenance.model;
  * the platform, because the plan pins the column's vocabulary as {@code SCHEDULED|MANUAL}.
  */
 public enum BumpTrigger {
-  /** A scan found pending changes in a group with no active bump, and {@code bump.auto} is on. */
+  /** The clock: {@code schedule/BumpSchedule} found a group pending with no active bump. */
   SCHEDULED,
 
   /** Somebody pressed the button, or a machine posted to the route. */

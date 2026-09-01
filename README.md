@@ -128,6 +128,18 @@ A latest that could not be read offers nothing and says so: the pin carries `lat
 
 ## The bump
 
+**Two callers ask for one: a person, and the clock.** `POST
+/repositories/{name}/groups/{group}/bumps` is the button, on any group. The clock is
+`schedule/BumpSchedule` at 02:00, and it asks for the INTERNAL group (`dependencies`) of every OK
+repository that has something pending there and no bump already going — the external half and a
+repository's own configured groups are manual-only. **No scan bumps anything any more**, whoever
+triggered it; the old `bump.auto` tail of a SCHEDULED scan is gone, because a scan's schedule is set
+by how fast facts go stale and a bump's by when a branch is welcome.
+
+**One nightly bump coalesces every release since the last one.** The changes are frozen onto the row
+at request time, so five internal releases between two nights are ONE branch push, one CI build, one
+release request and one release — not five of each. That is the whole of the storm fix.
+
 `POST /repositories/{name}/groups/{group}/bumps` freezes the group's pending changes onto an
 `mt_bump` row and queues it. The row id travels as the CI event's `eventId`, which is the dedupe key
 — a dispatch whose answer was lost records no second run when it is retried.
@@ -159,12 +171,60 @@ bad payload is a sentence on the bump row rather than a step log somebody has to
 compared, never a commit count.** One bump is up to two commits, because the maven step and the
 node/docker step each clone, commit and push.
 
-| run | branch | bump | `mt_branch` |
-|---|---|---|---|
-| SUCCESS | moved | `SUCCEEDED` | `PUSHED` |
-| SUCCESS | unmoved | `NOTHING_TO_DO` | unchanged |
-| red | unmoved | `FAILED` | `FAILED` |
-| red | **moved** | `FAILED` | `STALE` — the push is ff-only and never forced, so a branch that moved anyway is a person's commit. They own it now. |
+| run | branch | bump | `mt_branch` | release door |
+|---|---|---|---|---|
+| SUCCESS | moved | `SUCCEEDED` | `PUSHED` | **asked** |
+| SUCCESS | unmoved | `NOTHING_TO_DO` | unchanged | not asked — nothing was pushed |
+| red | unmoved | `FAILED` | `FAILED` | not asked |
+| red | **moved** | `FAILED` | `STALE` — the push is ff-only and never forced, so a branch that moved anyway is a person's commit. They own it now. | not asked — releasing somebody else's commits on their behalf is the one thing this must never do |
+
+### The release door
+
+**A bump that pushed a branch asks for it to be released, itself.** It calls
+
+```
+POST {workspaces-url}/workspaces/api/branches/release?projectId=<project>&repositoryName=<repo>
+{ "branch": "maintenance/dependencies",
+  "summary": "bump(dependencies): 5 dependencies",
+  "expectedSha": "<the head this bump observed>" }
+```
+
+and gets back `{requestId, state, branch, commitSha, detail}`. **Nothing merges at that call** — the
+door creates a release REQUEST in qits-projects which the quality gates settle afterwards, so this
+service does not poll it. That a maintenance branch was released arrives as `SCMRelease` on the bus,
+which is what writes `BranchState.RELEASED` (see *The event bus*).
+
+- **`expectedSha` pins the ask to what was built.** Without it the door arms the request with
+  whatever the branch holds when it is asked, which is a different commit the moment anybody pushes.
+- **`summary` is the commit subject shape the bump's own commits carry**, word for word from
+  `.config/qits/ci-platform-event-maintenance-bump.yml`. The `n` is what was ASKED FOR, and it
+  cannot be what a commit says: one bump is up to two commits and each counts what its own step
+  applied.
+- **`projectId` is `mt_repository.project`**, which qits-projects' catalogue answers as the
+  project's row id. The door resolves that segment by id first and then by slug, so the id addresses
+  it — the same value `/git/<project>/<repo>` is read with. Nothing had to be added to the catalog
+  read.
+- **The ask is CONVERGENT, which is what makes the rollout safe.** Every repository still carries
+  `.config/qits/ci-event-maintenance-release.yml`, whose step fires on the same push; the door
+  answers the second ask with the request the first made. Those triggers are removed at the end of
+  the epic and this becomes the only caller.
+
+**`mt_bump.release_request_id` holds the answer, and NULL is the one value that means work is owed.**
+
+| value | what it means |
+|---|---|
+| a request id | the door created or converged onto a release request; poll it in qits-projects |
+| `converged` | there was nothing to ask for — the door said already-integrated, or the branch was released or deleted first |
+| `refused` | a 400 or a 404: a refusal a retry cannot fix. `message` says which |
+| null | the ask is still owed, and the sweep re-attempts it |
+
+**A door that will not answer NEVER flips the bump's status.** The bump succeeded: the run was green
+and the branch moved, both facts about this service's own work. A transport failure, a 5xx, or a
+401/403 leaves the row `SUCCEEDED` with a sentence on `message` and the column null, and the poll
+sweep asks again on the next tick. **The retry is bounded by the branch, not by a counter**: it stops
+when the request exists, when `SCMRelease` makes the branch RELEASED, or when `SCMDeleteBranch` makes
+it NONE. A counter would additionally have to be right about how long qits-workspaces may be down
+for.
 
 ## The event bus
 
@@ -349,6 +409,7 @@ environment without a rebuild.
 | `qits.maintenance.targets.projects-url` | `http://qits-projects:8080` | where the catalog is |
 | `qits.maintenance.targets.githost-url` | `http://qits-githost:8080` | where the manifests are |
 | `qits.maintenance.targets.ci-url` | `http://qits-ci:8080` | which CI applies a bump |
+| `qits.maintenance.targets.workspaces-url` | `http://qits-workspaces:8080` | where the release door is |
 | `qits.maintenance.targets.artifacts-url` | `http://qits-artifacts:8080` | where the SBOM documents are — a bare host, because the route's whole path belongs to the caller |
 | `qits.maintenance.registries.maven-url` | `http://qits-artifacts:8080/artifacts/maven/maven` | internal maven |
 | `qits.maintenance.registries.npm-url` | `http://qits-artifacts:8080/artifacts/npm/npm` | internal npm |
@@ -365,7 +426,9 @@ environment without a rebuild.
 | `qits.maintenance.sbom.sweep-cron` | `0 5 * * * ?` | re-queue artifact rows still PENDING, hourly. It never retries MISSING or FAILED |
 | `qits.maintenance.time-zone` | `UTC` | the zone both crons are read in |
 | `qits.maintenance.bump.enabled` | `true` | whether a branch may be pushed at all |
-| `qits.maintenance.bump.auto` | `true` | whether a SCHEDULED scan asks for the bumps it found |
+| `qits.maintenance.bump.internal.cron` | `0 0 2 * * ?` | the nightly INTERNAL bump, 02:00 — after both scans, so the inventory it reads is today's |
+| `qits.maintenance.bump.internal.auto` | `true` | whether the clock asks for those bumps. **The live deployment holds it `false` until the pre-split branches are drained** |
+| `qits.maintenance.bump.external.auto` | `false` | **reserved.** External bumps are manual-only; setting it logs a WARN once and does nothing |
 | `qits.maintenance.bump.poll-interval` | `15s` | how often an unfinished bump is looked at |
 | `qits.maintenance.environment` | `dev` | which environment's CI is recorded on a bump row |
 | `qits.auth.machine.audience` | `qits-platform-maintenance` | this service's own id at qits-platform-idp |
@@ -376,18 +439,24 @@ and the prefix names the repository row it serves. Moving a row is then a deploy
 rather than a mount, so its whole path belongs to the caller and lives in the code.
 
 **`bump.enabled` stops the button as well as the schedule**, which is the point: a platform that
-wants to watch what *would* change for a week reads the inventory and pushes nothing. `bump.auto`
-only stops the schedule. **A manual scan never bumps under either setting** — pressing Scan asks
-what is out of date, pressing Bump asks for a branch.
+wants to watch what *would* change for a week reads the inventory and pushes nothing.
+`bump.internal.auto` only stops the clock. **No scan bumps under any setting** — pressing Scan asks
+what is out of date, pressing Bump asks for a branch, and the clock's standing instruction is its own
+cron.
+
+**`QITS_MAINTENANCE_BUMP_AUTO` is now inert.** Nothing reads it; MicroProfile does not fail on an
+environment variable no key claims, so a live platform still carrying it is misleading rather than
+broken. Remove it from the deployment's extras at the next edit of that file.
 
 **One tier service by configured url.** qits-ci is per environment (`dev-qits-ci`) while this
 service is platform tier, so a live platform injects the qualified name. Known debt, the same one
 qits-configuration and qits-platform-orchestrator carry.
 
-**Outbound credentials** are five named oidc clients — `projects`, `githost`, `ci`, `artifacts`,
-`mirror` — all `client-id=qits-platform-maintenance`, all shipped `client-enabled=false`. A token is
-cut for one service, which is why there are five; only the audience differs, and it is the one value
-not defaulted, because it is environment-qualified. A deployment turns one on with
+**Outbound credentials** are six named oidc clients — `projects`, `githost`, `ci`, `artifacts`,
+`mirror`, `workspaces` — all `client-id=qits-platform-maintenance`, all shipped
+`client-enabled=false`. A token is cut for one service, which is why there are six; only the audience
+differs, and it is the one value not defaulted, because it can be environment-qualified. A deployment
+turns one on with
 
 ```
 QUARKUS_OIDC_CLIENT_CI_CLIENT_ENABLED=true
@@ -397,6 +466,14 @@ QUARKUS_OIDC_CLIENT_CI_GRANT_OPTIONS_CLIENT_AUDIENCE=dev-qits-ci
 
 Off, calls go out with the forward-auth pair alone (`X-Qits-User: qits-platform-maintenance`,
 `X-Qits-Roles: qits:system`), which every call carries regardless.
+
+**The `workspaces` client is the one whose ROLES matter as well as its audience.**
+`POST /workspaces/api/branches/release` is `@RolesAllowed("qits:admin")` — every other peer route
+this service calls is a machine route that `qits:system` opens. So its audience is
+`qits-workspaces` (not environment-qualified: qits-workspaces is platform-wide) *and* this service's
+idp client has to be granted `qits:admin`. Without it the bearer authenticates and is refused 403,
+which `ReleaseDoorClient` classifies as retryable on purpose so the ask heals the moment the grant
+lands. See *Rollout needs*.
 
 **The store** is its own PostgreSQL database, `qits_platform_maintenance`, declared by
 `resources: postgresql:db` in `.config/qits/deployments.yml`. Ten tables in three families:
@@ -418,19 +495,28 @@ claim is not optional — it is a route this service cannot use without it.
 
 | what | why |
 |---|---|
-| roles `qits:system`, `qits-platform:system` | the same pair qits-platform-orchestrator's client carries. It covers qits-projects' catalog, qits-githost's content policy, qits-ci's trigger and — since qits-ci a3ecce2 — the read-only run and repository routes the bump poller follows. **`qits:admin` is NOT needed**: it is the human role, and this service is never a person. |
+| roles `qits:system`, `qits-platform:system` | the same pair qits-platform-orchestrator's client carries. It covers qits-projects' catalog, qits-githost's content policy, qits-ci's trigger and — since qits-ci a3ecce2 — the read-only run and repository routes the bump poller follows. |
+| role `qits:admin` | **NEW, and it is not optional.** qits-workspaces guards `POST /branches/release` with `@RolesAllowed("qits:admin")`; a bump that pushed a branch cannot hand it on without this. It is the same grant qits-ci's and qits-workspaces' own clients were given for exactly this door — the door is a human-shaped operation that a machine is being let through, not a machine route. Today `qits-bootstrap`'s `ComposeTemplate` gives this client `qits:system,qits-platform:system` only, so **the grant is an edit over there**. Until it lands every release ask is a 403; that is retried rather than fatal, and the per-repo `ci-event-maintenance-release.yml` trigger still releases the branch in the meantime. |
 | claim `project` = `*` | qits-ci's trigger calls `machineAuth.requireProject("*")`, which passes only for a token literally granted every project. The bump names one repository but the trigger route demands them all. Today the only such grant is qits-platform-artifacts'; this service needs its own. |
 | audiences `<env>-qits-ci`, `qits-projects`, `qits-githost` | a token is cut for one service. qits-githost ships `qits.auth.machine.required=true`, so its content reads need a real bearer addressed to it. |
+| audience `qits-workspaces` | the release door. Not environment-qualified — qits-workspaces is platform tier like this service. |
 | audiences `qits-platform-artifacts`, `qits-platform-mirror` | **not needed today** — the registry routes and the mirror's proxies are unguarded on qits-net. The two clients ship disabled for the day the edge's rule reaches the inside. |
 
 In `qits-configuration` / `.qits-bootstrap.env` terms that is a client with
-`_ROLES` carrying `qits:system,qits-platform:system`, `_CLAIMS_PROJECT: "*"`, and `_AUDIENCES`
-listing the three services above.
+`_ROLES` carrying `qits:system,qits-platform:system,qits:admin`, `_CLAIMS_PROJECT: "*"`, and
+`_AUDIENCES` listing the four services above.
 
 **The wrapper needs `.config/qits/ci-platform-event-maintenance-bump.yml`** — the platform-level
 pipeline that answers `MaintenanceBump` — and a qits-ci release carrying platform pipelines. Until
 both exist every bump ends FAILED with `no run recorded for MaintenanceBump`, which is the honest
 answer rather than a silent success.
+
+**The nightly bump needs the branches drained first.** Every `maintenance/dependencies` branch that
+exists right now carries MIXED commits — internal and external together, from before the kind split
+(see `V2__internal_external_split.sql`). Release or delete them, then flip
+`QITS_MAINTENANCE_BUMP_INTERNAL_AUTO=true`. The jar defaults it true; the deployment holds it false
+until that is done, because the first internal bump after the split would otherwise push onto a
+branch still carrying an external upgrade nobody reviewed under that name.
 
 **The bus needs one deploy and one check, in that order.**
 
@@ -458,7 +544,7 @@ answer rather than a silent success.
 ```
 
 Green on a clone with **no docker and no credentials** — the suite spawns its own PostgreSQL from a
-Maven artifact (zonky) and the five peers are faked. It needs two things: a **node on PATH** and an
+Maven artifact (zonky) and the six peers are faked. It needs two things: a **node on PATH** and an
 **initialised webui submodule**, because `verify` runs `package` and `package` is where Quinoa
 builds the client. `./mvnw test` needs neither — Quinoa is off in test mode.
 

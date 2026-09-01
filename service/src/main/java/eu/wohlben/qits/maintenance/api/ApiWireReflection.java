@@ -52,6 +52,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       RepositoryDependentsDto.class,
       RepositoryDependentsDto.ArtifactDependentsDto.class,
       TransitiveDto.class,
+      // BumpDto grew `releaseRequestId` with the release door, and the bump detail page reads it.
       BumpDto.class,
       ScanDto.class,
       Change.class

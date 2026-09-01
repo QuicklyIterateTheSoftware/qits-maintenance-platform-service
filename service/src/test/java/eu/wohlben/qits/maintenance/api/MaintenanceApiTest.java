@@ -18,6 +18,7 @@ import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,6 +46,9 @@ class MaintenanceApiTest {
 
   private static final String BASE = "/maintenance/api";
 
+  /** What the release door names the request it created, in every test that lets it answer. */
+  private static final String RELEASE_REQUEST = "rr-0001";
+
   @Inject FakePeers peers;
 
   @Inject BumpService bumps;
@@ -63,6 +67,10 @@ class MaintenanceApiTest {
     peers.reset();
     Fixture.scriptScan(peers);
     Fixture.scriptBranchAbsent(peers);
+    // The release door answers by default, because the SUCCEEDED ending calls it: a suite that left
+    // it unscripted would have every pushed branch record a refusal, and the tests about the door
+    // would be the only ones exercising the ordinary path.
+    Fixture.scriptDoorAccepts(peers, RELEASE_REQUEST);
   }
 
   /** Queues a scan and waits for its row to close. */
@@ -658,6 +666,165 @@ class MaintenanceApiTest {
         .then()
         .statusCode(200)
         .body("id", hasItem(id));
+  }
+
+  // --- the release door -------------------------------------------------------------------------
+
+  /** Drives one bump to SUCCEEDED with the branch moved, which is the only ending that asks. */
+  private String bumpToSucceeded(String runId) {
+    scan();
+    Fixture.scriptCiAccepts(peers, runId);
+    String id = requestBump();
+    Fixture.scriptRun(peers, runId, "SUCCESS");
+    Fixture.scriptBranchAt(peers, Fixture.BUMPED_SHA);
+    bumps.sweep();
+    assertEquals("SUCCEEDED", awaitTerminal("/bumps/" + id, "SUCCEEDED", "FAILED", "NOTHING_TO_DO"));
+    // The status is written BEFORE the door is asked, on the same worker task — so a test that read
+    // the row the instant it turned SUCCEEDED would be racing the ask it is about to assert on.
+    queue.awaitIdle(Duration.ofSeconds(30));
+    return id;
+  }
+
+  /** Polls the bump until its release ask has settled, whichever way. */
+  private void awaitReleaseAsked(String id) {
+    awaitField("/bumps/" + id, "releaseRequestId");
+  }
+
+  /**
+   * THE HAND-OFF THIS SERVICE NOW MAKES ITSELF. A branch nobody asks about sits there; the bump that
+   * pushed one asks qits-workspaces for a release request, pinned with {@code expectedSha} to
+   * exactly the head it observed.
+   */
+  @Test
+  void aPushedBranchAsksTheReleaseDoorWithTheHeadItObserved() {
+    String id = bumpToSucceeded("run-door-1");
+    awaitReleaseAsked(id);
+
+    List<String> asks = peers.bodiesFor(Fixture.DOOR_PATH);
+    assertEquals(1, asks.size(), "the door is asked exactly once for one pushed branch");
+    String ask = asks.get(0);
+    assertTrue(ask.contains("\"branch\":\"" + Fixture.BRANCH + "\""), ask);
+    // The subject shape the bump's own commits carry, so the request, the branch and the commits
+    // all read the same in a listing.
+    assertTrue(ask.contains("\"summary\":\"bump(dependencies): 5 dependencies\""), ask);
+    // AND THE SHA IS THE ONE THE RUN PRODUCED. Without it the door arms the request with whatever
+    // the branch holds when it is asked, which is a different commit the moment anybody pushes.
+    assertTrue(ask.contains("\"expectedSha\":\"" + Fixture.BUMPED_SHA + "\""), ask);
+
+    given()
+        .when()
+        .get(BASE + "/bumps/" + id)
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("SUCCEEDED"))
+        .body("releaseRequestId", equalTo(RELEASE_REQUEST))
+        .body("message", containsString(RELEASE_REQUEST));
+  }
+
+  /**
+   * THE FAILURE POLICY, AND IT IS THE POINT OF THE WHOLE DESIGN. The bump succeeded — a green run and
+   * a branch that moved, both facts about this service's own work. A door that is not there says
+   * nothing about either, so the status must not move; the ask is simply still owed, and the sweep is
+   * what owes it.
+   */
+  @Test
+  void aDoorThatIsDownLeavesTheBumpSucceededAndTheNextSweepAsksAgain() {
+    Fixture.scriptDoorUnreachable(peers);
+    String id = bumpToSucceeded("run-door-2");
+    awaitField("/bumps/" + id, "message");
+
+    given()
+        .when()
+        .get(BASE + "/bumps/" + id)
+        .then()
+        .statusCode(200)
+        // The verdict is untouched, and so is the sentence the verdict wrote.
+        .body("status", equalTo("SUCCEEDED"))
+        .body("message", containsString("dependencies on " + Fixture.BRANCH))
+        .body("message", containsString("next sweep asks again"))
+        // NULL is what "work is owed" means, and it is what the sweep selects on.
+        .body("releaseRequestId", nullValue());
+
+    // qits-workspaces is back.
+    Fixture.scriptDoorAccepts(peers, RELEASE_REQUEST);
+    bumps.sweep();
+    awaitReleaseAsked(id);
+    given()
+        .when()
+        .get(BASE + "/bumps/" + id)
+        .then()
+        .body("status", equalTo("SUCCEEDED"))
+        .body("releaseRequestId", equalTo(RELEASE_REQUEST));
+    assertEquals(
+        2, peers.bodiesFor(Fixture.DOOR_PATH).size(), "the door should have been asked again");
+  }
+
+  /**
+   * DOUBLE-ASKING IS SAFE, AND THAT IS WHAT MAKES THE ROLLOUT SAFE. Every repository still carries a
+   * CI trigger that asks the same door on the same push. Whichever gets there second is told the
+   * branch is already integrated, and that is convergence rather than a failure — a bump that
+   * reported it as one would have every branch in the transition look broken.
+   */
+  @Test
+  void anAlreadyIntegratedAnswerIsConvergenceRatherThanAFailure() {
+    Fixture.scriptDoorAnswers(
+        peers, 409, "{\"message\":\"already released\",\"reason\":\"ALREADY_INTEGRATED\"}");
+    String id = bumpToSucceeded("run-door-3");
+    awaitReleaseAsked(id);
+
+    given()
+        .when()
+        .get(BASE + "/bumps/" + id)
+        .then()
+        .body("status", equalTo("SUCCEEDED"))
+        // No request id was given, so the column carries the word that stops the retrying. Leaving
+        // it null would have the sweep ask a converged door every fifteen seconds for ever.
+        .body("releaseRequestId", equalTo("converged"))
+        .body("message", containsString("already released"));
+
+    bumps.sweep();
+    queue.awaitIdle(Duration.ofSeconds(30));
+    assertEquals(
+        1,
+        peers.bodiesFor(Fixture.DOOR_PATH).size(),
+        "a converged ask must not be re-sent by the sweep");
+  }
+
+  /** A green run over an unmoved branch pushed nothing, so there is nothing to release. */
+  @Test
+  void nothingToDoAsksNoDoorBecauseNoBranchWasPushed() {
+    scan();
+    Fixture.scriptCiAccepts(peers, "run-door-4");
+    String id = requestBump();
+    Fixture.scriptRun(peers, "run-door-4", "SUCCESS");
+    bumps.sweep();
+
+    assertEquals(
+        "NOTHING_TO_DO", awaitTerminal("/bumps/" + id, "SUCCEEDED", "FAILED", "NOTHING_TO_DO"));
+    queue.awaitIdle(Duration.ofSeconds(30));
+    assertTrue(peers.bodiesFor(Fixture.DOOR_PATH).isEmpty(), "no branch was pushed, so no ask");
+    given().when().get(BASE + "/bumps/" + id).then().body("releaseRequestId", nullValue());
+  }
+
+  /**
+   * A STALE branch is somebody's hand-written commit that the ff-only push refused to overwrite. They
+   * own it now — and asking for THEIR commits to be released is precisely the thing this service must
+   * never do on their behalf.
+   */
+  @Test
+  void aStaleBranchAsksNoDoorBecauseSomebodyElseOwnsIt() {
+    scan();
+    Fixture.scriptCiAccepts(peers, "run-door-5");
+    String id = requestBump();
+    Fixture.scriptRun(peers, "run-door-5", "FAILED");
+    Fixture.scriptBranchAt(peers, Fixture.BUMPED_SHA);
+    bumps.sweep();
+
+    assertEquals("FAILED", awaitTerminal("/bumps/" + id, "SUCCEEDED", "FAILED", "NOTHING_TO_DO"));
+    queue.awaitIdle(Duration.ofSeconds(30));
+    assertTrue(
+        peers.bodiesFor(Fixture.DOOR_PATH).isEmpty(),
+        "a branch somebody rewrote by hand is not this service's to release");
   }
 
   @Test

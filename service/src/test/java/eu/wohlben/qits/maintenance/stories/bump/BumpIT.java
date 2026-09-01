@@ -42,15 +42,16 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.TestMethodOrder;
 
 /**
- * <b>The one thing this service makes happen anywhere else</b> — and the shape of it is the whole
- * design: <i>this service DECIDES; a CI step APPLIES.</i>
+ * <b>The two things this service makes happen anywhere else</b> — and the shape of them is the whole
+ * design: <i>this service DECIDES; a CI step APPLIES; a door RELEASES.</i>
  *
  * <p>Nothing here clones a repository, edits a file or pushes a ref. A bump is a payload naming a
  * file, a location and two versions, handed to qits-ci as a {@code MaintenanceBump} trigger, and
- * the step that reads it is the only thing that touches anybody's tree. That is why the interesting
- * evidence is <b>what qits-ci was handed</b>, read back off the wire rather than out of this
- * service's own row, and why the diagram's only arrow out of this process besides its store goes to
- * qits-ci and the git host.
+ * the step that reads it is the only thing that touches anybody's tree. When the branch has moved,
+ * this service asks qits-workspaces' release door for a release REQUEST on it — nothing merges at
+ * that call either; the quality gates settle the request afterwards. That is why the interesting
+ * evidence is <b>what the two peers were handed</b>, read back off the wire rather than out of this
+ * service's own row.
  *
  * <p><b>The two stories are the two endings a green run can have</b>, and telling them apart is a
  * rule nobody would guess:
@@ -120,7 +121,9 @@ public class BumpIT {
       request for the same group is refused: two runs writing one branch would make the second a
       non-ff rejection at best. When the run passes and the branch has moved, the row ends
       SUCCEEDED and carries the changes it sent, which is the audit trail — not what is pending
-      now, which by then is a different question.
+      now, which by then is a different question — and then it hands the branch on, asking
+      qits-workspaces' release door for a release request pinned to exactly the head it watched
+      land, rather than leaving the branch for somebody to notice.
       """)
   @UserflowRunsAfter(InventoryIT.class)
   @Order(1)
@@ -128,6 +131,16 @@ public class BumpIT {
     NetworkCapture.actor(StoryIdentities.OPERATOR);
     StoryPeers ci = StoryPeers.attach(StoryTarget.CI);
     StoryPeers githost = StoryPeers.attach(StoryTarget.GITHOST);
+    StoryPeers workspaces = StoryPeers.attach(StoryTarget.WORKSPACES);
+
+    // THE RELEASE DOOR, armed before anything is triggered. The sweep closes the bump and asks the
+    // door on the same worker task, so a door armed after the run went green would be a race the
+    // story would lose about one time in ten.
+    workspaces.json(
+        StoryTarget.RELEASE_DOOR,
+        "{\"requestId\":\"" + StoryCatalog.RELEASE_REQUEST + "\",\"state\":\"PENDING\","
+            + "\"branch\":\"" + StoryCatalog.BRANCH + "\",\"commitSha\":\""
+            + StoryCatalog.BUMPED_SHA + "\",\"detail\":null}");
 
     // qits-ci accepts the trigger and names one run, which is still going. The branch is armed
     // NOWHERE: an unregistered path is a 404, which is exactly what the git host says about a
@@ -254,11 +267,40 @@ public class BumpIT {
         .body("changes.name", hasItem("eu.wohlben.qits:qits-eventstream"))
         .body("changes.name", not(hasItem("@angular/core")))
         .body("finishedAt", not(nullValue()))
-        .body("message", containsString(StoryCatalog.BRANCH));
+        .body("message", containsString(StoryCatalog.BRANCH))
+        // AND THE BRANCH WAS HANDED ON. A branch nobody asks about is a branch that sits there.
+        .body("releaseRequestId", equalTo(StoryCatalog.RELEASE_REQUEST));
     story
         .note("the run passed and the branch moved, so the row ends SUCCEEDED — with the changes it"
             + " SENT, which is the audit trail: what is pending now is a different question")
         .as("the-branch-was-pushed");
+
+    // --- AND THE ASK THAT FOLLOWS IT ------------------------------------------------------------
+    //
+    // Read off the wire for the same reason the trigger is: "the branch was handed on" is a claim
+    // about what left this process. Nothing merged at this call — the door creates a release
+    // REQUEST, which the quality gates settle afterwards — so what this proves is that the branch
+    // stopped being this service's problem, not that it was released.
+    List<String> asks = workspaces.bodiesFor(StoryTarget.RELEASE_DOOR);
+    assertEquals(1, asks.size(), "the door must have been asked exactly once");
+    String ask = asks.getFirst();
+    assertTrue(
+        ask.contains("\"branch\":\"" + StoryCatalog.BRANCH + "\""),
+        "the ask names the branch this bump pushed: " + ask);
+    assertTrue(
+        ask.contains("\"summary\":\"bump(" + StoryCatalog.DEFAULT_GROUP + "): "),
+        "the summary is the shape the bump's own commits carry: " + ask);
+    // THE SHA IS THE ONE THE RUN PRODUCED, and it is the whole reason the ask is trustworthy: the
+    // door otherwise arms the request with whatever the branch holds when it is asked, which is a
+    // different commit the moment anybody pushes onto it.
+    assertTrue(
+        ask.contains("\"expectedSha\":\"" + StoryCatalog.BUMPED_SHA + "\""),
+        "the ask is pinned to exactly the head this bump observed: " + ask);
+    story
+        .note("and then this service asks qits-workspaces' release door for that branch — pinned"
+            + " with the exact head the run produced, so the request can only ever be about the"
+            + " commits this bump watched land")
+        .as("the-branch-is-handed-on");
 
     StoryIdentities.operator(given())
         .queryParam("repository", StoryCatalog.REPOSITORY)
@@ -384,6 +426,7 @@ public class BumpIT {
     ReportAssertions.assertStepId(CATEGORY_SLUG, PUSHED_SLUG, "groups-are-branches");
     ReportAssertions.assertStepId(CATEGORY_SLUG, PUSHED_SLUG, "one-branch-one-writer");
     ReportAssertions.assertStepId(CATEGORY_SLUG, PUSHED_SLUG, "the-branch-was-pushed");
+    ReportAssertions.assertStepId(CATEGORY_SLUG, PUSHED_SLUG, "the-branch-is-handed-on");
     ReportAssertions.assertStepId(CATEGORY_SLUG, PUSHED_SLUG, "the-bump-log");
 
     in(PUSHED_SLUG, "POST " + bumpsPath + " -> 202");
@@ -401,6 +444,17 @@ public class BumpIT {
         PUSHED_SLUG,
         StoryTarget.CI,
         "GET " + StoryCatalog.runPath(StoryCatalog.RUN) + " -> 200");
+    // THE SECOND THING THIS SERVICE MAKES HAPPEN ANYWHERE ELSE. The query half is on the label
+    // because the door's addressing IS the public identity of the repository — the pair a clone
+    // spells — and a label without it would not say which repository was handed on.
+    out(
+        PUSHED_SLUG,
+        StoryTarget.WORKSPACES,
+        "POST "
+            + StoryTarget.RELEASE_DOOR
+            + "?projectId=" + StoryCatalog.PROJECT
+            + "&repositoryName=" + StoryCatalog.REPOSITORY
+            + " -> 200");
 
     ReportAssertions.assertDeclaredEdge(
         CATEGORY_SLUG,
@@ -411,10 +465,10 @@ public class BumpIT {
         "the changes are frozen onto the bump row at REQUEST time and never recomputed");
 
     // THE DESIGN, ASSERTED AS A SHAPE. Four requests in; out, one trigger, one run read, two head
-    // reads and a row. THIS SERVICE PUSHED NOTHING — there is no arrow from it to any repository,
-    // because there is no such call in it to make. A ninth edge would be this process having grown
-    // a way to touch somebody else's tree, and no presence check could see it.
-    ReportAssertions.assertEdgeCount(CATEGORY_SLUG, PUSHED_SLUG, 9);
+    // reads, one release ask and a row. THIS SERVICE PUSHED NOTHING — there is no arrow from it to
+    // any repository, because there is no such call in it to make. An eleventh edge would be this
+    // process having grown a way to touch somebody else's tree, and no presence check could see it.
+    ReportAssertions.assertEdgeCount(CATEGORY_SLUG, PUSHED_SLUG, 10);
     ReportAssertions.assertOnlyEdgesFrom(
         CATEGORY_SLUG, PUSHED_SLUG, List.of(StoryIdentities.OPERATOR, StoryTarget.SERVICE));
     // A bump reads no manifest and asks no registry: the changes were frozen at REQUEST time, out
@@ -463,6 +517,9 @@ public class BumpIT {
     ReportAssertions.assertNoEdgesTo(CATEGORY_SLUG, UNMOVED_SLUG, StoryTarget.PROJECTS);
     ReportAssertions.assertNoEdgesTo(CATEGORY_SLUG, UNMOVED_SLUG, StoryTarget.ARTIFACTS);
     ReportAssertions.assertNoEdgesTo(CATEGORY_SLUG, UNMOVED_SLUG, StoryTarget.MIRROR);
+    // AND NO RELEASE WAS ASKED FOR. Nothing was pushed, so there is nothing to hand on — which is
+    // the one thing that separates this ending from the other on the far side of this service.
+    ReportAssertions.assertNoEdgesTo(CATEGORY_SLUG, UNMOVED_SLUG, StoryTarget.WORKSPACES);
     ReportAssertions.assertNotLeaked(CATEGORY_SLUG, UNMOVED_SLUG, unmovedBumpId);
   }
 

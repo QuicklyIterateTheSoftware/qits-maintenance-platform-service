@@ -149,9 +149,17 @@ work that reaches the front after the barrier does not exist yet.
 
 ## Bumping
 
+**Two callers, and no scan is one of them.** The button is `POST
+/repositories/{name}/groups/{group}/bumps`; the clock is `schedule/BumpSchedule` at 02:00, INTERNAL
+group only. A SCHEDULED scan used to ask for the bumps it found, gated by `bump.auto` — that key and
+that coupling are both gone. A scan is a READ whose schedule is set by how fast facts go stale; a
+bump is a WRITE into somebody else's repository whose schedule is set by when a branch is welcome.
+Welded together, the 01:00 external scan decided when the internal half got a branch.
+
 **The changes are frozen at REQUEST time**, not recomputed at dispatch. A payload recomputed later
 would not be the one the operator saw, and a retry after a 503 would send a different list under the
-same dedupe key.
+same dedupe key. **That freeze is also the coalescing**: N internal releases between two nightly runs
+are ONE branch push, one CI build, one release request and one release.
 
 **The event id IS the bump row id**, and qits-ci dedupes on (event id, repository, config path). A
 dispatch whose answer was lost records no second run when it is retried. Never generate a fresh one.
@@ -169,6 +177,30 @@ unmoved after a green run is NOTHING_TO_DO, and moved after a red one is STALE.
 **`BumpPayload.problems` refuses on this side what the step refuses on that one.** The step holds
 `to`, `group`, the refs and the manifest path to the same rules; failing here puts the reason on the
 bump row instead of in a step log somebody has to go and read.
+
+**SUCCEEDED asks the release door; the other three endings do not.** `ReleaseDoorClient` posts to
+qits-workspaces' `/branches/release` with the branch, the commit-subject summary and `expectedSha` —
+the head this bump just observed, which is what pins the request to exactly what was built. Nothing
+merges at that call: the door creates a release REQUEST that the quality gates settle, and that a
+branch was released arrives back as `SCMRelease` on the bus. NOTHING_TO_DO pushed nothing; STALE is
+somebody's hand-written commit and releasing it on their behalf is the one thing this must never do.
+
+**A door that will not answer never flips the status.** The bump succeeded — green run, moved branch,
+both facts about this service's own work. `mt_bump.release_request_id` carries the answer and
+**NULL is the one value that means work is owed**; `converged` and `refused` are sentinels that stop
+the retrying, because a permanently refused ask re-sent every fifteen seconds for the life of a
+branch is the failure mode a bare boolean would have. **The retry is bounded by the BRANCH, not a
+counter**: it ends when the request exists, when the branch reaches RELEASED, or when it is gone.
+
+**`projectId` on that call is `mt_repository.project`.** qits-projects' catalogue answers the
+project's row *id* there, and the door resolves the segment by id first then by slug — so the id
+addresses it, the same value `/git/<project>/<repo>` is read with. Nothing was added to
+`CatalogReader` for the door.
+
+**The door wants `qits:admin`, which no other call this service makes does.** Sixth oidc client,
+audience `qits-workspaces`, and a grant on the idp client that `qits-bootstrap` does not give today.
+A 401/403 is therefore classified RETRYABLE rather than refused, so the ask heals when the grant
+lands instead of needing the bump run again.
 
 ## Persistence
 
@@ -441,7 +473,7 @@ what a story sends in (the per-repo `StoryNetworkFilter` copy this repo used to 
 what left. A story sets `NetworkCapture.actor(...)` **before** each call, because the tap sees a
 request and never a narrative role, and then only asserts and notes.
 
-**The five peers are real sockets that record.** `stories/support/StoryPeers` is a `com.sun`
+**The six peers are real sockets that record.** `stories/support/StoryPeers` is a `com.sun`
 HttpServer per service — qits-projects, qits-githost, qits-ci, qits-platform-artifacts,
 qits-platform-mirror — armed by `StoryCatalog` with a two-repository platform, and the launched
 process is handed their addresses as its eight shipped `qits.maintenance.*-url` keys. It is **not**
@@ -456,7 +488,7 @@ registry and two to `URI.getPath()`.
 process where no tap of ours stands, so each story `network.declare`s it; declared edges carry
 `"declared": true` and render muted and dashed, so a claim never reads like evidence. **An absence
 is never an edge** — it is `assertNoEdgesTo(<peer>)`, which is the assertion that pays: the
-inventory story's whole subject is that five peers were up and answering and none of them was asked.
+inventory story's whole subject is that the peers were up and answering and none of them was asked.
 Every story also pins `assertEdgeCount` and `assertOnlyEdgesFrom`, so a call appearing later shows
 rather than passing quietly.
 
@@ -478,13 +510,15 @@ sweep and by nothing else, so `StoryProfile` turns the scheduler back **on** and
 other timer at its own shipped key — both scan crons are `off` (the scheduler's own value for "do
 not register this trigger"), `scan.enabled=false`, and `bump.poll-interval=1s`. The sweep is a no-op
 whenever no bump is in flight, so the only stories it can reach are the two holding one open.
-**Two paths are therefore not covered by a story**: a SCHEDULED scan asking for the bumps it found
-(`bump.auto`), and `RestartRecovery` resuming a bump across a restart, which needs a second boot.
+**Two paths are therefore not covered by a story**: the nightly internal bump (`BumpSchedule`, which
+needs the cron this profile removes), and `RestartRecovery` resuming a bump across a restart, which
+needs a second boot.
 Both keep their coverage in `MaintenanceApiTest`, which drives `bumps.sweep()` by hand.
 
 **What the catalogue does not show, because this service does not do it.** There is no story of a
-commit being made, a file being written or a ref being pushed: this service decides and a CI step
-applies, so the furthest arrow out of it is a `MaintenanceBump` trigger. And nothing here
+commit being made, a file being written or a ref being pushed: this service decides, a CI step
+applies and a door releases, so the two furthest arrows out of it are a `MaintenanceBump` trigger and
+a release ASK — neither of which touches a tree. And nothing here
 transitively resolves, orders an external base image or runs `ng update`; each is a decision recorded
 under "Deliberately not here yet", not a gap in the stories.
 
@@ -492,7 +526,7 @@ under "Deliberately not here yet", not a gap in the stories.
 two bus listeners are real (see "The event bus" above), and `StoryProfile` inherits the parent
 profile's `qits.eventstream.enabled=false` — so the launched process dials nothing and no story
 walks an arriving frame. Covering one would mean a qits-events stand-in on the far side of a
-websocket, which is a stand-in of a different kind from the five `StoryPeers` and a decision worth
+websocket, which is a stand-in of a different kind from the six `StoryPeers` and a decision worth
 making deliberately. The listeners' own coverage is `bus/*Test`, driving `onFrame` directly.
 
 ## The client
@@ -540,7 +574,14 @@ Each is a decision, not an omission:
 - **`ng update` and tool-driven upgrades.** A group carries `name` and `deps`, and the step edits
   lines. A migration is a person's job.
 - **Workspace creation.** Pushing the branch is the whole "merge request"; it is released through
-  the workspaces door like any other branch.
+  the workspaces door like any other branch — this service now asks that door itself.
+- **Polling the release request.** The door answers a `requestId` and this service stores it and
+  stops. What became of the request arrives as `SCMRelease` on the bus, and two mechanisms watching
+  one fact would be two ways to disagree about it. A request that is REJECTED or FAILED is therefore
+  visible only in qits-projects today.
+- **Automatic EXTERNAL bumps.** `qits.maintenance.bump.external.auto` exists so the deployment
+  surface does not change the day they are implemented, and is read only to WARN when it is set.
+  Somebody else's framework major is an opinion, and it stays a person's press.
 - **Cancelling a bump.** There is no route and no column. The CI run has its own cancel, and a bump
   row saying CANCELLED would be a claim this service cannot make about a step that may already have
   pushed.

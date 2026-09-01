@@ -77,10 +77,9 @@ import java.util.Map;
  *       can reach are the two that are holding a bump open on purpose.
  * </ul>
  *
- * <p><b>Two paths are therefore NOT covered by any story here, and that is a stated gap.</b> A
- * SCHEDULED scan asking for the bumps it found ({@code bump.auto}) needs the cron this profile
- * removes, and {@code RestartRecovery} resuming a bump across a restart needs a second boot of one
- * process. Both keep their coverage in {@code MaintenanceApiTest}, which drives the sweep by hand.
+ * <p><b>Two paths are therefore NOT covered by any story here, and that is a stated gap.</b> The
+ * nightly internal bump ({@code BumpSchedule}) needs the cron this profile removes, and {@code
+ * RestartRecovery} resuming a bump across a restart needs a second boot of one process. Both keep their coverage in {@code MaintenanceApiTest}, which drives the sweep by hand.
  * A story that waited out a six-hour cron would be indistinguishable from a story that hung.
  */
 public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
@@ -128,6 +127,7 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
     overrides.put("qits.maintenance.targets.projects-url", url(StoryTarget.PROJECTS));
     overrides.put("qits.maintenance.targets.githost-url", url(StoryTarget.GITHOST));
     overrides.put("qits.maintenance.targets.ci-url", url(StoryTarget.CI));
+    overrides.put("qits.maintenance.targets.workspaces-url", url(StoryTarget.WORKSPACES));
     overrides.put(
         "qits.maintenance.registries.maven-url",
         url(StoryTarget.ARTIFACTS, StoryTarget.MAVEN_REGISTRY_PREFIX));

@@ -80,7 +80,7 @@ import org.junit.jupiter.api.TestMethodOrder;
  *       /bumps/{id}} name a row;
  *   <li>it reads THIS service's own store and no peer. The whole reason the inventory is a store
  *       rather than a page that asks the git host on each load is that this question has to be
- *       answerable without one — and the five peers this catalogue stands up are <b>up and
+ *       answerable without one — and the peers this catalogue stands up are <b>up and
  *       answering</b>, which makes that a stronger claim than it was when they were dead ports:
  *       the listing did not ask them, rather than not being able to;
  *   <li>and it cannot write. The two calls that can are {@code POST /scans}, which starts a run

@@ -246,6 +246,7 @@ public class Inventory {
         row.startedAt,
         row.finishedAt,
         row.message,
+        row.releaseRequestId,
         BumpService.changes(row));
   }
 }

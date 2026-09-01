@@ -3,7 +3,7 @@ package eu.wohlben.qits.maintenance.stories.support;
 import java.util.Map;
 
 /**
- * <b>The platform this catalogue scans</b> — two repositories, as the five peers would describe
+ * <b>The platform this catalogue scans</b> — two repositories, as the six peers would describe
  * them, armed onto the {@link StoryPeers} stand-ins once before any story runs.
  *
  * <p>It is deliberately a WHOLE platform rather than a minimal one. Every rule this service has is
@@ -85,6 +85,12 @@ public final class StoryCatalog {
 
   /** …and for {@link #SECOND_REPOSITORY}'s. */
   public static final String SECOND_RUN = "run-beta";
+
+  /**
+   * The release request qits-workspaces' door names for {@link #REPOSITORY}'s pushed branch. A word,
+   * so no label and no assertion is scrubbed as a generated id.
+   */
+  public static final String RELEASE_REQUEST = "rr-alpha";
 
   // --- the peers' own routes ---------------------------------------------------------------------
 
@@ -299,8 +305,10 @@ public final class StoryCatalog {
     StoryPeers artifacts = StoryPeers.named(StoryTarget.ARTIFACTS);
     StoryPeers mirror = StoryPeers.named(StoryTarget.MIRROR);
     // qits-ci is started here too, so its address is in the launch command; what it ANSWERS is armed
-    // by the bump stories, because a trigger's answer is the thing those stories move.
+    // by the bump stories, because a trigger's answer is the thing those stories move. So is
+    // qits-workspaces, whose release door only one story ever reaches: the one whose branch moved.
     StoryPeers.named(StoryTarget.CI);
+    StoryPeers.named(StoryTarget.WORKSPACES);
 
     // THE CATALOG, with a row that has no name. qits-projects lists rows whose alias is unset, every
     // read this service makes is name-addressed, and a scan must skip such a row rather than fail on
