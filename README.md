@@ -76,7 +76,17 @@ answered from a single pom.
 - **A digest or a tagless `FROM` is not a pin**, and v1 looks up only `qits/*` images: ordering base
   tags across vendors is a later decision.
 
-## Grouping — `.config/qits/maintenance.yml`
+## Grouping — the kind split, and `.config/qits/maintenance.yml`
+
+**The default grouping is the pin's KIND.** A repository that configures nothing gets two groups:
+`dependencies` claims every `INTERNAL` pin and `external` claims every `EXTERNAL` one, so the
+platform's own releases travel on `maintenance/dependencies` and everybody else's on
+`maintenance/external`. The two halves are found by different schedules and reviewed by different
+eyes; one branch carrying both made a nightly internal bump wait behind an opinion about a framework
+major. `dependencies` keeps its name and its branch — it is now the internal half of what it used to
+be all of.
+
+A repository that wants a FINER grouping than those two halves writes one:
 
 ```yaml
 groups:
@@ -87,11 +97,15 @@ groups:
 ```
 
 A group's name is also its branch: `maintenance/angular`. `deps` are globs — `*` and `?` only, over
-the flat dependency name — and **a pin matching two groups belongs to the first declared**. Whatever
-no configured group claims falls to `dependencies`, which is appended last and is also the whole
-grouping of a repository that carries no file. **Invalid yaml is `CONFIG_ERROR` on the repository
-row and nothing is bumped for it** — falling back to the default grouping would put changes on a
-branch the author configured against.
+the flat dependency name — and **a pin matching two groups belongs to the first declared**. The kind
+pair is appended AFTER whatever the file declares, so a configured group always claims first and
+what none of them claimed still splits by kind. A file that declares `dependencies` or `external`
+itself keeps its own globs under that name, and only the other half is appended. **Invalid yaml is
+`CONFIG_ERROR` on the repository row and nothing is bumped for it** — falling back to the default
+grouping would put changes on a branch the author configured against.
+
+`GroupDto.kind` is `INTERNAL`, `EXTERNAL` or null: how the group claims, which is a different
+question from `source` (whether the repository asked for the grouping at all).
 
 ## Pending
 
@@ -158,7 +172,7 @@ error body is `{"message": "..."}`.
 ```
 GET  /repositories                                → [{name, project, lastScanAt, headSha, status,
                                                       message, pending,
-                                                      groups:[{name, source, branch, state,
+                                                      groups:[{name, source, kind, branch, state,
                                                                headSha, pending}]}]
 GET  /repositories/{name}                         → the above, plus
                                                     pins:[{manifestPath, ecosystem, name, version,

@@ -222,18 +222,28 @@ public class ScanCycleIT {
         .body(
             "find { it.name == '" + StoryCatalog.REPOSITORY + "' }.headSha",
             equalTo(StoryCatalog.HEAD_SHA))
-        // The repository declares `angular`; the catch-all is appended after it so no pin is
+        // The repository declares `angular`; the two KIND groups are appended after it so no pin is
         // unclaimed, and a group's name is also its branch.
         .body(
             "find { it.name == '" + StoryCatalog.REPOSITORY + "' }.groups.name",
-            equalTo(List.of(StoryCatalog.ANGULAR_GROUP, StoryCatalog.DEFAULT_GROUP)))
-        // The second repository carries no configuration, so the fallback IS its whole grouping.
+            equalTo(
+                List.of(
+                    StoryCatalog.ANGULAR_GROUP,
+                    StoryCatalog.DEFAULT_GROUP,
+                    StoryCatalog.EXTERNAL_GROUP)))
+        // The second repository carries no configuration, so the fallback IS its whole grouping —
+        // and the fallback is the split: our own releases on one branch, everybody else's on the
+        // other.
         .body(
             "find { it.name == '" + StoryCatalog.SECOND_REPOSITORY + "' }.groups.name",
-            equalTo(List.of(StoryCatalog.DEFAULT_GROUP)));
+            equalTo(List.of(StoryCatalog.DEFAULT_GROUP, StoryCatalog.EXTERNAL_GROUP)))
+        .body(
+            "find { it.name == '" + StoryCatalog.SECOND_REPOSITORY + "' }.groups.kind",
+            equalTo(List.of("INTERNAL", "EXTERNAL")));
     story
         .note("both repositories are in the inventory, each with the grouping it configured — and"
-            + " the one that configured none gets the fallback rather than nothing")
+            + " the one that configured none gets the fallback, which is the internal/external"
+            + " split rather than one branch for everything")
         .as("inventory-filled");
 
     String repository = StoryTarget.REPOSITORIES + "/" + StoryCatalog.REPOSITORY;

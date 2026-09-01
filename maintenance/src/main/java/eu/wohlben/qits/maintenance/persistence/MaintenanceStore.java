@@ -122,6 +122,9 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
             stored.name = group.name();
             stored.ordinal = ordinal++;
             stored.patterns = writeJson(group.patterns());
+            // A KIND GROUP CLAIMS BY KIND AND CARRIES NO GLOBS; a configured one is the other way
+            // round. The column is nullable because those are the two shapes, not three.
+            stored.kind = group.kind() == null ? null : group.kind().name();
             stored.source = (groupSource == null ? GroupSource.DEFAULT : groupSource).name();
             stored.persist();
           }

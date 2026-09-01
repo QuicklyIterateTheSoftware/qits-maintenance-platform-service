@@ -174,6 +174,7 @@ public class Inventory {
           new GroupDto(
               group.name,
               group.source,
+              group.kind,
               branch == null ? BumpService.BRANCH_PREFIX + group.name : branch.branch,
               branch == null ? BranchState.NONE.name() : branch.state,
               branch == null ? null : branch.headSha,
@@ -195,7 +196,7 @@ public class Inventory {
         row == null ? null : row.latest,
         row == null ? null : row.error,
         newer.isPresent(),
-        PendingChanges.groupOf(pin.name, groups).orElse(null),
+        PendingChanges.groupOf(pin, groups).orElse(null),
         pin.location);
   }
 

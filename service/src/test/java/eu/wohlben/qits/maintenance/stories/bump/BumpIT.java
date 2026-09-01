@@ -299,9 +299,10 @@ public class BumpIT {
     StoryPeers ci = StoryPeers.attach(StoryTarget.CI);
     StoryPeers githost = StoryPeers.attach(StoryTarget.GITHOST);
 
-    // The branch already exists and stays exactly where it is, before the run and after it.
+    // The branch already exists and stays exactly where it is, before the run and after it. It is
+    // the EXTERNAL half's branch: this repository pins one dependency and it is somebody else's.
     githost.json(
-        StoryCatalog.tree(StoryCatalog.SECOND_REPOSITORY, StoryCatalog.BRANCH),
+        StoryCatalog.tree(StoryCatalog.SECOND_REPOSITORY, StoryCatalog.EXTERNAL_BRANCH),
         "{\"entries\":[]}",
         Map.of("Git-Commit-Sha", StoryCatalog.UNMOVED_SHA));
     ci.json(
@@ -320,15 +321,16 @@ public class BumpIT {
                     + "/"
                     + StoryCatalog.SECOND_REPOSITORY
                     + "/groups/"
-                    + StoryCatalog.DEFAULT_GROUP
+                    + StoryCatalog.EXTERNAL_GROUP
                     + "/bumps")
             .then()
             .statusCode(202)
             .extract()
             .path("id");
     story
-        .note("a second repository, a group with something pending, and a branch that already"
-            + " exists at a commit this service records before it triggers anything")
+        .note("a second repository, the external half of its grouping with something pending, and"
+            + " a branch that already exists at a commit this service records before it triggers"
+            + " anything")
         .as("the-head-before");
 
     assertEquals(
@@ -366,7 +368,7 @@ public class BumpIT {
   static void bothBumpStoriesAreComplete() {
     String branchWire = StoryCatalog.treeWire(StoryCatalog.REPOSITORY, StoryCatalog.BRANCH);
     String secondBranchWire =
-        StoryCatalog.treeWire(StoryCatalog.SECOND_REPOSITORY, StoryCatalog.BRANCH);
+        StoryCatalog.treeWire(StoryCatalog.SECOND_REPOSITORY, StoryCatalog.EXTERNAL_BRANCH);
     String bumpsPath =
         StoryTarget.REPOSITORIES
             + "/"
@@ -435,7 +437,7 @@ public class BumpIT {
             + "/"
             + StoryCatalog.SECOND_REPOSITORY
             + "/groups/"
-            + StoryCatalog.DEFAULT_GROUP
+            + StoryCatalog.EXTERNAL_GROUP
             + "/bumps -> 202");
     in(UNMOVED_SLUG, "GET " + StoryTarget.BUMPS + "/" + StoryTarget.ID + " -> 200");
     // ONE LABEL FOR BOTH READS, and that is the point rather than an accident: the head before the

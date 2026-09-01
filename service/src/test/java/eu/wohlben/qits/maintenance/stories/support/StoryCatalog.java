@@ -53,14 +53,23 @@ public final class StoryCatalog {
   /** …and {@link #SECOND_REPOSITORY}'s. */
   public static final String SECOND_HEAD_SHA = "bb22cc33dd44ee55ff6677889900aabbccddeeff";
 
-  /** Where a bump's changes land. A group's name IS its branch. */
+  /**
+   * The INTERNAL half of the fallback grouping, and where this platform's own releases land. A
+   * group's name IS its branch.
+   */
   public static final String DEFAULT_GROUP = "dependencies";
 
-  /** The group {@link #REPOSITORY}'s own configuration declares, ahead of the fallback. */
+  /** The EXTERNAL half: everybody else's upgrades, on a branch of their own. */
+  public static final String EXTERNAL_GROUP = "external";
+
+  /** The group {@link #REPOSITORY}'s own configuration declares, ahead of the fallback pair. */
   public static final String ANGULAR_GROUP = "angular";
 
   /** The branch {@link #DEFAULT_GROUP} is bumped on, as the git host route encodes it. */
   public static final String BRANCH = "maintenance/" + DEFAULT_GROUP;
+
+  /** …and the branch {@link #EXTERNAL_GROUP} is bumped on. */
+  public static final String EXTERNAL_BRANCH = "maintenance/" + EXTERNAL_GROUP;
 
   /** …and the same, percent-encoded, because a revision is ONE path segment on that route. */
   public static final String BRANCH_SEGMENT = "maintenance%2F" + DEFAULT_GROUP;
@@ -241,7 +250,11 @@ public final class StoryCatalog {
           deps: ["@angular/*"]
       """;
 
-  /** The second repository: one external pin behind a property, and nothing else at all. */
+  /**
+   * The second repository: one EXTERNAL pin behind a property, and nothing else at all — so its
+   * whole pending list belongs to the external half of the fallback, which is the branch the second
+   * bump story writes.
+   */
   private static final String SECOND_POM =
       """
       <project>

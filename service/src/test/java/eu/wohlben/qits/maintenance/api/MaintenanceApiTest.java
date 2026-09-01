@@ -161,12 +161,81 @@ class MaintenanceApiTest {
         .body("name", hasItem(Fixture.REPOSITORY))
         .body("find { it.name == '" + Fixture.REPOSITORY + "' }.status", equalTo("OK"))
         .body("find { it.name == '" + Fixture.REPOSITORY + "' }.headSha", equalTo(Fixture.HEAD_SHA))
-        // The repository declares `angular`; the catch-all is appended so no pin is unclaimed.
+        // The repository declares `angular`; the two kind groups are appended after it, so no pin
+        // is unclaimed and what the repository did not group still splits internal from external.
         .body("find { it.name == '" + Fixture.REPOSITORY + "' }.groups.name",
-            equalTo(java.util.List.of("angular", "dependencies")))
+            equalTo(java.util.List.of("angular", "dependencies", "external")))
         .body("find { it.name == '" + Fixture.REPOSITORY + "' }.groups[0].branch",
             equalTo("maintenance/angular"))
-        .body("find { it.name == '" + Fixture.REPOSITORY + "' }.groups[0].state", equalTo("NONE"));
+        .body("find { it.name == '" + Fixture.REPOSITORY + "' }.groups[0].state", equalTo("NONE"))
+        .body("find { it.name == '" + Fixture.REPOSITORY + "' }.groups[2].branch",
+            equalTo("maintenance/external"));
+  }
+
+  /**
+   * THE SPLIT, ON THE ROUTE THAT SERVES IT. A group says HOW it claims — by kind, or by the globs
+   * the repository wrote — and that is a different question from whether the repository asked for
+   * the grouping at all, which is what `source` answers.
+   */
+  @Test
+  void aGroupSaysWhetherItClaimsByKindOrByTheRepositorysOwnGlobs() {
+    scan();
+    String repository = BASE + "/repositories/" + Fixture.REPOSITORY;
+    given()
+        .when()
+        .get(repository)
+        .then()
+        .statusCode(200)
+        .body("groups.find { it.name == 'angular' }.kind", nullValue())
+        .body("groups.find { it.name == 'angular' }.source", equalTo("CONFIG"))
+        .body("groups.find { it.name == 'dependencies' }.kind", equalTo("INTERNAL"))
+        .body("groups.find { it.name == 'external' }.kind", equalTo("EXTERNAL"))
+        .body("groups.find { it.name == 'external' }.branch", equalTo("maintenance/external"))
+        .body("groups.find { it.name == 'external' }.state", equalTo("NONE"))
+        // The internal half claims the five internal pins that are behind; the external half claims
+        // the quarkus BOM, and @angular/core went to the group this repository declared for it.
+        .body("groups.find { it.name == 'dependencies' }.pending", equalTo(5))
+        .body("groups.find { it.name == 'external' }.pending", equalTo(1))
+        .body("groups.find { it.name == 'angular' }.pending", equalTo(1))
+        // …and a pin names the group whose branch would carry it.
+        .body("pins.find { it.name == 'io.quarkus.platform:quarkus-bom' }.group", equalTo("external"))
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-eventstream' }.group",
+            equalTo("dependencies"))
+        .body("pins.find { it.name == 'qits/build-images/maven-base' }.group", equalTo("dependencies"))
+        .body("pins.find { it.name == '@qits/ui-components' }.group", equalTo("dependencies"));
+  }
+
+  @Test
+  void anExternalBumpIsItsOwnBranchAndCarriesNoInternalChange() {
+    scan();
+    Fixture.scriptCiAccepts(peers, "run-external");
+    String id =
+        given()
+            .contentType(ContentType.JSON)
+            .body("{}")
+            .when()
+            .post(BASE + "/repositories/" + Fixture.REPOSITORY + "/groups/external/bumps")
+            .then()
+            .statusCode(202)
+            .extract()
+            .path("id");
+    awaitField("/bumps/" + id, "ciRunId");
+
+    given()
+        .when()
+        .get(BASE + "/bumps/" + id)
+        .then()
+        .statusCode(200)
+        .body("group", equalTo("external"))
+        .body("branch", equalTo("maintenance/external"))
+        .body("changes.size()", equalTo(1))
+        .body("changes[0].name", equalTo("io.quarkus.platform:quarkus-bom"));
+
+    String payload = peers.bodiesFor("/ci/api/events/trigger").get(0);
+    assertTrue(payload.contains("\"branch\":\"maintenance/external\""), payload);
+    // Nothing of ours rides along on somebody else's branch.
+    assertTrue(!payload.contains("eu.wohlben.qits"), payload);
+    assertTrue(!payload.contains("qits/build-images"), payload);
   }
 
   @Test
@@ -406,11 +475,12 @@ class MaintenanceApiTest {
         .body("ciRunId", equalTo("run-1"))
         .body("ciRunStatus", equalTo("SUCCESS"))
         .body("configPath", containsString("ci-platform-event-maintenance-bump.yml"))
-        // The `dependencies` group claims everything `angular` did not: the eventstream property,
-        // the quarkus BOM, the outside parent, qits-arch-rules, the @qits npm package and the
-        // internal build image. The sibling module, the unresolved expression and the external base
-        // image are not among them.
-        .body("changes.size()", equalTo(6))
+        // The `dependencies` group is the INTERNAL half: the eventstream property, the outside
+        // parent, qits-arch-rules, the @qits npm package and the internal build image. The quarkus
+        // BOM is external and rides on its own branch; @angular/core belongs to `angular`; and the
+        // sibling module, the unresolved expression and the external base image are pins nothing
+        // can bump at all.
+        .body("changes.size()", equalTo(5))
         .body("finishedAt", notNullValue());
 
     given()
@@ -518,7 +588,7 @@ class MaintenanceApiTest {
         .then()
         .body("status", equalTo("REQUESTED"))
         .body("finishedAt", nullValue())
-        .body("changes.size()", equalTo(6));
+        .body("changes.size()", equalTo(5));
 
     // qits-ci is back. The sweep sends the SAME payload under the SAME event id.
     Fixture.scriptCiAccepts(peers, "run-4");
@@ -581,7 +651,7 @@ class MaintenanceApiTest {
         .then()
         .statusCode(200)
         .body("id", hasItem(id))
-        .body("find { it.id == '" + id + "' }.changes.size()", equalTo(6));
+        .body("find { it.id == '" + id + "' }.changes.size()", equalTo(5));
     given()
         .when()
         .get(BASE + "/bumps?repository=" + Fixture.REPOSITORY)

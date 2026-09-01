@@ -57,7 +57,7 @@ class MaintenanceStoreTest {
         "sha1",
         null,
         List.of(pin("g:a", "1.0.0", "dependency:g:a"), pin("g:b", "2.0.0", "dependency:g:b")),
-        List.of(new GroupConfig.Group("dependencies", List.of("*"))),
+        List.of(GroupConfig.Group.ofKind("dependencies", PinKind.INTERNAL)),
         GroupSource.DEFAULT,
         candidate -> PinKind.INTERNAL,
         Instant.now());
@@ -72,7 +72,7 @@ class MaintenanceStoreTest {
         "sha2",
         null,
         List.of(pin("g:a", "1.1.0", "dependency:g:a")),
-        List.of(new GroupConfig.Group("dependencies", List.of("*"))),
+        List.of(GroupConfig.Group.ofKind("dependencies", PinKind.INTERNAL)),
         GroupSource.DEFAULT,
         candidate -> PinKind.INTERNAL,
         Instant.now());
@@ -94,7 +94,7 @@ class MaintenanceStoreTest {
         "sha1",
         null,
         List.of(pin("g:a", "1.0.0", "dependency:g:a")),
-        List.of(new GroupConfig.Group("dependencies", List.of("*"))),
+        List.of(GroupConfig.Group.ofKind("dependencies", PinKind.INTERNAL)),
         GroupSource.DEFAULT,
         candidate -> PinKind.INTERNAL,
         Instant.now());
@@ -119,15 +119,90 @@ class MaintenanceStoreTest {
         null,
         List.of(),
         List.of(
-            new GroupConfig.Group("angular", List.of("@angular/*")),
-            new GroupConfig.Group("quarkus", List.of("io.quarkus:*")),
-            new GroupConfig.Group("dependencies", List.of("*"))),
+            GroupConfig.Group.glob("angular", List.of("@angular/*")),
+            GroupConfig.Group.glob("quarkus", List.of("io.quarkus:*")),
+            GroupConfig.Group.ofKind("dependencies", PinKind.INTERNAL)),
         GroupSource.CONFIG,
         candidate -> PinKind.EXTERNAL,
         Instant.now());
     List<MtGroup> groups = store.groups(repository);
     assertEquals(List.of("angular", "quarkus", "dependencies"), groups.stream().map(g -> g.name).toList());
     assertEquals(List.of(0, 1, 2), groups.stream().map(g -> g.ordinal).toList());
+  }
+
+  @Test
+  void aGroupsKindSurvivesTheRoundTripAndAGlobGroupCarriesNone() {
+    // The column is what the split rides on: a scan writes the fallback pair with a kind and empty
+    // patterns, a configured group with patterns and no kind, and the grouping is read back out of
+    // these rows on every request.
+    String repository = "kinds-" + UUID.randomUUID();
+    store.replaceInventory(
+        repository,
+        "qits",
+        "main",
+        RepositoryStatus.OK,
+        "sha1",
+        null,
+        List.of(pin("g:a", "1.0.0", "dependency:g:a")),
+        List.of(
+            GroupConfig.Group.glob("angular", List.of("@angular/*")),
+            GroupConfig.Group.ofKind(GroupConfig.DEFAULT_GROUP, PinKind.INTERNAL),
+            GroupConfig.Group.ofKind(GroupConfig.EXTERNAL_GROUP, PinKind.EXTERNAL)),
+        GroupSource.CONFIG,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+
+    List<MtGroup> groups = store.groups(repository);
+    assertEquals(List.of("angular", "dependencies", "external"), groups.stream().map(g -> g.name).toList());
+    assertNull(groups.get(0).kind);
+    assertEquals("[\"@angular/*\"]", groups.get(0).patterns);
+    assertEquals(PinKind.INTERNAL.name(), groups.get(1).kind);
+    assertEquals(PinKind.EXTERNAL.name(), groups.get(2).kind);
+    // A kind group claims by kind and by nothing else, so its patterns are the empty array.
+    assertEquals("[]", groups.get(1).patterns);
+    assertEquals("[]", groups.get(2).patterns);
+
+    // And the pin lands where its kind says, read the way every route reads it.
+    assertEquals(
+        "dependencies",
+        eu.wohlben.qits.maintenance.pending.PendingChanges.groupOf(store.pins(repository).get(0), groups)
+            .orElseThrow());
+  }
+
+  @Test
+  void aRescanReplacesTheGroupingAsWellAsThePins() {
+    // The rows are a cache of a file, and a repository that ADDS a maintenance.yml must not keep
+    // the fallback pair beside the groups it just declared.
+    String repository = "regroup-" + UUID.randomUUID();
+    store.replaceInventory(
+        repository,
+        "qits",
+        "main",
+        RepositoryStatus.OK,
+        "sha1",
+        null,
+        List.of(),
+        List.of(
+            GroupConfig.Group.ofKind(GroupConfig.DEFAULT_GROUP, PinKind.INTERNAL),
+            GroupConfig.Group.ofKind(GroupConfig.EXTERNAL_GROUP, PinKind.EXTERNAL)),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+    store.replaceInventory(
+        repository,
+        "qits",
+        "main",
+        RepositoryStatus.OK,
+        "sha2",
+        null,
+        List.of(),
+        List.of(GroupConfig.Group.glob("everything", List.of("*"))),
+        GroupSource.CONFIG,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+    List<MtGroup> groups = store.groups(repository);
+    assertEquals(List.of("everything"), groups.stream().map(g -> g.name).toList());
+    assertNull(groups.get(0).kind);
   }
 
   @Test
