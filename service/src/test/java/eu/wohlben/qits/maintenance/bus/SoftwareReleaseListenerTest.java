@@ -45,7 +45,30 @@ class SoftwareReleaseListenerTest {
     final Map<String, String> latest = new LinkedHashMap<>();
     final Map<String, String> sourceUrls = new LinkedHashMap<>();
     final List<String> writes = new ArrayList<>();
+
+    /**
+     * The catalog, as {@code mt_repository} holds it: a name per catalog id. The real method is one
+     * query over {@code name = ?1 or catalog_id = ?1} and {@code MaintenanceStoreTest} is where it
+     * is proved against a real PostgreSQL; here the three answers are what the listener is judged
+     * on.
+     */
+    final Map<String, String> nameByCatalogId = new LinkedHashMap<>();
+
     RuntimeException failWith;
+
+    @Override
+    public String repositoryName(String spelling) {
+      if (failWith != null) {
+        throw failWith;
+      }
+      if (spelling == null) {
+        return null;
+      }
+      if (nameByCatalogId.containsValue(spelling)) {
+        return spelling;
+      }
+      return nameByCatalogId.getOrDefault(spelling, spelling);
+    }
 
     @Override
     public boolean recordLatestIfNewer(
@@ -245,7 +268,8 @@ class SoftwareReleaseListenerTest {
     assertEquals(
         "qits-eventstream-javalib",
         row.repository(),
-        "SoftwareRelease.repository is a string from another context and is recorded verbatim");
+        "SoftwareRelease.repository is another context's spelling, resolved to the catalog name "
+            + "this side joins on — see the three cases below");
     assertEquals(
         published.occurredAt(),
         row.occurredAt(),
@@ -295,6 +319,61 @@ class SoftwareReleaseListenerTest {
     release("daemon", "qits-ci-daemon", "2026.901.1");
 
     assertTrue(sboms.announced.isEmpty());
+  }
+
+  // --- the repository field: a row id on the wire, a name in the row ------------------------------
+
+  /**
+   * <b>THE FIELD IS A ROW ID, measured live on 2026-09-02.</b> qits-ci names the repository by
+   * qits-projects' row uuid; every read on this side joins {@code mt_artifact.repository} to a
+   * catalog NAME. Resolving at the write is what keeps the repository page's transitives,
+   * {@code GET /repositories/{name}/dependents} and the client's link target from all reading a
+   * uuid that matches nothing.
+   */
+  @Test
+  void aRepositoryNamedByItsCatalogRowIdIsStoredUnderItsName() {
+    store.nameByCatalogId.put("daf73ae4-1c9a-4f8e-9a51-0b0d0e0f1234", "qits-eventstream-javalib");
+
+    listener.onFrame(
+        frame(
+            "SoftwareRelease",
+            ForeignEventContractTest.softwareReleasePayload(
+                "daf73ae4-1c9a-4f8e-9a51-0b0d0e0f1234",
+                "maven",
+                "eu.wohlben.qits:qits-eventstream",
+                "2026.901.1")));
+
+    assertEquals(1, sboms.announced.size());
+    assertEquals("qits-eventstream-javalib", sboms.announced.get(0).repository());
+  }
+
+  /** A name is already the join key, so it is answered unchanged and nothing is invented. */
+  @Test
+  void aRepositoryAlreadyNamedByTheCatalogPassesThroughUnchanged() {
+    store.nameByCatalogId.put("daf73ae4-1c9a-4f8e-9a51-0b0d0e0f1234", "qits-eventstream-javalib");
+
+    release("maven", "eu.wohlben.qits:qits-eventstream", "2026.901.1");
+
+    assertEquals("qits-eventstream-javalib", sboms.announced.get(0).repository());
+  }
+
+  /**
+   * The third case, and the one to get right: a spelling the catalog knows neither way is KEPT. A
+   * release of a repository this inventory has never scanned still happened, and an unknown
+   * spelling must not lose the fact along with the string.
+   */
+  @Test
+  void aSpellingTheCatalogKnowsNeitherWayIsKeptRawRatherThanDropped() {
+    listener.onFrame(
+        frame(
+            "SoftwareRelease",
+            ForeignEventContractTest.softwareReleasePayload(
+                "8f7e6d5c-0000-4000-8000-1a2b3c4d5e6f",
+                "maven",
+                "eu.wohlben.qits:qits-eventstream",
+                "2026.901.1")));
+
+    assertEquals("8f7e6d5c-0000-4000-8000-1a2b3c4d5e6f", sboms.announced.get(0).repository());
   }
 
   /**

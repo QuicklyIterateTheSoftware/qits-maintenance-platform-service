@@ -87,6 +87,14 @@ import org.jboss.logging.Logger;
  * internal release following this deploy, and compare it with a {@code mt_pin.name} of the same
  * artifact.
  *
+ * <h2>{@code repository} does NOT, and it is the one field that is translated</h2>
+ *
+ * <p>The same payload's {@code repository} is qits-projects' repository ROW ID — measured live on
+ * 2026-09-02 — while everything downstream of {@code mt_artifact.repository} joins on the catalog
+ * NAME. So this listener resolves it before the row is written, through
+ * {@code MaintenanceStore.repositoryName} and {@code mt_repository.catalog_id} (V5), and an
+ * unknown spelling is stored verbatim rather than dropped. See {@link #repository}.
+ *
  * <h2>Failure: what is retried and what is swallowed</h2>
  *
  * <p><b>Retryable, and left to throw:</b> anything the store raises out of its own database work. A
@@ -220,7 +228,31 @@ public class SoftwareReleaseListener implements QitsDurableEventListener {
     // redelivered for ever, and this listener's watermark would sit behind it. The row IS the
     // outbox — see SbomIngestService.
     sboms.announced(
-        ecosystem, name, version, trimmed(release.repository()), occurredAt(frame));
+        ecosystem, name, version, repository(release), occurredAt(frame));
+  }
+
+  /**
+   * <b>The frame's {@code repository} is qits-projects' ROW ID, and this is where it becomes a
+   * NAME.</b>
+   *
+   * <p>Measured live on 2026-09-02: the field arrives as {@code daf73ae4-…}, not as
+   * {@code qits-eventstream-javalib}. Every read on this side joins {@code mt_artifact.repository}
+   * to a repository NAME — the repository detail page's transitives, {@code GET
+   * /repositories/{name}/dependents}, and {@code DependentDto.repository}, which the client renders
+   * as the link to that page — so a uuid stored here is a row that answers nobody and says nothing
+   * about it. The translation belongs at the WRITE, once per release, rather than at every read.
+   *
+   * <p>{@code MaintenanceStore.repositoryName} is one query and answers all three cases: a name
+   * stays a name, a known {@code catalog_id} becomes its row's name, and <b>an unknown spelling is
+   * kept verbatim</b> — a release of a repository this inventory has never scanned still happened,
+   * and dropping the string would lose the fact along with the spelling.
+   *
+   * <p>It is inside this listener's existing failure policy and needs no arm of its own: the store
+   * throws only on a database that will not answer, which is the retryable case that is already
+   * left to propagate.
+   */
+  private String repository(SoftwareReleasePayload release) {
+    return store.repositoryName(trimmed(release.repository()));
   }
 
   /**

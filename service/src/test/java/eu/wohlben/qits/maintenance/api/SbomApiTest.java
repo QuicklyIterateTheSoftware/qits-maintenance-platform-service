@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import eu.wohlben.qits.maintenance.latest.LatestLookup;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
+import eu.wohlben.qits.maintenance.model.RepositoryStatus;
 import eu.wohlben.qits.maintenance.peer.FakePeers;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
 import eu.wohlben.qits.maintenance.sbom.ParsedSbom;
@@ -399,6 +400,82 @@ class SbomApiTest {
             "artifacts.find { it.name == '" + EVENTSTREAM + "' }.dependents[0].direct",
             equalTo(true))
         .body("artifacts.find { it.name == '@qits/ui-components' }.dependents", empty());
+  }
+
+  // --- the rows written before the listener resolved the frame's repository -----------------------
+
+  /**
+   * <b>THE READ-SIDE BELT, for rows nothing can rewrite.</b> Until 2026-09-02 this service recorded
+   * {@code SoftwareRelease.repository} verbatim, and that field is qits-projects' repository ROW ID
+   * rather than the catalog name — so every artifact row released before the fix holds a uuid in
+   * the column both reverse reads join on a name, and both of them answered nothing at all.
+   *
+   * <p>The catalog is what closes it: a scan writes {@code mt_repository.catalog_id}, so the same
+   * repository is known under both spellings and {@code ArtifactGraph} translates in each
+   * direction — the lookup finds the old rows, and the listing hands the client a name rather than
+   * a uuid to link to.
+   */
+  @Test
+  void anArtifactRowStillHoldingTheFramesRowIdIsFoundAndNamedByTheRepositoryItBelongsTo() {
+    String rowId = "daf73ae4-1c9a-4f8e-9a51-0b0d0e0f1234";
+    store.markRepository(
+        "qits-eventstream-javalib", Fixture.PROJECT, rowId, RepositoryStatus.OK, null, Instant.now());
+
+    // The row a release wrote before the fix: the uuid where a name is read.
+    released(
+        Ecosystem.MAVEN,
+        EVENTSTREAM,
+        "2026.821.3",
+        rowId,
+        Instant.parse("2026-08-21T10:00:00Z"),
+        List.of(),
+        List.of());
+    theFixtureRelease();
+
+    given()
+        .when()
+        .get(BASE + "/repositories/qits-eventstream-javalib/dependents")
+        .then()
+        .statusCode(200)
+        .body("artifacts.size()", equalTo(1))
+        .body("artifacts[0].name", equalTo(EVENTSTREAM))
+        .body("artifacts[0].dependents.size()", equalTo(1))
+        .body("artifacts[0].dependents[0].artifactName", equalTo(CI));
+
+    given()
+        .when()
+        .get(BASE + "/artifacts")
+        .then()
+        .statusCode(200)
+        .body(
+            "find { it.name == '" + EVENTSTREAM + "' }.repository",
+            equalTo("qits-eventstream-javalib"));
+  }
+
+  /**
+   * And the case that must NOT be translated: a spelling the catalog knows neither way is what a
+   * release said, and it is served as it is. Guessing a repository here would put a name on a page
+   * that no event ever carried.
+   */
+  @Test
+  void aRepositorySpellingTheCatalogDoesNotKnowIsServedExactlyAsItWasStored() {
+    released(
+        Ecosystem.MAVEN,
+        EVENTSTREAM,
+        "2026.821.3",
+        "8f7e6d5c-0000-4000-8000-1a2b3c4d5e6f",
+        Instant.parse("2026-08-21T10:00:00Z"),
+        List.of(),
+        List.of());
+
+    given()
+        .when()
+        .get(BASE + "/artifacts")
+        .then()
+        .statusCode(200)
+        .body(
+            "find { it.name == '" + EVENTSTREAM + "' }.repository",
+            equalTo("8f7e6d5c-0000-4000-8000-1a2b3c4d5e6f"));
   }
 
   @Test

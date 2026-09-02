@@ -19,7 +19,7 @@ The contract — routes, model, config keys, schedules and the bump payload — 
 
 | Fact | Peer | How |
 |---|---|---|
-| the catalog | qits-projects | `GET /projects/api/repositories`; a row with no `name` has no address and is skipped |
+| the catalog | qits-projects | `GET /projects/api/repositories`; a row with no `name` has no address and is skipped. The row's `id` is kept as `mt_repository.catalog_id` — never an address here, and the only way another context's spelling of a repository is read back as a name |
 | manifests at `main` | qits-githost | `GET /git/<project>/<repo>/tree/<rev>[/<path>]` and `…/blob/<rev>/<path>` |
 | internal latest | qits-artifacts | maven `maven-metadata.xml`, npm packument, OCI `/<name>/tags/list` |
 | external latest | qits-platform-mirror | `central` maven-metadata, `npmjs` packument |
@@ -375,6 +375,18 @@ matched.
 Three tables, and the only foreign keys in this schema: `mt_artifact` (one row per released
 version), `mt_artifact_component` (what it contains, with the purl verbatim), `mt_artifact_edge`
 (who pulled in whom — adjacency, not a closure, because the question is the PATH).
+
+**`SoftwareRelease.repository` is qits-projects' ROW ID, not the catalog name, and
+`mt_repository.catalog_id` (V5) is the translation.** Measured live on 2026-09-02: the field arrives
+as `daf73ae4-…`, so `mt_artifact.repository` filled up with uuids while every read that joins it —
+the detail page's transitives, `GET /repositories/{name}/dependents`, and `DependentDto.repository`,
+which the client renders as the link to that page — joins on the NAME, and all of them answered
+nothing without saying so. The catalog is where both spellings are known at once: qits-projects'
+listing answers `id` beside `name`, `CatalogReader` keeps it, and every scan writes it. The frame is
+resolved at the WRITE now (`SoftwareReleaseListener`), and `ArtifactGraph` translates in both
+directions at READ time for the rows written before that — an id the catalog does not know passes
+through untouched in either arm, because an unknown spelling must not lose the fact that a release
+said it.
 
 ## API
 

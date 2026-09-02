@@ -28,6 +28,17 @@ public class MtRepository extends PanacheEntityBase {
   @Column(length = 255)
   public String project;
 
+  /**
+   * The catalog row's own id, as qits-projects answers it. <b>Not an identity here and never an
+   * address</b> — the name above is both — but the one column that can turn ANOTHER context's
+   * spelling of this repository back into a name: qits-ci's {@code SoftwareRelease} names the
+   * repository by this id, so {@code mt_artifact.repository} would otherwise hold a uuid where the
+   * whole read side joins on a name. Null for a row the catalog listed without one, and for every
+   * row not yet re-scanned since V5.
+   */
+  @Column(name = "catalog_id", length = 64)
+  public String catalogId;
+
   /** The branch a scan reads and a bump branches from — the payload's {@code baseRef}. */
   @Column(name = "main_branch", length = 255)
   public String mainBranch;

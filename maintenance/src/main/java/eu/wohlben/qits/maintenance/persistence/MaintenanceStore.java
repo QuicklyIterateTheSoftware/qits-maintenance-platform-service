@@ -69,11 +69,14 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
    *
    * @param kindOf what can be done with a pin — passed in rather than injected, because the rule is
    *     configuration and this class is storage
+   * @param catalogId the catalog row's own id, kept so another context's spelling of this
+   *     repository can be read back as a name. See {@link #repositoryName(String)}.
    */
   @ActivateRequestContext
   public void replaceInventory(
       String name,
       String project,
+      String catalogId,
       String mainBranch,
       RepositoryStatus status,
       String headSha,
@@ -96,6 +99,12 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
             row.name = name;
           }
           row.project = project;
+          // NEVER NULLED BY A SCAN THAT DID NOT SEE ONE. A catalog listing without an id says
+          // nothing about the id this row already carries, and clearing it would take the
+          // translation away from every graph row that still needs it.
+          if (catalogId != null && !catalogId.isBlank()) {
+            row.catalogId = catalogId;
+          }
           row.mainBranch = mainBranch;
           row.status = status.name();
           row.headSha = headSha;
@@ -148,7 +157,12 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
    */
   @ActivateRequestContext
   public void markRepository(
-      String name, String project, RepositoryStatus status, String message, Instant now) {
+      String name,
+      String project,
+      String catalogId,
+      RepositoryStatus status,
+      String message,
+      Instant now) {
     DbRetry.runInNewTx(
         "mark " + name + " " + status,
         () -> {
@@ -160,6 +174,9 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
           }
           if (project != null) {
             row.project = project;
+          }
+          if (catalogId != null && !catalogId.isBlank()) {
+            row.catalogId = catalogId;
           }
           row.status = status.name();
           row.message = message;
@@ -273,6 +290,37 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
   @ActivateRequestContext
   public Optional<MtRepository> repository(String name) {
     return Optional.ofNullable(findById(name));
+  }
+
+  /**
+   * <b>ANOTHER CONTEXT'S SPELLING OF A REPOSITORY, READ BACK AS THE NAME THIS INVENTORY IS KEYED
+   * BY.</b>
+   *
+   * <p>qits-ci's {@code SoftwareRelease} names the repository by qits-projects' ROW ID, not by the
+   * catalog name — measured live 2026-09-02 — while every join on this side is name-keyed. This is
+   * the whole translation, and it is deliberately a total function over three cases:
+   *
+   * <ul>
+   *   <li>the value IS a name this catalog knows — answered unchanged, which is the ordinary case
+   *       and the one a future qits-ci that publishes names lands in;
+   *   <li>the value is a known {@code catalog_id} — answered with that row's name;
+   *   <li>anything else — answered <b>unchanged</b>. A repository this inventory has never scanned,
+   *       or one whose id arrived before the first scan after V5, still said something, and losing
+   *       the string would lose the fact along with the spelling.
+   * </ul>
+   *
+   * <p><b>One query</b>, {@code name = ?1 or catalog_id = ?1}, because the caller is the bus
+   * listener and it runs inside the claim transaction of somebody else's release.
+   *
+   * @return the catalog name, or the spelling unchanged when the catalog knows neither
+   */
+  @ActivateRequestContext
+  public String repositoryName(String spelling) {
+    if (spelling == null || spelling.isBlank()) {
+      return spelling;
+    }
+    MtRepository row = find("name = ?1 or catalogId = ?1", spelling).firstResult();
+    return row == null ? spelling : row.name;
   }
 
   @ActivateRequestContext
@@ -936,10 +984,26 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
   /** Every artifact one repository has released, newest first. */
   @ActivateRequestContext
   public List<MtArtifact> artifactsOfRepository(String repository) {
+    return artifactsOfRepository(List.of(repository));
+  }
+
+  /**
+   * The same listing for a repository under EVERY spelling its rows may carry.
+   *
+   * <p>{@code mt_artifact.repository} holds what the release announced, and until this deploy that
+   * was qits-projects' row id rather than the name — so one repository's history is split across
+   * two strings and a name-only read answers only the half written since. The caller supplies both
+   * (see {@code ArtifactGraph}'s translation), and this stays a single indexed read.
+   */
+  @ActivateRequestContext
+  public List<MtArtifact> artifactsOfRepository(List<String> spellings) {
+    if (spellings == null || spellings.isEmpty()) {
+      return List.of();
+    }
     return MtArtifact.find(
-            "repository = ?1",
+            "repository in ?1",
             Sort.by("ecosystem").and("name").and("occurredAt", Sort.Direction.Descending),
-            repository)
+            spellings)
         .list();
   }
 

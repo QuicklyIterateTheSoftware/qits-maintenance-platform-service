@@ -53,6 +53,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -68,6 +69,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         "main",
         RepositoryStatus.OK,
         "sha2",
@@ -90,6 +92,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -101,11 +104,92 @@ class MaintenanceStoreTest {
         Instant.now());
 
     store.markRepository(
-        repository, "qits", RepositoryStatus.UNREACHABLE, "the git host said nothing", Instant.now());
+        repository,
+        "qits",
+        null,
+        RepositoryStatus.UNREACHABLE,
+        "the git host said nothing",
+        Instant.now());
 
     MtRepository row = store.repository(repository).orElseThrow();
     assertEquals(RepositoryStatus.UNREACHABLE.name(), row.status);
     assertEquals(1, store.pins(repository).size());
+  }
+
+  /**
+   * <b>V5's column, and the whole reason it exists.</b> Another context spells this repository with
+   * qits-projects' row id — qits-ci's {@code SoftwareRelease} does, measured live on 2026-09-02 —
+   * while every join here is name-keyed. The catalog is where both spellings are known at once, so
+   * a scan writes the id beside the name and {@code repositoryName} is the translation, in one
+   * query and over all three cases.
+   */
+  @Test
+  void aCatalogIdIsStoredBesideTheNameAndIsWhatTranslatesAnotherContextsSpelling() {
+    String repository = "catalog-id-" + UUID.randomUUID();
+    String catalogId = UUID.randomUUID().toString();
+    store.replaceInventory(
+        repository,
+        "qits",
+        catalogId,
+        "main",
+        RepositoryStatus.OK,
+        "sha1",
+        null,
+        List.of(pin("g:a", "1.0.0", "dependency:g:a")),
+        List.of(GroupConfig.Group.ofKind("dependencies", PinKind.INTERNAL)),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+
+    assertEquals(catalogId, store.repository(repository).orElseThrow().catalogId);
+    assertEquals(repository, store.repositoryName(catalogId), "an id is answered with its name");
+    assertEquals(repository, store.repositoryName(repository), "a name is answered unchanged");
+    // An unknown spelling is KEPT. A release of a repository this inventory has never scanned still
+    // happened, and dropping the string would lose the fact along with the spelling.
+    String stranger = UUID.randomUUID().toString();
+    assertEquals(stranger, store.repositoryName(stranger));
+  }
+
+  /**
+   * A catalog listing that carried no id says nothing about the id this row already has, and
+   * clearing it would take the translation away from every graph row that still needs it.
+   */
+  @Test
+  void aScanThatSawNoCatalogIdLeavesTheOneTheRowAlreadyCarries() {
+    String repository = "catalog-id-kept-" + UUID.randomUUID();
+    String catalogId = UUID.randomUUID().toString();
+    store.replaceInventory(
+        repository,
+        "qits",
+        catalogId,
+        "main",
+        RepositoryStatus.OK,
+        "sha1",
+        null,
+        List.of(),
+        List.of(),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+    store.replaceInventory(
+        repository,
+        "qits",
+        null,
+        "main",
+        RepositoryStatus.OK,
+        "sha2",
+        null,
+        List.of(),
+        List.of(),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+    store.markRepository(
+        repository, "qits", null, RepositoryStatus.UNREACHABLE, "nothing answered", Instant.now());
+
+    MtRepository row = store.repository(repository).orElseThrow();
+    assertEquals(catalogId, row.catalogId);
+    assertEquals("sha2", row.headSha);
   }
 
   @Test
@@ -114,6 +198,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -140,6 +225,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -178,6 +264,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -192,6 +279,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         "main",
         RepositoryStatus.OK,
         "sha2",
@@ -227,6 +315,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -244,6 +333,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         "main",
         RepositoryStatus.OK,
         "sha2",

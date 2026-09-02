@@ -9,6 +9,7 @@ import eu.wohlben.qits.maintenance.entity.MtArtifact;
 import eu.wohlben.qits.maintenance.entity.MtArtifactComponent;
 import eu.wohlben.qits.maintenance.entity.MtArtifactEdge;
 import eu.wohlben.qits.maintenance.entity.MtPin;
+import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.latest.VersionOrder;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.SbomStatus;
@@ -43,6 +44,11 @@ import java.util.UUID;
  * answers are about versions nobody can do anything about any more. {@code all=true} is the
  * archaeology.
  *
+ * <p><b>{@code mt_artifact.repository} is not always a name, and {@link RepositoryNames} is the one
+ * place that is dealt with.</b> The release event spells a repository as qits-projects' row id, so
+ * rows written before {@code SoftwareReleaseListener} learned to resolve it carry a uuid where
+ * every read here joins a name. Both directions of the translation live in that one helper.
+ *
  * <p><b>Nothing here is stored.</b> Dependent counts, "behind" verdicts and the {@code via} paths
  * are computed on every read, for the reason pending is: they are a join of two halves that move on
  * different schedules, and a stored copy would be stale between the release that moved one and the
@@ -61,8 +67,11 @@ public class ArtifactGraph {
    * @param all every ingested version rather than the newest of each dependent
    */
   public DependentsDto dependents(Ecosystem ecosystem, String name, boolean all) {
+    RepositoryNames names = names();
     List<DependentDto> dependents =
-        store.dependents(ecosystem, name, !all).stream().map(ArtifactGraph::dependent).toList();
+        store.dependents(ecosystem, name, !all).stream()
+            .map(dependent -> dependent(dependent, names))
+            .toList();
     String latest = store.latest(ecosystem, name).map(row -> row.latest).orElse(null);
     return new DependentsDto(ecosystem.wireName(), name, latest, dependents);
   }
@@ -74,8 +83,10 @@ public class ArtifactGraph {
    * publishing a jar, an npm package and an image out of one reactor is the ordinary shape here.
    */
   public RepositoryDependentsDto repositoryDependents(String repository) {
+    RepositoryNames names = names();
     List<RepositoryDependentsDto.ArtifactDependentsDto> artifacts = new ArrayList<>();
-    for (MtArtifact artifact : newestPerName(store.artifactsOfRepository(repository), false)) {
+    for (MtArtifact artifact :
+        newestPerName(store.artifactsOfRepository(names.spellings(repository)), false)) {
       Optional<Ecosystem> ecosystem = Ecosystem.of(artifact.ecosystem);
       if (ecosystem.isEmpty()) {
         continue;
@@ -86,7 +97,7 @@ public class ArtifactGraph {
               artifact.name,
               store.latest(ecosystem.get(), artifact.name).map(row -> row.latest).orElse(null),
               store.dependents(ecosystem.get(), artifact.name, true).stream()
-                  .map(ArtifactGraph::dependent)
+                  .map(dependent -> dependent(dependent, names))
                   .toList()));
     }
     return new RepositoryDependentsDto(repository, List.copyOf(artifacts));
@@ -103,6 +114,7 @@ public class ArtifactGraph {
    * the dependents route serves — so a figure here and a list there can never disagree.
    */
   public List<ArtifactDto> artifacts() {
+    RepositoryNames names = names();
     List<ArtifactDto> listing = new ArrayList<>();
     for (MtArtifact artifact : store.newestArtifactPerName()) {
       Optional<Ecosystem> ecosystem = Ecosystem.of(artifact.ecosystem);
@@ -127,7 +139,7 @@ public class ArtifactGraph {
           new ArtifactDto(
               artifact.ecosystem,
               artifact.name,
-              artifact.repository,
+              names.of(artifact.repository),
               latest,
               artifact.version,
               artifact.occurredAt,
@@ -161,7 +173,8 @@ public class ArtifactGraph {
     // Keyed so the same transitive reached through two of the repository's own artifacts is one
     // row. The first reading wins, which the ordering below makes deterministic.
     Map<String, TransitiveDto> found = new LinkedHashMap<>();
-    for (MtArtifact artifact : newestPerName(store.artifactsOfRepository(repository), true)) {
+    for (MtArtifact artifact :
+        newestPerName(store.artifactsOfRepository(names().spellings(repository)), true)) {
       for (TransitiveDto transitive : transitivesOf(artifact)) {
         if (pinned.contains(PendingChanges.key(transitive.ecosystem(), transitive.name()))) {
           continue;
@@ -302,16 +315,81 @@ public class ArtifactGraph {
     return VersionOrder.newer(ecosystem, embedded, latest);
   }
 
-  private static DependentDto dependent(MaintenanceStore.Dependent dependent) {
+  private static DependentDto dependent(
+      MaintenanceStore.Dependent dependent, RepositoryNames names) {
     MtArtifact artifact = dependent.artifact();
     return new DependentDto(
         artifact.ecosystem,
         artifact.name,
         artifact.version,
-        artifact.repository,
+        names.of(artifact.repository),
         dependent.component().version,
         dependent.component().direct,
         artifact.occurredAt,
         artifact.sbomStatus);
+  }
+
+  // --- the one translation ----------------------------------------------------------------------
+
+  /**
+   * The catalog read every answer on this side starts from: {@code mt_repository}, both ways round.
+   *
+   * <p><b>ONE READ per answer, never one per row.</b> The catalog is tens of rows, a dependents
+   * listing can be hundreds, and every row of it names one of those few repositories.
+   */
+  private RepositoryNames names() {
+    Map<String, String> byCatalogId = new LinkedHashMap<>();
+    Map<String, String> byName = new LinkedHashMap<>();
+    for (MtRepository row : store.repositories()) {
+      if (row.catalogId != null && !row.catalogId.isBlank() && row.name != null) {
+        byCatalogId.put(row.catalogId, row.name);
+        byName.put(row.name, row.catalogId);
+      }
+    }
+    return new RepositoryNames(byCatalogId, byName);
+  }
+
+  /**
+   * <b>THE ONE PLACE {@code mt_artifact.repository} IS TRANSLATED, and it is a read-side belt for
+   * rows written before the write side learned to do it.</b>
+   *
+   * <p>qits-ci's {@code SoftwareRelease} names the repository by qits-projects' ROW ID rather than
+   * by the catalog name — measured live 2026-09-02 — so every artifact row written before that fix
+   * carries a uuid in a column the whole read side joins on a name.
+   * {@code SoftwareReleaseListener} resolves it at the write now; those rows are immutable history
+   * and are still there, so both directions are covered here and nowhere else:
+   *
+   * <ul>
+   *   <li>{@link #of} reads a stored value OUT as a name — what {@code DependentDto.repository} and
+   *       {@code ArtifactDto.repository} carry, which is the client's link to the repository page;
+   *   <li>{@link #spellings} reads a name IN as every string that repository's rows may hold — what
+   *       "who depends on this repository" and the detail page's transitives are looked up by,
+   *       which answered nothing at all for a repository whose releases predate the fix.
+   * </ul>
+   *
+   * <p><b>An unknown value passes through untouched in both directions.</b> A raw uuid with no
+   * catalog row behind it is still what a release said, and a repository the catalog does not carry
+   * an id for is looked up by its name alone — which is exactly right, because nothing ever wrote
+   * anything else for it.
+   */
+  private record RepositoryNames(
+      Map<String, String> nameByCatalogId, Map<String, String> catalogIdByName) {
+
+    /** A stored {@code mt_artifact.repository}, as a repository is CALLED. */
+    String of(String stored) {
+      if (stored == null) {
+        return null;
+      }
+      return nameByCatalogId.getOrDefault(stored, stored);
+    }
+
+    /** Every string this repository's artifact rows may carry: its name, and its catalog id. */
+    List<String> spellings(String repository) {
+      if (repository == null) {
+        return List.of();
+      }
+      String catalogId = catalogIdByName.get(repository);
+      return catalogId == null ? List.of(repository) : List.of(repository, catalogId);
+    }
   }
 }

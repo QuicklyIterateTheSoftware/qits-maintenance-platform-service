@@ -150,19 +150,26 @@ public class ScanService {
     } catch (RuntimeException e) {
       LOG.warnf(e, "%s could not be scanned", entry.name());
       store.markRepository(
-          entry.name(), entry.project(), RepositoryStatus.UNREACHABLE, message(e), now);
+          entry.name(),
+          entry.project(),
+          entry.catalogId(),
+          RepositoryStatus.UNREACHABLE,
+          message(e),
+          now);
     }
   }
 
   private void readInto(CatalogEntry entry, Instant now) {
     ManifestScanner.Read read = manifests.read(entry);
     if (read.status() == RepositoryStatus.UNREACHABLE) {
-      store.markRepository(entry.name(), entry.project(), read.status(), read.message(), now);
+      store.markRepository(
+          entry.name(), entry.project(), entry.catalogId(), read.status(), read.message(), now);
       return;
     }
     store.replaceInventory(
         entry.name(),
         entry.project(),
+        entry.catalogId(),
         entry.mainBranch(),
         read.status(),
         read.headSha(),

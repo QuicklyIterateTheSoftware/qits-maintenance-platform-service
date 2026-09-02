@@ -310,6 +310,20 @@ shared instance field (a static one is the native-image hazard), the shipped `ca
 forward-auth pair, the optional bearer, the response bound — and `FakePeers`, which is how the whole
 suite replaces the network.
 
+**`SoftwareRelease.repository` IS THE ROW ID, and `mt_repository.catalog_id` (V5) is the
+translation.** Measured live on 2026-09-02: qits-ci names the repository by qits-projects' row uuid,
+not by the catalog name — so `mt_artifact.repository` held `daf73ae4-…` while `RepositoryDetailDto`'s
+transitives, `GET /repositories/{name}/dependents` and `DependentDto.repository` (the SPA's link
+target) all join it on a NAME, and every one of them was dark without saying so. The catalog answers
+`id` beside `name`, `CatalogReader` keeps it and every scan writes it, so the same repository is
+known under both spellings. **Two arms and both are needed**: `SoftwareReleaseListener` resolves the
+frame before the row is written (one query, inside the failure policy it already has), and
+`ArtifactGraph.RepositoryNames` translates both ways at read time for the immutable rows written
+before that — out, so a listing hands the client a name, and in, so a name-keyed lookup finds the
+uuid rows. **An unknown spelling passes through untouched in every arm**: a release of a repository
+this inventory has never scanned still happened, and guessing a name here would put one on a page
+that no event ever carried.
+
 **No `mt_artifact` row is ever a `daemon` or a `gitlink`.** Daemon SBOMs exist upstream; a gitlink is
 a submodule rather than a published package and no release announces one as its `packageType`.
 `SoftwareReleaseListener.ECOSYSTEMS` maps the three qits-ci publishes and is where everything else is
