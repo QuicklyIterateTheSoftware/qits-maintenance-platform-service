@@ -289,7 +289,9 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
 
   @ActivateRequestContext
   public Optional<MtRepository> repository(String name) {
-    return Optional.ofNullable(findById(name));
+    // Own transaction for the outage-class reason on repositoryName above: listeners read this.
+    return DbRetry.inNewTx(
+        "read one repository row", () -> Optional.ofNullable(findById(name)));
   }
 
   /**
@@ -319,8 +321,18 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
     if (spelling == null || spelling.isBlank()) {
       return spelling;
     }
-    MtRepository row = find("name = ?1 or catalogId = ?1", spelling).firstResult();
-    return row == null ? spelling : row.name;
+    // In its OWN transaction, like every write below — measured outage 2026-09-02: this method's
+    // caller is a durable listener, whose frame arrives inside the eventstream datasource's claim
+    // transaction. A bare read here enlists THIS datasource's connection into that transaction,
+    // and the next inNewTx write then trips "failed to enlist / used without active transaction"
+    // — every frame retryable, the consumer wedged behind one frame for hours. No listener-reached
+    // store method may touch this datasource outside its own transaction; reads included.
+    return DbRetry.inNewTx(
+        "resolve a repository spelling",
+        () -> {
+          MtRepository row = find("name = ?1 or catalogId = ?1", spelling).firstResult();
+          return row == null ? spelling : row.name;
+        });
   }
 
   @ActivateRequestContext
@@ -434,11 +446,15 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
    */
   @ActivateRequestContext
   public boolean scanPending(String repository) {
-    return MtScan.count(
-            "repository = ?1 and status in ?2",
-            repository,
-            List.of(ScanStatus.REQUESTED.name(), ScanStatus.RUNNING.name()))
-        > 0;
+    // Own transaction: the push-rescan listener asks this. See repositoryName.
+    return DbRetry.inNewTx(
+        "count pending scans",
+        () ->
+            MtScan.count(
+                    "repository = ?1 and status in ?2",
+                    repository,
+                    List.of(ScanStatus.REQUESTED.name(), ScanStatus.RUNNING.name()))
+                > 0);
   }
 
   @ActivateRequestContext
@@ -461,8 +477,13 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
 
   @ActivateRequestContext
   public Optional<MtBranch> branch(String repository, String group) {
-    return Optional.ofNullable(
-        MtBranch.find("repository = ?1 and groupName = ?2", repository, group).firstResult());
+    // Own transaction: the branch-tracking listener asks this. See repositoryName.
+    return DbRetry.inNewTx(
+        "read one branch row",
+        () ->
+            Optional.ofNullable(
+                MtBranch.find("repository = ?1 and groupName = ?2", repository, group)
+                    .firstResult()));
   }
 
   /** Writes what the git host says about one group's branch. */
