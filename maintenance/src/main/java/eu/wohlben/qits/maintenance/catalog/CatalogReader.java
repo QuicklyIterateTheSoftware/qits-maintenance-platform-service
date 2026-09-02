@@ -68,7 +68,12 @@ public class CatalogReader {
       return Optional.empty();
     }
     String mainBranch = text(row, "mainBranch");
-    return Optional.of(new CatalogEntry(project, name, mainBranch == null ? "main" : mainBranch));
+    // The row's own id, kept beside the name and never used as an address here. It is what OTHER
+    // contexts spell a repository with — see CatalogEntry.catalogId — and a listing that carried
+    // none is still a repository worth scanning, so it is read and never required.
+    String catalogId = text(row, "id");
+    return Optional.of(
+        new CatalogEntry(project, name, mainBranch == null ? "main" : mainBranch, catalogId));
   }
 
   private static String text(JsonNode row, String field) {

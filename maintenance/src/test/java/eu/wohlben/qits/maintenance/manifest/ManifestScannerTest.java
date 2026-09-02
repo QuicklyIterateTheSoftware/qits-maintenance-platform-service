@@ -90,7 +90,7 @@ class ManifestScannerTest {
   }
 
   private static ManifestScanner.Read read(Host host) {
-    return scanner(host).read(new CatalogEntry(PROJECT, REPOSITORY, "main"));
+    return scanner(host).read(new CatalogEntry(PROJECT, REPOSITORY, "main", null));
   }
 
   /** A host that reports the mode and the object name: the submodule is one INTERNAL pin. */

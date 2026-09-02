@@ -155,9 +155,22 @@ class ForeignEventContractTest {
   // --- what a publisher would send ---------------------------------------------------------------
 
   static String softwareReleasePayload(String packageType, String packageName, String version) {
+    return softwareReleasePayload("qits-eventstream-javalib", packageType, packageName, version);
+  }
+
+  /**
+   * The same payload with the {@code repository} field said out loud.
+   *
+   * <p><b>What that field actually carries is qits-projects' repository ROW ID</b>, measured live on
+   * 2026-09-02 — a uuid, not the catalog name the default above spells. It stays a parameter rather
+   * than becoming a uuid everywhere, because the listener has to answer for both: a name is passed
+   * through unchanged and an id is resolved.
+   */
+  static String softwareReleasePayload(
+      String repository, String packageType, String packageName, String version) {
     return CanonicalJson.payload(
         new SoftwareRelease(
-            UUID.randomUUID(), "qits-eventstream-javalib", version, packageType, packageName, WHEN));
+            UUID.randomUUID(), repository, version, packageType, packageName, WHEN));
   }
 
   static String scmReleasePayload(String repositoryName, String branch, String version) {

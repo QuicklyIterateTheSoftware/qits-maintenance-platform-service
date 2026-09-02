@@ -12,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.maintenance.bump.BumpService;
 import eu.wohlben.qits.maintenance.peer.FakePeers;
+import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
 import eu.wohlben.qits.maintenance.work.WorkQueue;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
@@ -50,6 +51,8 @@ class MaintenanceApiTest {
   private static final String RELEASE_REQUEST = "rr-0001";
 
   @Inject FakePeers peers;
+
+  @Inject MaintenanceStore store;
 
   @Inject BumpService bumps;
 
@@ -244,6 +247,24 @@ class MaintenanceApiTest {
     // Nothing of ours rides along on somebody else's branch.
     assertTrue(!payload.contains("eu.wohlben.qits"), payload);
     assertTrue(!payload.contains("qits/build-images"), payload);
+  }
+
+  /**
+   * <b>THE CATALOG ANSWERS AN {@code id} BESIDE THE NAME, AND A SCAN KEEPS IT.</b> Nothing here is
+   * addressed by it — every read this service makes stays name-addressed — but qits-ci's {@code
+   * SoftwareRelease} names a repository by exactly that id, so this column is the only thing that
+   * can read such a frame back as a name. Without it the whole dependency graph joins a uuid to a
+   * name and answers nothing, silently.
+   */
+  @Test
+  void aScanKeepsTheCatalogRowsOwnIdSoAReleaseFrameCanBeReadBackAsAName() {
+    scan();
+
+    assertEquals(
+        "r1",
+        store.repository(Fixture.REPOSITORY).orElseThrow().catalogId,
+        "the catalog's `id` field, as qits-projects' repository listing answers it");
+    assertEquals(Fixture.REPOSITORY, store.repositoryName("r1"));
   }
 
   @Test

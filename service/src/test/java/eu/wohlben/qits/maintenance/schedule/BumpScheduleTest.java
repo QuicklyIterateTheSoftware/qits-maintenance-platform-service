@@ -145,6 +145,7 @@ class BumpScheduleTest {
     store.markRepository(
         Fixture.REPOSITORY,
         Fixture.PROJECT,
+        null,
         RepositoryStatus.UNREACHABLE,
         "the git host said nothing",
         Instant.now());

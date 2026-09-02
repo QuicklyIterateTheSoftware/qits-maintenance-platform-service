@@ -1,0 +1,36 @@
+-- THE CATALOG ROW'S OWN ID, AND IT IS HERE AS A TRANSLATION TABLE RATHER THAN AS AN IDENTITY.
+--
+-- WHAT WAS MEASURED, live on 2026-09-02. qits-ci's `SoftwareRelease` frame carries qits-projects'
+-- repository ROW UUID in its `repository` field — `daf73ae4-…`, not `qits-eventstream-javalib` —
+-- and `SoftwareReleaseListener` recorded it verbatim, exactly as V3's comment on
+-- mt_artifact.repository said it would ("as SoftwareRelease.repository spells it"). Every read that
+-- joins that column to a repository NAME was therefore dark, and silently so:
+--
+--   * RepositoryDetailDto.transitives reads mt_artifact where repository = <the name> — 0 rows;
+--   * GET /repositories/{name}/dependents answers an empty listing for the same reason;
+--   * DependentDto.repository — which the SPA renders as the link to the repository page — carried
+--     the uuid through to the browser.
+--
+-- WHY A COLUMN ON mt_repository AND NOT A REWRITE OF mt_artifact. The catalog is the only place
+-- both spellings of one repository are known at once, and this service already re-reads it on every
+-- scan: qits-projects' listing answers `id` beside `name`, `CatalogReader` now keeps it, and every
+-- scan writes it here. That makes the mapping a CACHE of somebody else's fact, like every other
+-- column on this table, and it corrects itself when a repository is renamed. A second table keyed
+-- by uuid would be the same fact with its own staleness.
+--
+-- NOTHING IS BACKFILLED, and no backfill is possible from inside this file: the rows written before
+-- this deploy hold a uuid, and nothing in this database says whose. The next scan fills catalog_id
+-- from the catalog, and from then on the two arms cover it —
+-- `SoftwareReleaseListener` resolves an incoming id to the name BEFORE the row is written, and
+-- `ArtifactGraph` translates a leftover id at READ time. An id the catalog does not know passes
+-- through untouched in both: an unknown spelling must not lose the fact that a release said it.
+--
+-- NULLABLE, and permanently so. A catalog row without an id is a repository worth scanning, and a
+-- repository this inventory has not scanned since the deploy is one whose graph rows simply keep
+-- reading through the id. Length 64 rather than 36: it is another service's opaque key and this
+-- column stores what it answers rather than a shape this service imposes.
+alter table mt_repository add column catalog_id varchar(64);
+
+-- The read is `where catalog_id = ?` — one per arriving release, on the listener's claim
+-- transaction, so it is the one read here that sits in front of somebody else's event throughput.
+create index idx_mt_repository_catalog_id on mt_repository (catalog_id);
