@@ -28,6 +28,10 @@ import java.util.UUID;
  * @param startedAt when the row was opened
  * @param finishedAt when it ended, null while it has not
  * @param message the sentence
+ * @param releaseRequestId what came of asking qits-workspaces to release the branch: the release
+ *     request's id, {@code converged} (there was nothing to ask for), {@code refused} (a refusal a
+ *     retry cannot fix — {@code message} says which), or null while the ask is still owed. Null for
+ *     ever on a bump that pushed no branch
  * @param changes the payload's changes, verbatim
  */
 public record BumpDto(
@@ -46,4 +50,5 @@ public record BumpDto(
     Instant startedAt,
     Instant finishedAt,
     String message,
+    String releaseRequestId,
     List<Change> changes) {}

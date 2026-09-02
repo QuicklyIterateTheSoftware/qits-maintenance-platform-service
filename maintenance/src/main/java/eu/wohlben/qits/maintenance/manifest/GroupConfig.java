@@ -1,10 +1,14 @@
 package eu.wohlben.qits.maintenance.manifest;
 
+import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.GroupSource;
+import eu.wohlben.qits.maintenance.model.PinKind;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -13,9 +17,23 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
 /**
  * A repository's own grouping: which pins travel together on which branch.
  *
- * <p><b>The file is {@code .config/qits/maintenance.yml} and it is optional.</b> A repository that
- * carries none gets one group, {@code dependencies}, claiming everything — which is the behaviour
- * the 71 per-dependency hop files replaced, only with one branch instead of one per upstream.
+ * <p><b>The fallback is the INTERNAL/EXTERNAL split.</b> A repository that carries no
+ * {@code .config/qits/maintenance.yml} — which is every repository on the platform today — gets two
+ * groups rather than one catch-all: {@code dependencies} claims every INTERNAL pin and
+ * {@code external} claims every EXTERNAL one, so the platform's own releases travel on
+ * {@code maintenance/dependencies} and everybody else's on {@code maintenance/external}. The two
+ * halves move on different schedules and are reviewed by different eyes; one branch carrying both
+ * made a nightly internal bump wait behind somebody's opinion about a framework major.
+ *
+ * <p><b>A kind group claims by KIND; the glob mechanism remains.</b> {@link Group#kind()} set means
+ * the group takes every actionable pin of that kind and its patterns are empty; {@link Group#kind()}
+ * null means the globs decide, exactly as before. The glob mechanism is not deprecated by the split
+ * — it is how a repository asks for a FINER grouping than the two built-in halves, and a configured
+ * group is always tried before the pair.
+ *
+ * <p><b>The file is {@code .config/qits/maintenance.yml} and it is optional.</b> The kind pair is
+ * appended after whatever it declares, so a configured repository's unclaimed pins still split by
+ * kind rather than falling off the end.
  *
  * <p><b>An invalid file is a CONFIG_ERROR on the repository row and nothing is bumped for it.</b>
  * The alternative — falling back to the default grouping — would put changes on a branch the author
@@ -24,17 +42,42 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
  *
  * <p><b>Declaration order is part of the meaning.</b> A pin matching two groups belongs to the
  * first, so the order survives into {@code mt_group.ordinal} and out again.
+ *
+ * <p><b>The same file also carries {@code ignore:}, which takes a whole ECOSYSTEM off the
+ * repository.</b> Grouping decides which branch a pin's bump travels on; {@code ignore} decides
+ * that the pin is not one at all. An ignored ecosystem is not parsed, not stored, not grouped and
+ * never pending — the pins simply do not exist for that repository, and a rescan after the line is
+ * added makes the ones already stored disappear, because an inventory is replaced wholesale.
+ *
+ * <p><b>Why it exists: the qits-qits wrapper's gitlinks are bank markers, not version pins.</b> The
+ * wrapper declares some forty-seven submodules and its own README says outright that the recorded
+ * gitlinks are expected to lag — they exist so {@code git submodule update --init} works on a fresh
+ * clone, while the submodules themselves follow their branches. Every entry carries
+ * {@code ignore = all} for the same reason. Without an opt-out this service would read those
+ * forty-seven lagging shas as forty-seven upgrades and open a nightly bump against every one of
+ * them, fighting a doctrine the repository states in writing. {@code ignore: [gitlink]} in the
+ * wrapper is the answer. The mechanism is general — any of the four ecosystems may be named, by any
+ * repository — but that is the case it was built for.
+ *
+ * <p><b>An unknown ecosystem name is invalid, exactly like a bad group.</b> This file is this
+ * service's OWN configuration surface, unlike {@code .gitmodules}, so strictness is right here: a
+ * typo silently ignored would read as a working opt-out and bump the very ecosystem the author
+ * meant to protect.
  */
 public final class GroupConfig {
 
   /** The path a scan reads it from, in every repository. */
   public static final String PATH = ".config/qits/maintenance.yml";
 
-  /** What a repository with no file gets: one group, claiming every pin. */
+  /**
+   * The INTERNAL half of the fallback. The name is unchanged from when it was the one catch-all
+   * group: {@code maintenance/dependencies} is a branch the release door already cleans and three
+   * repositories already name, and renaming it would have been a cutover nobody asked for.
+   */
   public static final String DEFAULT_GROUP = "dependencies";
 
-  /** The one glob of the default group. */
-  public static final String MATCH_ALL = "*";
+  /** The EXTERNAL half of the fallback, on {@code maintenance/external}. */
+  public static final String EXTERNAL_GROUP = "external";
 
   /** A group's name reaches a branch name and a shell, so it is held to what a ref may carry. */
   private static final java.util.regex.Pattern NAME = java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,63}");
@@ -42,31 +85,61 @@ public final class GroupConfig {
   private GroupConfig() {}
 
   /**
-   * One group as configured.
+   * One group: a name, and either a kind or a set of globs to claim pins with.
    *
    * @param name the group, which is also the branch suffix
-   * @param patterns the globs on a dependency name
+   * @param patterns the globs on a dependency name — empty for a kind group
+   * @param kind the pin kind this group claims, or null when the patterns decide
    */
-  public record Group(String name, List<String> patterns) {}
+  public record Group(String name, List<String> patterns, PinKind kind) {
+
+    /** A group that claims what its globs match — what a repository's own file declares. */
+    public static Group glob(String name, List<String> patterns) {
+      return new Group(name, List.copyOf(patterns), null);
+    }
+
+    /** A group that claims every pin of one kind, and carries no globs at all. */
+    public static Group ofKind(String name, PinKind kind) {
+      return new Group(name, List.of(), kind);
+    }
+  }
 
   /**
    * The parse of one file, or the reason it is not usable.
    *
    * @param groups the groups in declaration order
    * @param source whether they came from the file or from the fallback
+   * @param ignored the ecosystems this repository is not scanned for at all — empty by default
    * @param error the sentence for the repository row, or null
    */
-  public record Parsed(List<Group> groups, GroupSource source, String error) {
+  public record Parsed(
+      List<Group> groups, GroupSource source, Set<Ecosystem> ignored, String error) {
 
     public boolean ok() {
       return error == null;
     }
+
+    /** Whether this repository's pins in that ecosystem are to be read at all. */
+    public boolean ignores(Ecosystem ecosystem) {
+      return ignored.contains(ecosystem);
+    }
   }
 
-  /** What a repository with no {@code .config/qits/maintenance.yml} gets. */
+  /** What a repository with no {@code .config/qits/maintenance.yml} gets: the split. */
   public static Parsed fallback() {
-    return new Parsed(
-        List.of(new Group(DEFAULT_GROUP, List.of(MATCH_ALL))), GroupSource.DEFAULT, null);
+    return new Parsed(kindTail(), GroupSource.DEFAULT, Set.of(), null);
+  }
+
+  /**
+   * The two kind groups, in the order they claim: INTERNAL first.
+   *
+   * <p>The order is not cosmetic. A pin is claimed by the first group whose rule matches, and a pin
+   * has exactly one kind — so the pair is unambiguous whichever way round it is written, and this
+   * order is the one an operator reads on the page: our own releases, then everybody else's.
+   */
+  private static List<Group> kindTail() {
+    return List.of(
+        Group.ofKind(DEFAULT_GROUP, PinKind.INTERNAL), Group.ofKind(EXTERNAL_GROUP, PinKind.EXTERNAL));
   }
 
   /**
@@ -89,11 +162,33 @@ public final class GroupConfig {
       return fallback();
     }
     if (!(document instanceof Map<?, ?> root)) {
-      return invalid(PATH + " must be a mapping with a `groups` key");
+      return invalid(PATH + " must be a mapping with a `groups` or `ignore` key");
+    }
+    Set<Ecosystem> ignored = EnumSet.noneOf(Ecosystem.class);
+    Object rawIgnore = root.get("ignore");
+    if (rawIgnore != null) {
+      if (!(rawIgnore instanceof List<?> names)) {
+        return invalid("`ignore` must be a list of ecosystem names — one of " + wireNames());
+      }
+      for (Object element : names) {
+        if (!(element instanceof String wire) || wire.isBlank()) {
+          return invalid("every entry of `ignore` must be an ecosystem name — one of " + wireNames());
+        }
+        Optional<Ecosystem> ecosystem = Ecosystem.of(wire.trim());
+        if (ecosystem.isEmpty()) {
+          // A TYPO IS NOT AN OPT-OUT. Skipping what we do not recognise would read as a working
+          // `ignore` while the ecosystem it meant to protect went on being bumped nightly.
+          return invalid(
+              "`" + wire.trim() + "` is not an ecosystem — `ignore` takes " + wireNames());
+        }
+        ignored.add(ecosystem.get());
+      }
     }
     Object rawGroups = root.get("groups");
     if (rawGroups == null) {
-      return fallback();
+      // A file that only says `ignore` did not ask for a grouping, so its source stays DEFAULT:
+      // the two questions are separate and the page should not claim it configured branches.
+      return defaults(ignored);
     }
     if (!(rawGroups instanceof List<?> list)) {
       return invalid("`groups` must be a list");
@@ -123,22 +218,39 @@ public final class GroupConfig {
         }
         patterns.add(pattern.trim());
       }
-      groups.add(new Group(name, List.copyOf(patterns)));
+      groups.add(Group.glob(name, patterns));
     }
     if (groups.isEmpty()) {
-      return fallback();
+      return defaults(ignored);
     }
-    // EVERY PIN BELONGS SOMEWHERE. The configured groups claim what they claim, and whatever they
-    // do not claim falls to the same default group an unconfigured repository gets — declared last
-    // so it never takes a pin a configured group wanted.
-    if (!seen.contains(DEFAULT_GROUP)) {
-      groups.add(new Group(DEFAULT_GROUP, List.of(MATCH_ALL)));
+    // EVERY PIN BELONGS SOMEWHERE, AND THE TAIL IS THE SPLIT. The configured groups claim what they
+    // claim; whatever they do not claim falls to the same two kind groups an unconfigured
+    // repository gets, appended last so neither ever takes a pin a configured group wanted.
+    //
+    // A repository that declares a group under one of the two built-in names keeps its own — the
+    // name is then that repository's, globs and all, and the half it took is not appended a second
+    // time. Both are checked: `dependencies` and `external` are ordinary names a file may use.
+    for (Group tail : kindTail()) {
+      if (!seen.contains(tail.name())) {
+        groups.add(tail);
+      }
     }
-    return new Parsed(List.copyOf(groups), GroupSource.CONFIG, null);
+    return new Parsed(List.copyOf(groups), GroupSource.CONFIG, Set.copyOf(ignored), null);
+  }
+
+  /** The default grouping, carrying whatever the file's {@code ignore} took off the repository. */
+  private static Parsed defaults(Set<Ecosystem> ignored) {
+    return new Parsed(kindTail(), GroupSource.DEFAULT, Set.copyOf(ignored), null);
+  }
+
+  /** The four spellings {@code ignore} accepts, for the sentence a broken file is told. */
+  private static String wireNames() {
+    return String.join(
+        ", ", java.util.Arrays.stream(Ecosystem.values()).map(Ecosystem::wireName).toList());
   }
 
   private static Parsed invalid(String message) {
-    return new Parsed(List.of(), GroupSource.CONFIG, message);
+    return new Parsed(List.of(), GroupSource.CONFIG, Set.of(), message);
   }
 
   private static String message(RuntimeException e) {

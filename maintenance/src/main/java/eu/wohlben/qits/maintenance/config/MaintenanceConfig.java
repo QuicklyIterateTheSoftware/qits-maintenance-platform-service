@@ -8,8 +8,8 @@ import java.util.Locale;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
- * The policy this service runs on: what counts as internal, whether the clock may scan, whether a
- * scan may bump, and which environment's CI applies one.
+ * The policy this service runs on: what counts as internal, whether the clock may scan, whether the
+ * clock may bump, and which environment's CI applies one.
  *
  * <p><b>Nothing here decides what a manifest says or what a registry holds</b> — those are read.
  * What lives here is the handful of decisions a platform makes about its own maintenance, each one
@@ -27,8 +27,11 @@ public class MaintenanceConfig {
   @ConfigProperty(name = "qits.maintenance.bump.enabled")
   boolean bumpEnabled;
 
-  @ConfigProperty(name = "qits.maintenance.bump.auto")
-  boolean bumpAuto;
+  @ConfigProperty(name = "qits.maintenance.bump.internal.auto")
+  boolean bumpInternalAuto;
+
+  @ConfigProperty(name = "qits.maintenance.bump.external.auto")
+  boolean bumpExternalAuto;
 
   @ConfigProperty(name = "qits.maintenance.internal.maven-groups")
   List<String> internalMavenGroups;
@@ -60,9 +63,28 @@ public class MaintenanceConfig {
     return bumpEnabled;
   }
 
-  /** Whether a SCHEDULED scan asks for a bump of every group that has pending changes. */
-  public boolean bumpAuto() {
-    return bumpAuto;
+  /**
+   * Whether the CLOCK asks for the INTERNAL group's bumps — the nightly one.
+   *
+   * <p>It gates {@code schedule/BumpSchedule} and nothing else: the button is a person's decision
+   * and answers to {@link #bumpEnabled()} alone. The jar defaults it true, because a platform that
+   * installs this service wants its own releases to travel; the LIVE deployment holds it false until
+   * the cutover, which is an environment variable rather than a release.
+   */
+  public boolean bumpInternalAuto() {
+    return bumpInternalAuto;
+  }
+
+  /**
+   * Whether the CLOCK asks for the EXTERNAL group's bumps — <b>reserved, and read only to refuse</b>.
+   *
+   * <p>External bumps are manual-only. The key exists so the deployment surface is the same shape as
+   * the internal one the day it is implemented — a deployment that sets it gets a WARN saying so
+   * rather than a silently ignored variable, which is the failure mode a key that was merely
+   * documented would have.
+   */
+  public boolean bumpExternalAuto() {
+    return bumpExternalAuto;
   }
 
   /**
@@ -92,6 +114,12 @@ public class MaintenanceConfig {
    * every scan a round trip per dependency, and a registry that is briefly down would reclassify
    * half the inventory as external — which would then be looked up against Maven Central, where
    * {@code eu.wohlben.qits} does not exist, and every internal pin would report no latest at all.
+   *
+   * <p><b>A GITLINK is INTERNAL by construction and has no key.</b> A submodule is a repository on
+   * this platform's own git host — nothing else can be one — so there is no name rule to configure
+   * and no external half for the answer to be wrong about. A key for it would be a knob whose only
+   * correct setting is the default, and setting it would send gitlink pins to a registry that has
+   * never heard of a git repository.
    */
   public PinKind kindOf(eu.wohlben.qits.maintenance.model.Ecosystem ecosystem, String name) {
     if (name == null) {
@@ -103,6 +131,7 @@ public class MaintenanceConfig {
           case MAVEN -> matchesGroup(value);
           case NPM -> startsWithAny(value, internalNpmScopes, true);
           case DOCKER -> startsWithAny(value, internalImagePrefixes, false);
+          case GITLINK -> true;
         };
     return internal ? PinKind.INTERNAL : PinKind.EXTERNAL;
   }

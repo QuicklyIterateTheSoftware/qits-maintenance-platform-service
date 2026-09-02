@@ -1,0 +1,205 @@
+package eu.wohlben.qits.maintenance.schedule;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import eu.wohlben.qits.maintenance.api.Fixture;
+import eu.wohlben.qits.maintenance.api.InventoryReset;
+import eu.wohlben.qits.maintenance.bump.BumpService;
+import eu.wohlben.qits.maintenance.config.MaintenanceConfig;
+import eu.wohlben.qits.maintenance.entity.MtBump;
+import eu.wohlben.qits.maintenance.model.BumpTrigger;
+import eu.wohlben.qits.maintenance.model.RepositoryStatus;
+import eu.wohlben.qits.maintenance.model.ScanScope;
+import eu.wohlben.qits.maintenance.peer.FakePeers;
+import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
+import eu.wohlben.qits.maintenance.scan.ScanService;
+import eu.wohlben.qits.maintenance.scan.ScanTrigger;
+import eu.wohlben.qits.maintenance.work.WorkQueue;
+import io.quarkus.arc.ClientProxy;
+import io.quarkus.test.junit.QuarkusMock;
+import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+/**
+ * The clock's WRITING half: the nightly internal bump.
+ *
+ * <p>It used to be the tail of a SCHEDULED scan and is now its own cron, which is what these tests
+ * are really pinning — <b>the selection is made against the inventory, not against whatever a scan
+ * happened to have just read.</b> Every method here fills the store with a manual scan and then fires
+ * the schedule by hand: the suite's scheduler is off (see {@code src/test/resources/
+ * application.properties}), so nothing else can start this and a test that waited for 02:00 would be
+ * indistinguishable from a test that hung.
+ *
+ * <p><b>Only the row is asserted, never the CI trigger.</b> What the schedule decides is WHICH groups
+ * get a bump; what a bump then does with qits-ci is {@code MaintenanceApiTest}'s subject, and
+ * asserting it twice would make one change fail in two places for one reason.
+ */
+@QuarkusTest
+class BumpScheduleTest {
+
+  @Inject BumpSchedule schedule;
+
+  @Inject ScanService scans;
+
+  @Inject BumpService bumps;
+
+  @Inject MaintenanceStore store;
+
+  @Inject FakePeers peers;
+
+  @Inject InventoryReset inventory;
+
+  @Inject WorkQueue queue;
+
+  @Inject MaintenanceConfig config;
+
+  /** The real bean behind the injected proxy, so {@link #restoreTheConfig} can put it back. */
+  private MaintenanceConfig realConfig;
+
+  @BeforeEach
+  void scriptThePeers() {
+    realConfig = ClientProxy.unwrap(config);
+    queue.awaitIdle(Duration.ofSeconds(30));
+    inventory.clear();
+    peers.reset();
+    Fixture.scriptScan(peers);
+    Fixture.scriptBranchAbsent(peers);
+    Fixture.scriptCiAccepts(peers, "run-scheduled");
+    Fixture.scriptDoorAccepts(peers, "rr-scheduled");
+  }
+
+  /**
+   * A mock installed on {@link MaintenanceConfig} lives for the whole RUN, not the method — so the
+   * gate test below would silence every class that ran after it, and the symptom would be a
+   * schedule that mysteriously stopped asking for anything. The real bean is captured before each
+   * method and put back after it, unconditionally.
+   */
+  @AfterEach
+  void restoreTheConfig() {
+    queue.awaitIdle(Duration.ofSeconds(30));
+    QuarkusMock.installMockForType(realConfig, MaintenanceConfig.class);
+  }
+
+  /** Fills the inventory the way a scheduled scan would have, and waits for it. */
+  private void scan() {
+    scans.request(ScanScope.ALL, null, ScanTrigger.MANUAL);
+    queue.awaitIdle(Duration.ofSeconds(60));
+  }
+
+  private List<MtBump> bumpsOf(String group) {
+    return store.bumps(Fixture.REPOSITORY, 50).stream()
+        .filter(bump -> group.equals(bump.groupName))
+        .toList();
+  }
+
+  @Test
+  void theNightlyBumpAsksForTheInternalHalfAndForNothingElse() {
+    scan();
+
+    schedule.onInternalSchedule();
+
+    // The INTERNAL half, and it is the clock's: SCHEDULED, not MANUAL.
+    List<MtBump> internal = bumpsOf("dependencies");
+    assertEquals(1, internal.size(), "the internal group has five pending changes and no bump");
+    assertEquals(BumpTrigger.SCHEDULED.name(), internal.getFirst().trigger);
+
+    // And nothing else was asked for. `external` has the quarkus BOM pending and `angular` has
+    // @angular/core — both are somebody else's release and both are a person's decision.
+    assertTrue(bumpsOf("external").isEmpty(), "the external half is manual-only");
+    assertTrue(
+        bumpsOf("angular").isEmpty(),
+        "a group the repository configured for itself is a person's press, not the clock's");
+  }
+
+  /** ONE BRANCH, ONE WRITER — and the clock is the caller most likely to collide with itself. */
+  @Test
+  void aGroupThatIsAlreadyBeingBumpedIsNotAskedAgain() {
+    scan();
+    bumps.request(Fixture.REPOSITORY, "dependencies", BumpTrigger.MANUAL);
+
+    schedule.onInternalSchedule();
+
+    List<MtBump> internal = bumpsOf("dependencies");
+    assertEquals(1, internal.size(), "a group with an active bump must not get a second one");
+    assertEquals(
+        BumpTrigger.MANUAL.name(),
+        internal.getFirst().trigger,
+        "and the one that survives is the one that was already going");
+  }
+
+  /**
+   * A repository the git host could not be read for keeps the pins it had, and those pins are
+   * yesterday's. Bumping against them would push a branch for versions that may not be pending at
+   * all any more.
+   */
+  @Test
+  void aRepositoryThatIsNotOkIsSkipped() {
+    scan();
+    store.markRepository(
+        Fixture.REPOSITORY,
+        Fixture.PROJECT,
+        RepositoryStatus.UNREACHABLE,
+        "the git host said nothing",
+        Instant.now());
+
+    schedule.onInternalSchedule();
+
+    assertTrue(bumpsOf("dependencies").isEmpty(), "only an OK repository is bumped by the clock");
+  }
+
+  /** A group with nothing pending is not a bump that finds nothing — it is no bump at all. */
+  @Test
+  void aGroupWithNothingPendingIsNotAskedFor() {
+    scan();
+    // Wipe the latest versions: every pin is then at the newest this service knows of.
+    inventory.clearLatest();
+
+    schedule.onInternalSchedule();
+
+    assertTrue(bumpsOf("dependencies").isEmpty(), "nothing is pending, so nothing is asked for");
+  }
+
+  /**
+   * THE GATE THE LIVE DEPLOYMENT HOLDS DOWN. {@code bump.internal.auto} is the clock's switch and the
+   * jar ships it true; the platform keeps it false until the pre-split branches are drained. It must
+   * stop the schedule and leave the button alone, which is why the second half of this asserts that a
+   * person can still ask.
+   */
+  @Test
+  void theGateStopsTheClockAndLeavesTheButtonAlone() {
+    scan();
+    QuarkusMock.installMockForType(
+        new MaintenanceConfig() {
+          @Override
+          public boolean bumpInternalAuto() {
+            return false;
+          }
+
+          @Override
+          public boolean bumpEnabled() {
+            return true;
+          }
+
+          @Override
+          public String environment() {
+            // The one other method a bump request reads, and mt_bump.environment is not null.
+            return "dev";
+          }
+        },
+        MaintenanceConfig.class);
+
+    schedule.onInternalSchedule();
+    assertTrue(bumpsOf("dependencies").isEmpty(), "the gate is off, so the clock asked for nothing");
+
+    bumps.request(Fixture.REPOSITORY, "dependencies", BumpTrigger.MANUAL);
+    assertEquals(
+        1, bumpsOf("dependencies").size(), "the gate is about the schedule and never about a press");
+  }
+}

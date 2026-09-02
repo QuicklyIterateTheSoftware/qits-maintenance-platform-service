@@ -4,6 +4,7 @@ import eu.wohlben.qits.maintenance.catalog.CatalogEntry;
 import eu.wohlben.qits.maintenance.githost.FileLookup;
 import eu.wohlben.qits.maintenance.githost.GitHostReader;
 import eu.wohlben.qits.maintenance.githost.TreeLookup;
+import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.RepositoryStatus;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -14,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.jboss.logging.Logger;
 
@@ -34,6 +36,17 @@ import org.jboss.logging.Logger;
  * right; scanning it here would double every pin it holds and attribute the copy to the wrong
  * repository. The module walk refuses such a path outright, so a pom that ever named one still
  * cannot pull it in.
+ *
+ * <p><b>The gitlink ITSELF is a pin, and that is a different fact from what it contains.</b>
+ * {@code .gitmodules} plus the mode-{@code 160000} entry in the tree say which repository is
+ * embedded and at which commit — one line this repository owns and can move. Its contents belong to
+ * the submodule's own row, which is why the two never meet.
+ *
+ * <p><b>A repository may take a whole ecosystem off this scan.</b> {@code ignore:} in
+ * {@code .config/qits/maintenance.yml} names ecosystems by their wire name, and one named there is
+ * not parsed here at all — no reads, no pins, so nothing to store, group or offer. The motivating
+ * case is the qits-qits wrapper, whose forty-seven gitlinks are DELIBERATELY lagging bank markers
+ * rather than version pins; see {@link GroupConfig} for the whole of that argument.
  */
 @ApplicationScoped
 public class ManifestScanner {
@@ -53,6 +66,13 @@ public class ManifestScanner {
   /** What PomParser writes as the location of a {@code <parent>} pin. */
   private static final String PARENT_LOCATION = "parent:";
 
+  /** A cap on the submodule walk. A wrapper repository declares dozens and nothing declares this
+   * many; the bound is what keeps one malformed file from being an unbounded read. */
+  private static final int MAX_GITLINKS = 128;
+
+  /** What a gitlink pin's location says: the path the {@code 160000} entry sits at. */
+  static final String GITLINK_LOCATION = "gitlink:";
+
   @Inject GitHostReader gitHost;
 
   /**
@@ -60,7 +80,7 @@ public class ManifestScanner {
    *
    * @param status the row's status
    * @param headSha the commit every pin was read at, null unless the status is OK or CONFIG_ERROR
-   * @param pins every direct pin found, in discovery order
+   * @param pins every direct pin found, in discovery order — an ignored ecosystem contributes none
    * @param groups the repository's grouping, empty when the status is CONFIG_ERROR
    * @param message the sentence for the row, null when the status is OK
    */
@@ -99,22 +119,43 @@ public class ManifestScanner {
     }
 
     String headSha = root.headSha();
+
+    // THE CONFIG IS READ BEFORE THE MANIFESTS, because it may say not to read some of them at all.
+    // An ecosystem the repository named under `ignore` is skipped here rather than filtered later:
+    // there is no pin to filter, and the reads that would have found one are not made either. A
+    // file that will not parse ignores nothing — the set is empty on the error path — so a broken
+    // config still reports whatever the manifests hold, exactly as it did before `ignore` existed.
+    GroupConfig.Parsed config = groups(project, name, headSha);
+
     List<ParsedPin> pins = new ArrayList<>();
-    pins.addAll(mavenPins(project, name, headSha, root));
-    pins.addAll(npmPins(project, name, headSha, root));
-    pins.addAll(dockerPins(project, name, headSha, root));
+    if (!config.ignores(Ecosystem.MAVEN)) {
+      pins.addAll(mavenPins(project, name, headSha, root));
+    }
+    if (!config.ignores(Ecosystem.NPM)) {
+      pins.addAll(npmPins(project, name, headSha, root));
+    }
+    if (!config.ignores(Ecosystem.DOCKER)) {
+      pins.addAll(dockerPins(project, name, headSha, root));
+    }
+    if (!config.ignores(Ecosystem.GITLINK)) {
+      pins.addAll(gitlinkPins(project, name, headSha, root));
+    }
     // ONE ROW PER LINE. Every module of a reactor names the same root property, and each one
     // produced a pin against the root pom above. They are one line and one change; without this
     // the payload would carry the same edit once per module and the commit message would repeat it.
     pins = dedupe(pins);
 
-    GroupConfig.Parsed groups = groups(project, name, headSha);
-    if (!groups.ok()) {
+    if (!config.ok()) {
       return new Read(
-          RepositoryStatus.CONFIG_ERROR, headSha, List.copyOf(pins), List.of(), null, groups.error());
+          RepositoryStatus.CONFIG_ERROR, headSha, List.copyOf(pins), List.of(), null, config.error());
+    }
+    if (!config.ignored().isEmpty()) {
+      LOG.debugf(
+          "%s asks not to be scanned for %s",
+          name, config.ignored().stream().map(Ecosystem::wireName).toList());
     }
     return new Read(
-        RepositoryStatus.OK, headSha, List.copyOf(pins), groups.groups(), groups.source(), null);
+        RepositoryStatus.OK, headSha, List.copyOf(pins), config.groups(), config.source(), null);
   }
 
   private static Read absent(String name, String branch) {
@@ -250,6 +291,101 @@ public class ManifestScanner {
     return pins;
   }
 
+  /**
+   * Every submodule {@code .gitmodules} declares, pinned at the sha its gitlink records.
+   *
+   * <p><b>The file names the submodule; the TREE holds the version.</b> {@code .gitmodules} is a
+   * committed text file and carries a path, a url and nothing about what is checked out there — the
+   * commit a submodule is pinned at lives in the parent's tree, as a mode-{@code 160000} entry at
+   * that path. So this reads both: the file for the name (the url's basename) and the directory
+   * listing above the path for the sha.
+   *
+   * <p><b>A gitlink whose sha the git host does not report is SKIPPED, and that is the whole
+   * safety of this pass.</b> The tree route collapses every non-directory entry to {@code blob} and
+   * has never reported an object name, so on such a host this produces nothing at all — which is
+   * the honest answer. A pin recorded with a made-up version would be one the pending rule compares
+   * and the bump step then applies, into somebody else's repository.
+   *
+   * <p><b>A file that will not parse is not a CONFIG_ERROR.</b> {@code .config/qits/maintenance.yml}
+   * is this service's own configuration surface and a repository that writes it wrongly is told so
+   * on its row; {@code .gitmodules} is git's file, written by {@code git submodule add}, and a
+   * repository whose whole scan failed over one unreadable line in it would be this service
+   * claiming ownership of a format it does not own. Unreadable entries are dropped and the rest of
+   * the scan stands.
+   */
+  private List<ParsedPin> gitlinkPins(String project, String name, String sha, TreeLookup root) {
+    if (!root.hasBlob(GitmodulesParser.PATH)) {
+      return List.of();
+    }
+    FileLookup file = gitHost.blob(project, name, sha, GitmodulesParser.PATH);
+    if (!file.found()) {
+      return List.of();
+    }
+    List<GitmodulesParser.Submodule> modules = GitmodulesParser.parse(file.content());
+    if (modules.isEmpty()) {
+      return List.of();
+    }
+    // One listing per DIRECTORY, not per submodule: a wrapper repository declares dozens, and the
+    // ones sharing a parent share the read that answers for all of them.
+    Map<String, TreeLookup> listings = new LinkedHashMap<>();
+    List<ParsedPin> pins = new ArrayList<>();
+    List<String> unpinned = new ArrayList<>();
+    for (GitmodulesParser.Submodule module : modules) {
+      if (pins.size() >= MAX_GITLINKS) {
+        LOG.warnf(
+            "%s declares more than %d submodules; the rest of .gitmodules is not read",
+            name, MAX_GITLINKS);
+        break;
+      }
+      int slash = module.path().lastIndexOf('/');
+      String directory = slash < 0 ? "" : module.path().substring(0, slash);
+      String entryName = slash < 0 ? module.path() : module.path().substring(slash + 1);
+      TreeLookup listing =
+          directory.isEmpty()
+              ? root
+              : listings.computeIfAbsent(directory, path -> gitHost.tree(project, name, sha, path));
+      if (!listing.found()) {
+        LOG.debugf(
+            "%s declares the submodule %s at %s, which this revision does not list",
+            name, module.name(), module.path());
+        continue;
+      }
+      Optional<TreeLookup.TreeEntry> entry = listing.entry(entryName);
+      if (entry.isEmpty()) {
+        // Declared in the file and not present in the tree: an ordinary state for a submodule
+        // removed in a commit that left the section behind.
+        LOG.debugf(
+            "%s declares the submodule %s at %s, where the tree holds nothing",
+            name, module.name(), module.path());
+        continue;
+      }
+      String pinned = entry.get().isGitlink() ? entry.get().sha() : null;
+      if (pinned == null || pinned.isBlank()) {
+        // ONE line per repository rather than one per submodule: on a git host that reports no
+        // object names this is every submodule of every repository, every scan, and a wrapper
+        // declares dozens.
+        unpinned.add(module.name());
+        continue;
+      }
+      pins.add(
+          new ParsedPin(
+              Ecosystem.GITLINK,
+              module.path(),
+              module.name(),
+              pinned.trim(),
+              null,
+              GITLINK_LOCATION + module.path(),
+              false));
+    }
+    if (!unpinned.isEmpty()) {
+      LOG.warnf(
+          "%s declares %d submodule(s) the git host reports no gitlink sha for (%s);"
+              + " they are not inventoried",
+          name, unpinned.size(), String.join(", ", unpinned));
+    }
+    return pins;
+  }
+
   /** One pin per (manifest, name, location) — see the call site for why there are duplicates. */
   private static List<ParsedPin> dedupe(List<ParsedPin> pins) {
     java.util.Map<String, ParsedPin> byLine = new java.util.LinkedHashMap<>();
@@ -264,7 +400,7 @@ public class ManifestScanner {
   }
 
   /**
-   * The repository's grouping.
+   * The repository's own file: its grouping, and the ecosystems it asks to be left out of.
    *
    * <p>An UNREACHABLE read of the file is treated as absent rather than as a config error: the
    * repository is readable — its manifests were just read at this sha — so a single failing blob is

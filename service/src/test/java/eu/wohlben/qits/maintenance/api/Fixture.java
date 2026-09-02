@@ -5,20 +5,30 @@ import eu.wohlben.qits.maintenance.peer.PeerTarget;
 import java.util.Map;
 
 /**
- * One repository as five peers would describe it.
+ * One repository as the peers would describe it.
  *
  * <p>It is deliberately a WHOLE repository rather than a minimal one: a pom with a property and a
  * literal, a package.json with a lock, a Dockerfile with an internal and an external image, and a
  * grouping file. The point of the suite is the seams between those, and a fixture that carried one
  * pin would exercise none of them.
  */
-final class Fixture {
+public final class Fixture {
 
-  static final String PROJECT = "qits";
-  static final String REPOSITORY = "qits-ci";
-  static final String HEAD_SHA = "3f1a9c0b7d2e4f5a6b8c9d0e1f2a3b4c5d6e7f80";
-  static final String BRANCH = "maintenance/dependencies";
-  static final String BUMPED_SHA = "aa11bb22cc33dd44ee55ff6677889900aabbccdd";
+  public static final String PROJECT = "qits";
+  public static final String REPOSITORY = "qits-ci";
+  public static final String HEAD_SHA = "3f1a9c0b7d2e4f5a6b8c9d0e1f2a3b4c5d6e7f80";
+  public static final String BRANCH = "maintenance/dependencies";
+  public static final String BUMPED_SHA = "aa11bb22cc33dd44ee55ff6677889900aabbccdd";
+
+  /**
+   * The release door's path AS THIS SERVICE SPELLS IT, query included. {@code FakePeers} keys on the
+   * target and the whole path, so a fixture that armed a different query string would leave the door
+   * unscripted and the call would read the unregistered-path 404 — which is a refusal shape, and the
+   * test would fail somewhere else entirely.
+   */
+  public static final String DOOR_PATH =
+      eu.wohlben.qits.maintenance.bump.ReleaseDoorClient.RELEASE_PATH
+          + "?projectId=" + PROJECT + "&repositoryName=" + REPOSITORY;
 
   private static final String TREE = "/git/" + PROJECT + "/" + REPOSITORY + "/tree/";
   private static final String BLOB = "/git/" + PROJECT + "/" + REPOSITORY + "/blob/" + HEAD_SHA + "/";
@@ -124,7 +134,7 @@ final class Fixture {
   private Fixture() {}
 
   /** Everything a scan of one repository reads, answered. */
-  static void scriptScan(FakePeers peers) {
+  public static void scriptScan(FakePeers peers) {
     peers.answer(
         PeerTarget.PROJECTS,
         "/projects/api/repositories",
@@ -195,12 +205,12 @@ final class Fixture {
   }
 
   /** The branch does not exist yet — the ordinary state before a first bump. */
-  static void scriptBranchAbsent(FakePeers peers) {
+  public static void scriptBranchAbsent(FakePeers peers) {
     peers.answer(PeerTarget.GITHOST, TREE + "maintenance%2Fdependencies", FakePeers.Scripted.status(404, ""));
   }
 
   /** The branch exists at that sha — what the git host says after a bump ran. */
-  static void scriptBranchAt(FakePeers peers, String sha) {
+  public static void scriptBranchAt(FakePeers peers, String sha) {
     peers.answer(
         PeerTarget.GITHOST,
         TREE + "maintenance%2Fdependencies",
@@ -208,7 +218,7 @@ final class Fixture {
   }
 
   /** qits-ci accepts the trigger and names one run. */
-  static void scriptCiAccepts(FakePeers peers, String runId) {
+  public static void scriptCiAccepts(FakePeers peers, String runId) {
     peers.answer(
         PeerTarget.CI,
         "/ci/api/events/trigger",
@@ -217,11 +227,32 @@ final class Fixture {
                 + "\"repositoriesSkipped\":[]}"));
   }
 
-  static void scriptRun(FakePeers peers, String runId, String status) {
+  public static void scriptRun(FakePeers peers, String runId, String status) {
     peers.answer(
         PeerTarget.CI,
         "/ci/api/runs/" + runId,
         FakePeers.Scripted.ok("{\"id\":\"" + runId + "\",\"status\":\"" + status + "\"}"));
+  }
+
+  /** The release door creates (or converges onto) a release request and names it. */
+  public static void scriptDoorAccepts(FakePeers peers, String requestId) {
+    peers.answer(
+        PeerTarget.WORKSPACES,
+        DOOR_PATH,
+        FakePeers.Scripted.ok(
+            "{\"requestId\":\"" + requestId + "\",\"state\":\"PENDING\",\"branch\":\""
+                + BRANCH + "\",\"commitSha\":\"" + BUMPED_SHA + "\",\"detail\":null}"));
+  }
+
+  /** The release door answers something else — a 5xx, or the already-integrated refusal. */
+  public static void scriptDoorAnswers(FakePeers peers, int status, String body) {
+    peers.answer(PeerTarget.WORKSPACES, DOOR_PATH, FakePeers.Scripted.status(status, body));
+  }
+
+  /** The release door is not there at all: no status, a transport failure. */
+  public static void scriptDoorUnreachable(FakePeers peers) {
+    peers.answer(
+        PeerTarget.WORKSPACES, DOOR_PATH, FakePeers.Scripted.unreachable("connection refused"));
   }
 
   private static String metadata(String... versions) {

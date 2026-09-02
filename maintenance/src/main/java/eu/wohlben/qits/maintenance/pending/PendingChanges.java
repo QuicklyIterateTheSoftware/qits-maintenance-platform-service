@@ -3,6 +3,7 @@ package eu.wohlben.qits.maintenance.pending;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
+import eu.wohlben.qits.maintenance.latest.GitlinkSha;
 import eu.wohlben.qits.maintenance.latest.VersionOrder;
 import eu.wohlben.qits.maintenance.manifest.Globs;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
@@ -25,6 +26,10 @@ import java.util.Optional;
  * recorded and shown and are never pending — there is no line to edit in the first and no version
  * to compare in the second.
  *
+ * <p><b>And what is pending is then grouped, by kind or by glob.</b> The fallback grouping is the
+ * INTERNAL/EXTERNAL split — a pin's own kind decides its branch — while a repository that declared
+ * groups of its own has those tried first, by their globs. See {@link #groupOf}.
+ *
  * <p><b>Two rules then decide whether a newer version is OFFERED, and the second is the one people
  * ask about.</b>
  *
@@ -38,6 +43,9 @@ import java.util.Optional;
  *
  * <p><b>A latest that could not be read offers nothing</b>, and that is deliberately different from
  * "up to date". The repository page shows the error beside the pin so the two never look alike.
+ *
+ * <p><b>GITLINK answers neither rule and is decided by {@link #gitlink} instead.</b> Its pin is a
+ * commit sha, and there is no order over shas — the two rules above would be arithmetic on a hash.
  */
 public final class PendingChanges {
 
@@ -65,11 +73,14 @@ public final class PendingChanges {
       if (newer.isEmpty()) {
         continue;
       }
-      Optional<String> group = groupOf(pin.name, groups);
+      // Only an ACTIONABLE pin gets this far: `newerVersion` answers empty for REACTOR and
+      // UNRESOLVED, so every pin reaching the grouping below is INTERNAL or EXTERNAL and the two
+      // kind groups between them claim everything a configured group left.
+      Optional<String> group = groupOf(pin, groups);
       if (group.isEmpty()) {
-        // No group claims it and the repository declared no catch-all. There is no branch to put
-        // this on, so it is not pending — it is unclaimed, and the repository page still shows the
-        // newer version.
+        // Nothing claims it: a repository that declared its own `dependencies` and `external`
+        // groups with globs that leave a gap. There is no branch to put this on, so it is not
+        // pending — it is unclaimed, and the repository page still shows the newer version.
         continue;
       }
       pending.add(
@@ -128,6 +139,9 @@ public final class PendingChanges {
     if (ecosystem.isEmpty()) {
       return Optional.empty();
     }
+    if (ecosystem.get() == Ecosystem.GITLINK) {
+      return gitlink(pin, row);
+    }
     if (!VersionOrder.newer(ecosystem.get(), pin.version, row.latest)) {
       return Optional.empty();
     }
@@ -139,19 +153,86 @@ public final class PendingChanges {
   }
 
   /**
-   * The group a dependency name belongs to.
+   * A gitlink's verdict: <b>a difference between two shas, never a comparison of two versions</b>.
+   *
+   * <p>Neither of this class's two rules can be applied to one, and forcing them would be worse
+   * than useless. A gitlink PIN is a commit sha — 40 hex characters that no order ranks, and that
+   * maven's order would happily declare "newer" or "older" by reading the leading digits of a hash.
+   * And rule 2 has nothing to work on: a sha is neither a release nor a prerelease.
+   *
+   * <p>So the question is the only one that can be asked honestly — <b>is the submodule pinned at
+   * the commit the newest release of that repository was cut from</b> — and both halves have to be
+   * KNOWN for the answer to be no. The latest row carries the release's sha in
+   * {@code source_url} ({@code latest/GitlinkSha}); a row without one is a release this service
+   * could not tie to a commit, and pending must not be guessed from a version alone: the step
+   * fetches a tag and would move the gitlink to a commit nothing here compared.
+   *
+   * <p><b>The change's {@code to} is the calver VERSION and its {@code from} is the sha.</b> They
+   * are deliberately not the same kind of thing, because they address different sides: the step
+   * fetches {@code refs/tags/<to>} from the sibling repository and writes whatever commit that
+   * resolves to, and {@code from} is what the tree holds now — the commit-message half, exactly as
+   * it is for every other ecosystem.
+   */
+  private static Optional<String> gitlink(MtPin pin, MtLatest row) {
+    Optional<String> released = GitlinkSha.read(row.sourceUrl);
+    if (released.isEmpty() || pin.version == null || pin.version.isBlank()) {
+      return Optional.empty();
+    }
+    if (GitlinkSha.same(pin.version, released.get())) {
+      return Optional.empty();
+    }
+    return Optional.of(row.latest);
+  }
+
+  /**
+   * The group a pin belongs to.
+   *
+   * <p><b>Two ways a group claims, and a group uses exactly one of them.</b> A group with a KIND
+   * takes every pin of that kind — the two built-in halves, {@code dependencies} for INTERNAL and
+   * {@code external} for EXTERNAL. A group with none matches its GLOBS against the dependency name,
+   * which is what a repository's own {@code .config/qits/maintenance.yml} declares.
    *
    * <p><b>First match wins</b>, in declaration order, which is what {@code mt_group.ordinal}
-   * carries. A pin matching both {@code angular} and {@code dependencies} belongs to whichever the
-   * author wrote first.
+   * carries. A configured group is written before the kind pair, so {@code angular} claims
+   * {@code @angular/core} and the EXTERNAL half never sees it.
+   *
+   * <p><b>A REACTOR or UNRESOLVED pin is claimed by no kind group</b>, because neither of those is a
+   * kind a group can carry: there is no line to bump and no branch to put it on. It reaches this
+   * method only from the detail page — {@link #of} filters it out one step earlier — and a glob
+   * group that names it explicitly still claims it, which is what the page then shows.
    */
-  public static Optional<String> groupOf(String name, List<MtGroup> groups) {
+  public static Optional<String> groupOf(MtPin pin, List<MtGroup> groups) {
+    PinKind kind = kindOf(pin);
     for (MtGroup group : groups) {
-      if (Globs.matchesAny(MaintenanceStore.readStrings(group.patterns), name)) {
+      Optional<PinKind> claims = kindOf(group);
+      boolean matched =
+          claims.isPresent()
+              ? claims.get() == kind
+              : Globs.matchesAny(MaintenanceStore.readStrings(group.patterns), pin.name);
+      if (matched) {
         return Optional.of(group.name);
       }
     }
     return Optional.empty();
+  }
+
+  /**
+   * A group's kind, or empty when it claims by glob.
+   *
+   * <p>A word this build does not know reads as empty rather than as a crash — the same reading a
+   * pin's unknown kind gets, and for the same reason: a row written by a newer build must not take
+   * a page down. Such a group then claims by its patterns, which for a kind group are {@code []} —
+   * so it claims nothing rather than everything.
+   */
+  public static Optional<PinKind> kindOf(MtGroup group) {
+    if (group.kind == null || group.kind.isBlank()) {
+      return Optional.empty();
+    }
+    try {
+      return Optional.of(PinKind.valueOf(group.kind));
+    } catch (IllegalArgumentException e) {
+      return Optional.empty();
+    }
   }
 
   /** A stored pin's kind, defaulting to UNRESOLVED for a word this build does not know. */

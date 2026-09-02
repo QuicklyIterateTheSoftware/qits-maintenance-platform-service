@@ -22,6 +22,12 @@ import org.apache.maven.artifact.versioning.ComparableVersion;
  * <p><b>A prerelease is recognised, not compared away.</b> The order still places
  * {@code 1.0.0-rc.1} where it belongs; what the prerelease flag decides is whether such a version
  * is OFFERED, and that is the pending computation's rule rather than this one's.
+ *
+ * <p><b>GITLINK rides maven's order, and it is the LATEST column that does so — never a pin.</b> A
+ * gitlink's {@code mt_latest.latest} is a calver release version announced on the bus, which
+ * maven's order ranks exactly as it ranks every other release of this platform's own; that is what
+ * keeps {@code recordLatestIfNewer} forward-only for one. A gitlink PIN is a commit sha, which no
+ * order here or anywhere ranks, so nothing compares one — see {@code pending/PendingChanges}.
  */
 public final class VersionOrder {
 
@@ -46,7 +52,7 @@ public final class VersionOrder {
   public static Comparator<String> comparator(Ecosystem ecosystem) {
     return switch (ecosystem) {
       case NPM -> VersionOrder::compareNpm;
-      case MAVEN, DOCKER -> VersionOrder::compareMaven;
+      case MAVEN, DOCKER, GITLINK -> VersionOrder::compareMaven;
     };
   }
 
@@ -68,7 +74,7 @@ public final class VersionOrder {
         SemVer parsed = SemVer.parse(version);
         yield parsed == null ? version.contains("-") : parsed.prereleaseVersion();
       }
-      case MAVEN, DOCKER -> MAVEN_PRERELEASE.matcher(version.trim()).matches();
+      case MAVEN, DOCKER, GITLINK -> MAVEN_PRERELEASE.matcher(version.trim()).matches();
     };
   }
 
@@ -86,7 +92,7 @@ public final class VersionOrder {
     String value = version.trim();
     return switch (ecosystem) {
       case NPM -> SemVer.parse(value) != null;
-      case MAVEN -> true;
+      case MAVEN, GITLINK -> true;
       case DOCKER -> OCI_VERSION_TAG.matcher(value).matches();
     };
   }

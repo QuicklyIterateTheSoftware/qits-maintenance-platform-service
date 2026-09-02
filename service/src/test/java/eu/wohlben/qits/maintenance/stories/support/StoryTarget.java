@@ -30,7 +30,7 @@ public final class StoryTarget {
    */
   public static final String STORE = "its own inventory store";
 
-  // --- the five peers ----------------------------------------------------------------------------
+  // --- the six peers -----------------------------------------------------------------------------
 
   /** The catalog: every repository this service is responsible for. */
   public static final String PROJECTS = "qits-projects";
@@ -38,8 +38,18 @@ public final class StoryTarget {
   /** Where the manifests are, read at one revision per repository. */
   public static final String GITHOST = "qits-githost";
 
-  /** The one peer this service WRITES to — and it writes a trigger, never a commit. */
+  /** One of the two peers this service WRITES to — and it writes a trigger, never a commit. */
   public static final String CI = "qits-ci";
+
+  /**
+   * The RELEASE DOOR: the other one it writes to, and it writes an ASK, never a merge.
+   *
+   * <p>A bump that pushed a branch asks qits-workspaces for a release request on it, rather than
+   * leaving the branch for a per-repository CI trigger to notice. Nothing merges at that call — the
+   * quality gates settle the request afterwards — so what the diagram shows is a request being made
+   * and never a release happening.
+   */
+  public static final String WORKSPACES = "qits-workspaces";
 
   /** The internal registries: maven, npm and OCI behind three path prefixes of one service. */
   public static final String ARTIFACTS = "qits-platform-artifacts";
@@ -48,6 +58,13 @@ public final class StoryTarget {
   public static final String MIRROR = "qits-platform-mirror";
 
   // --- the wire surface --------------------------------------------------------------------------
+
+  /**
+   * The release door, as {@code ReleaseDoorClient} spells it — the PATH only. {@link StoryPeers}
+   * arms and matches on the decoded path and records the raw one with its query, so a story arms
+   * this and then reads a label carrying {@code ?projectId=…&repositoryName=…}.
+   */
+  public static final String RELEASE_DOOR = "/workspaces/api/branches/release";
 
   /** The machine surface's root. Path-routed verbatim by the edge on every vhost. */
   public static final String API = "/maintenance/api";

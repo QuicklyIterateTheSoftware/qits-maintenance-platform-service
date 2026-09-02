@@ -2,6 +2,7 @@ package eu.wohlben.qits.maintenance.work;
 
 import eu.wohlben.qits.maintenance.bump.BumpService;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
+import eu.wohlben.qits.maintenance.sbom.SbomIngestService;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -24,6 +25,10 @@ import org.jboss.logging.Logger;
  *       ordinary sweep is the recovery: it re-dispatches a REQUESTED bump under the same event id —
  *       which is what makes the retry record no second run — and polls a RUNNING one to its end.
  *       This class only starts the first sweep, so the recovery does not wait for the first tick.
+ *   <li>An SBOM that was never read is simply READ. A PENDING {@code mt_artifact} row is a fetch
+ *       that was queued and never ran — nothing in-process was lost and nothing is running
+ *       elsewhere, because the work is one idempotent read of an immutable document. So it is
+ *       re-queued rather than failed or followed.
  * </ul>
  *
  * <p><b>It never stops the boot.</b> A store that will not answer at startup is a readiness
@@ -42,6 +47,8 @@ public class RestartRecovery {
 
   @Inject BumpService bumps;
 
+  @Inject SbomIngestService sboms;
+
   void onStart(@Observes StartupEvent event) {
     try {
       long closed = store.failInterruptedScans(INTERRUPTED, Instant.now());
@@ -57,6 +64,15 @@ public class RestartRecovery {
       bumps.sweep();
     } catch (RuntimeException e) {
       LOG.error("The bumps left open by a previous process could not be resumed.", e);
+    }
+    try {
+      // AND THE SBOMS, WHICH ARE A THIRD SHAPE AGAIN. A PENDING artifact row is a fetch that was
+      // queued and never ran, and there is nothing in-process to lose and nothing running elsewhere
+      // to follow: the work is one idempotent read of an immutable document. So a successor simply
+      // does it — no row is failed, and none is left waiting for the hourly sweep.
+      sboms.sweep();
+    } catch (RuntimeException e) {
+      LOG.error("The sboms a previous process had not read could not be re-queued.", e);
     }
   }
 }

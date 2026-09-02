@@ -33,8 +33,8 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * who pressed the button has to see that something is happening rather than guess from a listing
  * that has not changed yet.
  *
- * <p><b>A manual scan never bumps.</b> {@code qits.maintenance.bump.auto} is about the schedule:
- * pressing Scan asks what is out of date, and pressing Bump asks for a branch.
+ * <p><b>No scan bumps, manual or scheduled.</b> Pressing Scan asks what is out of date; pressing
+ * Bump asks for a branch, and the clock's own standing instruction lives in {@code BumpSchedule}.
  */
 @Path("/scans")
 @Produces(MediaType.APPLICATION_JSON)

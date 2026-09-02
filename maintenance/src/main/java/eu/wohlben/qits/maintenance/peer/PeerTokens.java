@@ -12,7 +12,7 @@ import org.eclipse.microprofile.config.ConfigProvider;
 import org.jboss.logging.Logger;
 
 /**
- * The five named oidc clients — one per peer SERVICE — and the reason there are five.
+ * The six named oidc clients — one per peer SERVICE — and the reason there are six.
  *
  * <p><b>A token is cut FOR one service.</b> qits-githost refuses a bearer whose audience names
  * qits-ci, so a single client could talk to one peer only. The client id is the same everywhere
@@ -25,7 +25,7 @@ import org.jboss.logging.Logger;
  * false in the shipped properties. There is no key of ours beside it — one switch cannot disagree
  * with itself. Off, this answers empty and the call goes out with the forward-auth headers alone.
  *
- * <p><b>Two of the five are for reads that are anonymous on qits-net today.</b> qits-artifacts'
+ * <p><b>Two of the six are for reads that are anonymous on qits-net today.</b> qits-artifacts'
  * registry routes and qits-platform-mirror's proxies take no credential in network, so those
  * clients exist for the day the edge's rule reaches the inside — turning one on is three
  * environment variables, not a code change.
@@ -63,6 +63,17 @@ public class PeerTokens {
   @NamedOidcClient("mirror")
   OidcClient mirror;
 
+  /**
+   * The release door's. The door admits {@code qits:system} beside {@code qits:admin} — the pair
+   * its execute arm always carried — so this client's ordinary machine grant opens it. A client
+   * that mints happily and is then refused 403 means the deployed qits-workspaces predates that
+   * widening; the ask is retried until its release lands, and that is the failure this note exists
+   * to make findable.
+   */
+  @Inject
+  @NamedOidcClient("workspaces")
+  OidcClient workspaces;
+
   /** Caches and refreshes each peer's token, so a scan of seventy repositories is not seventy
    * token requests. */
   private final Map<String, TokensHelper> helpers =
@@ -71,7 +82,8 @@ public class PeerTokens {
           PeerTarget.Credential.GITHOST, new TokensHelper(),
           PeerTarget.Credential.CI, new TokensHelper(),
           PeerTarget.Credential.ARTIFACTS, new TokensHelper(),
-          PeerTarget.Credential.MIRROR, new TokensHelper());
+          PeerTarget.Credential.MIRROR, new TokensHelper(),
+          PeerTarget.Credential.WORKSPACES, new TokensHelper());
 
   /** The bearer for one peer, or empty when its client is disabled or cannot mint. */
   public Optional<String> token(String credential) {
@@ -110,6 +122,7 @@ public class PeerTokens {
       case PeerTarget.Credential.CI -> ci;
       case PeerTarget.Credential.ARTIFACTS -> artifacts;
       case PeerTarget.Credential.MIRROR -> mirror;
+      case PeerTarget.Credential.WORKSPACES -> workspaces;
       default -> null;
     };
   }

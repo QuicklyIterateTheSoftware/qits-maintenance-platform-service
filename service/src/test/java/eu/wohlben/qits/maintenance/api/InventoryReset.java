@@ -1,5 +1,8 @@
 package eu.wohlben.qits.maintenance.api;
 
+import eu.wohlben.qits.maintenance.entity.MtArtifact;
+import eu.wohlben.qits.maintenance.entity.MtArtifactComponent;
+import eu.wohlben.qits.maintenance.entity.MtArtifactEdge;
 import eu.wohlben.qits.maintenance.entity.MtBranch;
 import eu.wohlben.qits.maintenance.entity.MtBump;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
@@ -26,6 +29,11 @@ public class InventoryReset {
 
   @Transactional
   public void clear() {
+    // The graph first: mt_artifact_component and mt_artifact_edge are the only rows in this schema
+    // with a real foreign key, and it points at mt_artifact.
+    MtArtifactEdge.deleteAll();
+    MtArtifactComponent.deleteAll();
+    MtArtifact.deleteAll();
     MtBump.deleteAll();
     MtBranch.deleteAll();
     MtScan.deleteAll();
@@ -33,5 +41,18 @@ public class InventoryReset {
     MtGroup.deleteAll();
     MtLatest.deleteAll();
     MtRepository.deleteAll();
+  }
+
+  /**
+   * Drops only the latest-version rows, leaving the pins and the groups standing.
+   *
+   * <p>What that produces is a repository with an inventory and NOTHING PENDING — every pin is at the
+   * newest version this service knows of, because it knows of none. It is the one state a fixture
+   * cannot reach by scripting a registry differently: "no answer" and "the answer is the pinned
+   * version" are two different rows and only this makes the second.
+   */
+  @Transactional
+  public void clearLatest() {
+    MtLatest.deleteAll();
   }
 }

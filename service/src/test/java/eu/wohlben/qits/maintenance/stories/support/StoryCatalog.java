@@ -3,7 +3,7 @@ package eu.wohlben.qits.maintenance.stories.support;
 import java.util.Map;
 
 /**
- * <b>The platform this catalogue scans</b> — two repositories, as the five peers would describe
+ * <b>The platform this catalogue scans</b> — two repositories, as the six peers would describe
  * them, armed onto the {@link StoryPeers} stand-ins once before any story runs.
  *
  * <p>It is deliberately a WHOLE platform rather than a minimal one. Every rule this service has is
@@ -53,14 +53,23 @@ public final class StoryCatalog {
   /** …and {@link #SECOND_REPOSITORY}'s. */
   public static final String SECOND_HEAD_SHA = "bb22cc33dd44ee55ff6677889900aabbccddeeff";
 
-  /** Where a bump's changes land. A group's name IS its branch. */
+  /**
+   * The INTERNAL half of the fallback grouping, and where this platform's own releases land. A
+   * group's name IS its branch.
+   */
   public static final String DEFAULT_GROUP = "dependencies";
 
-  /** The group {@link #REPOSITORY}'s own configuration declares, ahead of the fallback. */
+  /** The EXTERNAL half: everybody else's upgrades, on a branch of their own. */
+  public static final String EXTERNAL_GROUP = "external";
+
+  /** The group {@link #REPOSITORY}'s own configuration declares, ahead of the fallback pair. */
   public static final String ANGULAR_GROUP = "angular";
 
   /** The branch {@link #DEFAULT_GROUP} is bumped on, as the git host route encodes it. */
   public static final String BRANCH = "maintenance/" + DEFAULT_GROUP;
+
+  /** …and the branch {@link #EXTERNAL_GROUP} is bumped on. */
+  public static final String EXTERNAL_BRANCH = "maintenance/" + EXTERNAL_GROUP;
 
   /** …and the same, percent-encoded, because a revision is ONE path segment on that route. */
   public static final String BRANCH_SEGMENT = "maintenance%2F" + DEFAULT_GROUP;
@@ -76,6 +85,12 @@ public final class StoryCatalog {
 
   /** …and for {@link #SECOND_REPOSITORY}'s. */
   public static final String SECOND_RUN = "run-beta";
+
+  /**
+   * The release request qits-workspaces' door names for {@link #REPOSITORY}'s pushed branch. A word,
+   * so no label and no assertion is scrubbed as a generated id.
+   */
+  public static final String RELEASE_REQUEST = "rr-alpha";
 
   // --- the peers' own routes ---------------------------------------------------------------------
 
@@ -241,7 +256,11 @@ public final class StoryCatalog {
           deps: ["@angular/*"]
       """;
 
-  /** The second repository: one external pin behind a property, and nothing else at all. */
+  /**
+   * The second repository: one EXTERNAL pin behind a property, and nothing else at all — so its
+   * whole pending list belongs to the external half of the fallback, which is the branch the second
+   * bump story writes.
+   */
   private static final String SECOND_POM =
       """
       <project>
@@ -286,8 +305,10 @@ public final class StoryCatalog {
     StoryPeers artifacts = StoryPeers.named(StoryTarget.ARTIFACTS);
     StoryPeers mirror = StoryPeers.named(StoryTarget.MIRROR);
     // qits-ci is started here too, so its address is in the launch command; what it ANSWERS is armed
-    // by the bump stories, because a trigger's answer is the thing those stories move.
+    // by the bump stories, because a trigger's answer is the thing those stories move. So is
+    // qits-workspaces, whose release door only one story ever reaches: the one whose branch moved.
     StoryPeers.named(StoryTarget.CI);
+    StoryPeers.named(StoryTarget.WORKSPACES);
 
     // THE CATALOG, with a row that has no name. qits-projects lists rows whose alias is unset, every
     // read this service makes is name-addressed, and a scan must skip such a row rather than fail on

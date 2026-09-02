@@ -1,7 +1,12 @@
 package eu.wohlben.qits.maintenance.api;
 
+import eu.wohlben.qits.maintenance.control.ArtifactGraph;
 import eu.wohlben.qits.maintenance.control.Inventory;
 import eu.wohlben.qits.maintenance.dto.DependencyDto;
+import eu.wohlben.qits.maintenance.dto.DependentsDto;
+import eu.wohlben.qits.maintenance.error.BadRequestException;
+import eu.wohlben.qits.maintenance.model.Ecosystem;
+import eu.wohlben.qits.maintenance.model.PinKind;
 import jakarta.annotation.security.RolesAllowed;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.DefaultValue;
@@ -31,11 +36,65 @@ public class DependencyController {
 
   @Inject Inventory inventory;
 
+  @Inject ArtifactGraph graph;
+
   @GET
   @Operation(summary = "Dependencies matching a glob, with every pin of each")
   @APIResponse(responseCode = "200", description = "The dependencies")
+  @APIResponse(responseCode = "400", description = "kind is neither INTERNAL nor EXTERNAL")
   @RolesAllowed({"qits:admin", "qits:system"})
-  public List<DependencyDto> dependencies(@QueryParam("name") @DefaultValue("*") String name) {
-    return inventory.dependencies(name);
+  public List<DependencyDto> dependencies(
+      @QueryParam("name") @DefaultValue("*") String name, @QueryParam("kind") String kind) {
+    return inventory.dependencies(name, pinKind(kind));
+  }
+
+  /**
+   * <b>Who ships a copy of this dependency</b> — the same question the route above answers from
+   * manifests, answered from what was actually RELEASED.
+   *
+   * <p>They are two routes because they are two facts. A pin is a line a bump can edit; a dependent
+   * is a component inside a published package, transitives included. An artifact can embed
+   * something it does not pin, and a repository can pin something none of its artifacts ship. A
+   * single route merging the two would be unable to say which of those it was showing.
+   *
+   * <p><b>The default is the NEWEST released version of each dependent</b>, because forty-nine
+   * older releases of one library are answers about versions nobody can change any more.
+   * {@code all=true} is the archaeology.
+   */
+  @GET
+  @Path("/dependents")
+  @Operation(summary = "Every released artifact of ours that embeds this dependency")
+  @APIResponse(responseCode = "200", description = "The dependents")
+  @APIResponse(responseCode = "400", description = "Unknown ecosystem, or no name")
+  @RolesAllowed({"qits:admin", "qits:system"})
+  public DependentsDto dependents(
+      @QueryParam("ecosystem") String ecosystem,
+      @QueryParam("name") String name,
+      @QueryParam("all") @DefaultValue("false") boolean all) {
+    if (name == null || name.isBlank()) {
+      throw new BadRequestException("name is required");
+    }
+    Ecosystem world =
+        Ecosystem.of(ecosystem)
+            .orElseThrow(
+                () ->
+                    new BadRequestException(
+                        "ecosystem must be maven, npm or docker, not '" + ecosystem + "'"));
+    return graph.dependents(world, name.trim(), all);
+  }
+
+  /** INTERNAL or EXTERNAL, or null for both. Anything else is a 400 rather than an empty list. */
+  private static PinKind pinKind(String kind) {
+    if (kind == null || kind.isBlank()) {
+      return null;
+    }
+    String value = kind.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!value.equals(PinKind.INTERNAL.name()) && !value.equals(PinKind.EXTERNAL.name())) {
+      // REACTOR and UNRESOLVED are deliberately refused too: neither is a half of the split this
+      // filter serves, and answering an empty list would look like "there are none of those".
+      throw new BadRequestException(
+          "kind must be INTERNAL or EXTERNAL, not '" + kind + "'");
+    }
+    return PinKind.valueOf(value);
   }
 }

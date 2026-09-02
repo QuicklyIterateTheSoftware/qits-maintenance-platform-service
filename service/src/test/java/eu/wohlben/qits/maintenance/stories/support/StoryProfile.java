@@ -77,10 +77,9 @@ import java.util.Map;
  *       can reach are the two that are holding a bump open on purpose.
  * </ul>
  *
- * <p><b>Two paths are therefore NOT covered by any story here, and that is a stated gap.</b> A
- * SCHEDULED scan asking for the bumps it found ({@code bump.auto}) needs the cron this profile
- * removes, and {@code RestartRecovery} resuming a bump across a restart needs a second boot of one
- * process. Both keep their coverage in {@code MaintenanceApiTest}, which drives the sweep by hand.
+ * <p><b>Two paths are therefore NOT covered by any story here, and that is a stated gap.</b> The
+ * nightly internal bump ({@code BumpSchedule}) needs the cron this profile removes, and {@code
+ * RestartRecovery} resuming a bump across a restart needs a second boot of one process. Both keep their coverage in {@code MaintenanceApiTest}, which drives the sweep by hand.
  * A story that waited out a six-hour cron would be indistinguishable from a story that hung.
  */
 public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
@@ -97,8 +96,18 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
   /** This catalogue's own database on the one embedded postgres. */
   public static final String DATABASE = "maintenance_userflows_it";
 
+  /**
+   * And its own outbox database, for the same reason the store is its own: two launches of one
+   * artifact must not share a claim ledger. The bus itself stays dark — the parent's
+   * {@code qits.eventstream.enabled=false} is inherited — so nothing here dials, and no story draws
+   * an event edge.
+   */
+  public static final String EVENTSTREAM_DATABASE = "maintenance_userflows_it_eventstream";
+
   /** Where the url is parked for whichever copy of this class is asked second. */
   private static final String URL_PROPERTY = "qits.test.userflows-it.db-url";
+
+  private static final String EVENTSTREAM_URL_PROPERTY = "qits.test.userflows-it.eventstream-url";
 
   @Override
   public Map<String, String> getConfigOverrides() {
@@ -113,10 +122,12 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
     Map<String, String> overrides = new LinkedHashMap<>(super.getConfigOverrides());
 
     overrides.put("QITS_RESOURCE_DB_URL", databaseUrl());
+    overrides.put("QITS_RESOURCE_EVENTSTREAM_URL", eventstreamUrl());
 
     overrides.put("qits.maintenance.targets.projects-url", url(StoryTarget.PROJECTS));
     overrides.put("qits.maintenance.targets.githost-url", url(StoryTarget.GITHOST));
     overrides.put("qits.maintenance.targets.ci-url", url(StoryTarget.CI));
+    overrides.put("qits.maintenance.targets.workspaces-url", url(StoryTarget.WORKSPACES));
     overrides.put(
         "qits.maintenance.registries.maven-url",
         url(StoryTarget.ARTIFACTS, StoryTarget.MAVEN_REGISTRY_PREFIX));
@@ -139,6 +150,10 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
     overrides.put("qits.maintenance.scan.enabled", "false");
     overrides.put("qits.maintenance.scan.internal.cron", "off");
     overrides.put("qits.maintenance.scan.external.cron", "off");
+    // The sbom sweep is the third timer and it goes the same way as the two scans: no story drives
+    // an ingest, and a sweep firing on the hour mid-catalogue would draw an artifacts arrow into
+    // whichever story happened to be draining.
+    overrides.put("qits.maintenance.sbom.sweep-cron", "off");
     overrides.put("qits.maintenance.bump.poll-interval", "1s");
 
     overrides.put("qits.auth.machine.required", "true");
@@ -163,6 +178,16 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
     // localhost resolves for the launched process too — it is a child of this JVM on this host.
     String url = EmbeddedPg.url(DATABASE);
     System.setProperty(URL_PROPERTY, url);
+    return url;
+  }
+
+  private static synchronized String eventstreamUrl() {
+    String recorded = System.getProperty(EVENTSTREAM_URL_PROPERTY);
+    if (recorded != null) {
+      return recorded;
+    }
+    String url = EmbeddedPg.url(EVENTSTREAM_DATABASE);
+    System.setProperty(EVENTSTREAM_URL_PROPERTY, url);
     return url;
   }
 }

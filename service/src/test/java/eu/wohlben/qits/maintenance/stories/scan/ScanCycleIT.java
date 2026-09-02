@@ -118,8 +118,8 @@ public class ScanCycleIT {
   @Order(1)
   void aScanFillsTheInventoryFromEveryPeerItHas(Interactions story, Network network) {
     // The tap sees a request and never a narrative role, so the actor is named before the first
-    // call rather than described afterwards. A scan is a person's decision here: `bump.auto` is
-    // about the SCHEDULE, and pressing Scan asks what is out of date rather than for a branch.
+    // call rather than described afterwards. A scan is a person's decision here: no scan bumps
+    // anything, and pressing Scan asks what is out of date rather than for a branch.
     NetworkCapture.actor(StoryIdentities.OPERATOR);
 
     String id =
@@ -222,18 +222,28 @@ public class ScanCycleIT {
         .body(
             "find { it.name == '" + StoryCatalog.REPOSITORY + "' }.headSha",
             equalTo(StoryCatalog.HEAD_SHA))
-        // The repository declares `angular`; the catch-all is appended after it so no pin is
+        // The repository declares `angular`; the two KIND groups are appended after it so no pin is
         // unclaimed, and a group's name is also its branch.
         .body(
             "find { it.name == '" + StoryCatalog.REPOSITORY + "' }.groups.name",
-            equalTo(List.of(StoryCatalog.ANGULAR_GROUP, StoryCatalog.DEFAULT_GROUP)))
-        // The second repository carries no configuration, so the fallback IS its whole grouping.
+            equalTo(
+                List.of(
+                    StoryCatalog.ANGULAR_GROUP,
+                    StoryCatalog.DEFAULT_GROUP,
+                    StoryCatalog.EXTERNAL_GROUP)))
+        // The second repository carries no configuration, so the fallback IS its whole grouping —
+        // and the fallback is the split: our own releases on one branch, everybody else's on the
+        // other.
         .body(
             "find { it.name == '" + StoryCatalog.SECOND_REPOSITORY + "' }.groups.name",
-            equalTo(List.of(StoryCatalog.DEFAULT_GROUP)));
+            equalTo(List.of(StoryCatalog.DEFAULT_GROUP, StoryCatalog.EXTERNAL_GROUP)))
+        .body(
+            "find { it.name == '" + StoryCatalog.SECOND_REPOSITORY + "' }.groups.kind",
+            equalTo(List.of("INTERNAL", "EXTERNAL")));
     story
         .note("both repositories are in the inventory, each with the grouping it configured — and"
-            + " the one that configured none gets the fallback rather than nothing")
+            + " the one that configured none gets the fallback, which is the internal/external"
+            + " split rather than one branch for everything")
         .as("inventory-filled");
 
     String repository = StoryTarget.REPOSITORIES + "/" + StoryCatalog.REPOSITORY;
@@ -493,7 +503,7 @@ public class ScanCycleIT {
     // who they are — not once, not on a cache miss, not at all.
     ReportAssertions.assertNoEdgesTo(CATEGORY_SLUG, READ_SLUG, "qits-platform-idp");
     // AND NOTHING WAS ASKED OF qits-ci. A scan finds out what is out of date; asking for a branch
-    // is a different button, and `bump.auto` is about the schedule rather than about this.
+    // is a different button, and the clock's own is a different schedule (BumpSchedule).
     ReportAssertions.assertNoEdgesTo(CATEGORY_SLUG, READ_SLUG, StoryTarget.CI);
 
     // --- the outage -----------------------------------------------------------------------------

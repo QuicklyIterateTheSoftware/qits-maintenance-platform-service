@@ -1,6 +1,7 @@
 package eu.wohlben.qits.maintenance.persistence;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -57,7 +58,7 @@ class MaintenanceStoreTest {
         "sha1",
         null,
         List.of(pin("g:a", "1.0.0", "dependency:g:a"), pin("g:b", "2.0.0", "dependency:g:b")),
-        List.of(new GroupConfig.Group("dependencies", List.of("*"))),
+        List.of(GroupConfig.Group.ofKind("dependencies", PinKind.INTERNAL)),
         GroupSource.DEFAULT,
         candidate -> PinKind.INTERNAL,
         Instant.now());
@@ -72,7 +73,7 @@ class MaintenanceStoreTest {
         "sha2",
         null,
         List.of(pin("g:a", "1.1.0", "dependency:g:a")),
-        List.of(new GroupConfig.Group("dependencies", List.of("*"))),
+        List.of(GroupConfig.Group.ofKind("dependencies", PinKind.INTERNAL)),
         GroupSource.DEFAULT,
         candidate -> PinKind.INTERNAL,
         Instant.now());
@@ -94,7 +95,7 @@ class MaintenanceStoreTest {
         "sha1",
         null,
         List.of(pin("g:a", "1.0.0", "dependency:g:a")),
-        List.of(new GroupConfig.Group("dependencies", List.of("*"))),
+        List.of(GroupConfig.Group.ofKind("dependencies", PinKind.INTERNAL)),
         GroupSource.DEFAULT,
         candidate -> PinKind.INTERNAL,
         Instant.now());
@@ -119,15 +120,148 @@ class MaintenanceStoreTest {
         null,
         List.of(),
         List.of(
-            new GroupConfig.Group("angular", List.of("@angular/*")),
-            new GroupConfig.Group("quarkus", List.of("io.quarkus:*")),
-            new GroupConfig.Group("dependencies", List.of("*"))),
+            GroupConfig.Group.glob("angular", List.of("@angular/*")),
+            GroupConfig.Group.glob("quarkus", List.of("io.quarkus:*")),
+            GroupConfig.Group.ofKind("dependencies", PinKind.INTERNAL)),
         GroupSource.CONFIG,
         candidate -> PinKind.EXTERNAL,
         Instant.now());
     List<MtGroup> groups = store.groups(repository);
     assertEquals(List.of("angular", "quarkus", "dependencies"), groups.stream().map(g -> g.name).toList());
     assertEquals(List.of(0, 1, 2), groups.stream().map(g -> g.ordinal).toList());
+  }
+
+  @Test
+  void aGroupsKindSurvivesTheRoundTripAndAGlobGroupCarriesNone() {
+    // The column is what the split rides on: a scan writes the fallback pair with a kind and empty
+    // patterns, a configured group with patterns and no kind, and the grouping is read back out of
+    // these rows on every request.
+    String repository = "kinds-" + UUID.randomUUID();
+    store.replaceInventory(
+        repository,
+        "qits",
+        "main",
+        RepositoryStatus.OK,
+        "sha1",
+        null,
+        List.of(pin("g:a", "1.0.0", "dependency:g:a")),
+        List.of(
+            GroupConfig.Group.glob("angular", List.of("@angular/*")),
+            GroupConfig.Group.ofKind(GroupConfig.DEFAULT_GROUP, PinKind.INTERNAL),
+            GroupConfig.Group.ofKind(GroupConfig.EXTERNAL_GROUP, PinKind.EXTERNAL)),
+        GroupSource.CONFIG,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+
+    List<MtGroup> groups = store.groups(repository);
+    assertEquals(List.of("angular", "dependencies", "external"), groups.stream().map(g -> g.name).toList());
+    assertNull(groups.get(0).kind);
+    assertEquals("[\"@angular/*\"]", groups.get(0).patterns);
+    assertEquals(PinKind.INTERNAL.name(), groups.get(1).kind);
+    assertEquals(PinKind.EXTERNAL.name(), groups.get(2).kind);
+    // A kind group claims by kind and by nothing else, so its patterns are the empty array.
+    assertEquals("[]", groups.get(1).patterns);
+    assertEquals("[]", groups.get(2).patterns);
+
+    // And the pin lands where its kind says, read the way every route reads it.
+    assertEquals(
+        "dependencies",
+        eu.wohlben.qits.maintenance.pending.PendingChanges.groupOf(store.pins(repository).get(0), groups)
+            .orElseThrow());
+  }
+
+  @Test
+  void aRescanReplacesTheGroupingAsWellAsThePins() {
+    // The rows are a cache of a file, and a repository that ADDS a maintenance.yml must not keep
+    // the fallback pair beside the groups it just declared.
+    String repository = "regroup-" + UUID.randomUUID();
+    store.replaceInventory(
+        repository,
+        "qits",
+        "main",
+        RepositoryStatus.OK,
+        "sha1",
+        null,
+        List.of(),
+        List.of(
+            GroupConfig.Group.ofKind(GroupConfig.DEFAULT_GROUP, PinKind.INTERNAL),
+            GroupConfig.Group.ofKind(GroupConfig.EXTERNAL_GROUP, PinKind.EXTERNAL)),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+    store.replaceInventory(
+        repository,
+        "qits",
+        "main",
+        RepositoryStatus.OK,
+        "sha2",
+        null,
+        List.of(),
+        List.of(GroupConfig.Group.glob("everything", List.of("*"))),
+        GroupSource.CONFIG,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+    List<MtGroup> groups = store.groups(repository);
+    assertEquals(List.of("everything"), groups.stream().map(g -> g.name).toList());
+    assertNull(groups.get(0).kind);
+  }
+
+  /**
+   * THE OPT-OUT NEEDS NO ERASE OF ITS OWN. A repository that adds {@code ignore: [gitlink]} is
+   * scanned again and the scan simply carries no gitlink pins; because an inventory is replaced
+   * wholesale rather than merged, the rows the earlier scans wrote are gone by the same delete that
+   * rewrites everything else. This is the qits-qits wrapper's case: forty-seven gitlink rows that
+   * stop existing the first night after the line is committed.
+   */
+  @Test
+  void pinsOfANewlyIgnoredEcosystemDisappearOnTheNextScan() {
+    String repository = "ignored-" + UUID.randomUUID();
+    ParsedPin gitlink =
+        ParsedPin.of(
+            Ecosystem.GITLINK,
+            "components/qits-ci/qits-ci-service",
+            "qits-ci-service",
+            "aa11bb22cc33dd44ee55ff6677889900aabbccdd",
+            null,
+            "gitlink:components/qits-ci/qits-ci-service");
+    store.replaceInventory(
+        repository,
+        "qits",
+        "main",
+        RepositoryStatus.OK,
+        "sha1",
+        null,
+        List.of(pin("g:a", "1.0.0", "dependency:g:a"), gitlink),
+        List.of(
+            GroupConfig.Group.ofKind(GroupConfig.DEFAULT_GROUP, PinKind.INTERNAL),
+            GroupConfig.Group.ofKind(GroupConfig.EXTERNAL_GROUP, PinKind.EXTERNAL)),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+
+    // The next scan read the same repository with `ignore: [gitlink]` in place: the maven pin is
+    // still there and the gitlink was never parsed, so it is not in what the scan hands over.
+    store.replaceInventory(
+        repository,
+        "qits",
+        "main",
+        RepositoryStatus.OK,
+        "sha2",
+        null,
+        List.of(pin("g:a", "1.0.0", "dependency:g:a")),
+        List.of(
+            GroupConfig.Group.ofKind(GroupConfig.DEFAULT_GROUP, PinKind.INTERNAL),
+            GroupConfig.Group.ofKind(GroupConfig.EXTERNAL_GROUP, PinKind.EXTERNAL)),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+
+    List<MtPin> pins = store.pins(repository);
+    assertEquals(1, pins.size());
+    assertEquals(Ecosystem.MAVEN.wireName(), pins.get(0).ecosystem);
+    assertTrue(
+        pins.stream().noneMatch(row -> Ecosystem.GITLINK.wireName().equals(row.ecosystem)),
+        "an ignored ecosystem's stored pins do not survive the rescan");
   }
 
   @Test
@@ -150,6 +284,112 @@ class MaintenanceStoreTest {
     store.recordLatest(Ecosystem.MAVEN, name, LatestLookup.found("1.0.0", "u"), Instant.now());
     store.recordLatest(Ecosystem.MAVEN, name, LatestLookup.found("2.0.0", "u"), Instant.now());
     assertEquals("2.0.0", store.latest(Ecosystem.MAVEN, name).orElseThrow().latest);
+  }
+
+  /**
+   * The bus's write, and the rule that separates it from the poll's: an announcement is evidence
+   * that THIS version exists and never that a higher one does not, so a catch-up frame from before
+   * the last scan must not rewind a column that scan filled.
+   *
+   * <p><b>Every write happens before the one read, and that is not style.</b> A {@code @QuarkusTest}
+   * method runs inside ONE request context, so a read made outside a transaction is answered by the
+   * request-bound session — while every store write runs in {@code DbRetry.inNewTx}, whose session is
+   * bound to its own transaction. Read the row in between and the first session's first-level cache
+   * answers every later read with the value it saw first, and an assertion about the last write fails
+   * against a store that is perfectly correct. Measured here, 2026-09-01. Same rock as the API
+   * suite's "every poll is a fresh HTTP request".
+   */
+  @Test
+  void anAnnouncedLatestOnlyEverMovesForward() {
+    String name = "g:" + UUID.randomUUID();
+
+    assertTrue(
+        store.recordLatestIfNewer(Ecosystem.MAVEN, name, "2026.901.5", "event:one", Instant.now()),
+        "the first announcement of a dependency nothing has looked up is adopted");
+    assertFalse(
+        store.recordLatestIfNewer(Ecosystem.MAVEN, name, "2026.825.1", "event:stale", Instant.now()),
+        "a caught-up frame from before the last scan must not rewind the column");
+    assertFalse(
+        store.recordLatestIfNewer(Ecosystem.MAVEN, name, "2026.901.5", "event:again", Instant.now()),
+        "and the ordinary redelivery of one release writes nothing at all");
+    assertTrue(
+        store.recordLatestIfNewer(Ecosystem.MAVEN, name, "2026.902.1", "event:next", Instant.now()),
+        "the next real release moves it on");
+
+    var row = store.latest(Ecosystem.MAVEN, name).orElseThrow();
+    assertEquals("2026.902.1", row.latest);
+    assertEquals("event:next", row.sourceUrl);
+  }
+
+  /**
+   * The other half of the same rule, stated as a row rather than as a return value: a frame that is
+   * not newer writes NOTHING — not the version, not the source url, not {@code checked_at}. Stamping
+   * the timestamp would say a lookup happened, and none did.
+   */
+  @Test
+  void aFrameThatIsNotNewerLeavesTheRowExactlyAsItWas() {
+    String name = "g:" + UUID.randomUUID();
+    store.recordLatestIfNewer(Ecosystem.MAVEN, name, "2026.901.5", "event:one", Instant.now());
+    store.recordLatestIfNewer(Ecosystem.MAVEN, name, "2026.825.1", "event:stale", Instant.now());
+    store.recordLatestIfNewer(Ecosystem.MAVEN, name, "2026.901.5", "event:again", Instant.now());
+
+    var row = store.latest(Ecosystem.MAVEN, name).orElseThrow();
+    assertEquals("2026.901.5", row.latest);
+    assertEquals("event:one", row.sourceUrl, "not even the source url is restamped");
+  }
+
+  /**
+   * A row whose lookup FAILED holds no version, so the announcement is the first thing known about
+   * that dependency and is adopted — and it clears the error with it, because "we could not find
+   * out" is no longer true.
+   */
+  @Test
+  void anAnnouncementAdoptsARowWhoseLookupHadFailedAndClearsItsError() {
+    String name = "g:" + UUID.randomUUID();
+    store.recordLatest(
+        Ecosystem.MAVEN, name, LatestLookup.failed("http://example/x", "HTTP 503"), Instant.now());
+
+    assertTrue(
+        store.recordLatestIfNewer(Ecosystem.MAVEN, name, "1.2.3", "event:one", Instant.now()));
+
+    var row = store.latest(Ecosystem.MAVEN, name).orElseThrow();
+    assertEquals("1.2.3", row.latest);
+    assertNull(row.error);
+  }
+
+  /** npm ranks prereleases by rules maven does not share, and the guard is the ecosystem's own. */
+  @Test
+  void theForwardGuardIsTheEcosystemsOwnVersionOrder() {
+    String name = "@qits/" + UUID.randomUUID();
+    assertTrue(store.recordLatestIfNewer(Ecosystem.NPM, name, "1.0.0", "event:one", Instant.now()));
+    assertFalse(
+        store.recordLatestIfNewer(Ecosystem.NPM, name, "1.0.0-rc.1", "event:two", Instant.now()),
+        "semver puts a prerelease below its own release");
+  }
+
+  /**
+   * The bus's debounce: a merge is a burst of pushes, and a scan of one repository already queued or
+   * running covers every one of them.
+   */
+  @Test
+  void aScanOfOneRepositoryIsPendingWhileItIsQueuedOrRunningAndNotAfter() {
+    String repository = "debounce-" + UUID.randomUUID();
+    assertFalse(store.scanPending(repository));
+
+    UUID id = store.openScan(ScanScope.INTERNAL, repository, "EVENT", Instant.now());
+    assertTrue(store.scanPending(repository), "REQUESTED is queued behind the worker");
+
+    store.scanStatus(id, ScanStatus.RUNNING, null, Instant.now());
+    assertTrue(store.scanPending(repository));
+
+    store.scanStatus(id, ScanStatus.SUCCEEDED, "done", Instant.now());
+    assertFalse(store.scanPending(repository), "a finished scan debounces nothing");
+
+    // A whole-catalog scan is deliberately not counted: it covers this repository, but it runs for
+    // minutes, and suppressing an event's rescan for its length would read a push at whatever
+    // revision that scan happened to reach.
+    store.openScan(ScanScope.ALL, null, "SCHEDULED", Instant.now());
+    assertFalse(store.scanPending(repository));
   }
 
   @Test

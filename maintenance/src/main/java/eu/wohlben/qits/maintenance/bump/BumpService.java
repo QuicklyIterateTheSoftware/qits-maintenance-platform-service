@@ -49,6 +49,12 @@ import org.jboss.logging.Logger;
  * red run against a branch that MOVED is somebody's hand-written commit that this service refused
  * to overwrite. That is the STALE state: they own the branch now, and nothing bumps it again until
  * it is gone.
+ *
+ * <p><b>SUCCEEDED asks for the release itself.</b> A branch nobody asks about is a branch that sits
+ * there, so the ending that pushed one calls qits-workspaces' release door — see {@link
+ * ReleaseDoorClient} for what the door is and why the ask is convergent. NOTHING_TO_DO and STALE do
+ * not: there is nothing to release in the first case, and in the second somebody owns the branch by
+ * hand and asking for their commits to be released is precisely the thing that must not happen.
  */
 @ApplicationScoped
 public class BumpService {
@@ -65,6 +71,8 @@ public class BumpService {
   @Inject CiClient ci;
 
   @Inject GitHostReader gitHost;
+
+  @Inject ReleaseDoorClient door;
 
   @Inject WorkQueue queue;
 
@@ -209,7 +217,10 @@ public class BumpService {
     finish(bump, allPassed, lastStatus);
   }
 
-  /** Sends every REQUESTED bump again and follows every RUNNING one. */
+  /**
+   * Three jobs: send every REQUESTED bump again, follow every RUNNING one, and ask the release door
+   * again for every pushed branch whose ask has not settled.
+   */
   public void sweep() {
     for (MtBump bump : store.activeBumps()) {
       UUID id = bump.id;
@@ -218,6 +229,105 @@ public class BumpService {
       } else {
         queue.submit("poll bump " + id, () -> poll(id));
       }
+    }
+    for (MtBump bump : store.bumpsOwedARelease()) {
+      UUID id = bump.id;
+      queue.submit("ask the release door for bump " + id, () -> retryRelease(id));
+    }
+  }
+
+  /**
+   * One more attempt at the release door, for a bump that pushed a branch and got no answer worth
+   * keeping.
+   *
+   * <p><b>It is bounded by the BRANCH, not by a counter.</b> There is no attempt limit and no backoff
+   * schedule, because the thing that ends the retrying is the thing the retrying is for: the branch
+   * either gets a release request (the column fills), reaches RELEASED (the {@code SCMRelease} the
+   * door publishes, read by {@code bus/ScmEventListener}), or vanishes (NONE, from
+   * {@code SCMDeleteBranch}). A counter would additionally have to be right about how long
+   * qits-workspaces may be down for, which is not a question this service can answer.
+   *
+   * <p>So each of the three endings writes the column and the row stops being read, and until one of
+   * them happens the door is asked once per poll tick — which is the same tick that follows a running
+   * CI run and is a no-op whenever nothing is owed.
+   */
+  public void retryRelease(UUID id) {
+    Optional<MtBump> found = store.bump(id);
+    if (found.isEmpty()) {
+      return;
+    }
+    MtBump bump = found.get();
+    if (!BumpStatus.SUCCEEDED.name().equals(bump.status) || bump.releaseRequestId != null) {
+      // Settled between the sweep's read and this task. Idempotent by design: the sweep queues onto
+      // one worker thread and a second tick can land behind the first.
+      return;
+    }
+    Optional<MtBranch> branch = store.branch(bump.repository, bump.groupName);
+    String state = branch.map(row -> row.state).orElse(null);
+    if (!BranchState.PUSHED.name().equals(state)) {
+      // RELEASED, NONE, STALE, or no row at all. In every one of them the branch this bump pushed is
+      // no longer this bump's to ask about — it landed, it is gone, or somebody owns it by hand.
+      store.bumpReleaseAsked(
+          id,
+          ReleaseDoorClient.CONVERGED,
+          note(
+              bump,
+              bump.branch + " is " + (state == null ? "no longer tracked" : state)
+                  + "; the release door was not asked again"));
+      return;
+    }
+    askForRelease(bump, branch.get().headSha);
+  }
+
+  /**
+   * Asks qits-workspaces to release the branch this bump pushed, and records what it said.
+   *
+   * <p>Everything about WHY the ask looks like this is in {@link ReleaseDoorClient}; what belongs
+   * here is the one refusal that is this service's own: a repository row with no project. The door's
+   * public identity is the {@code (projectId, repositoryName)} pair, and half of it lives on
+   * {@code mt_repository} — a row a scan never completed cannot address the door at all, and that is
+   * a refusal rather than a retry, because no number of attempts adds a project to it.
+   *
+   * @param headSha the head this bump observed, sent as {@code expectedSha} so the request is pinned
+   *     to exactly the commits the run produced
+   */
+  private void askForRelease(MtBump bump, String headSha) {
+    Optional<MtRepository> repository = store.repository(bump.repository);
+    String project = repository.map(row -> row.project).orElse(null);
+    if (project == null || project.isBlank()) {
+      store.bumpReleaseAsked(
+          bump.id,
+          ReleaseDoorClient.REFUSED,
+          note(
+              bump,
+              "the release door cannot be addressed: "
+                  + bump.repository
+                  + " has no project on its inventory row"));
+      LOG.warnf("The bump %s pushed %s but has no project to address the release door with",
+          bump.id, bump.branch);
+      return;
+    }
+    ReleaseDoorClient.DoorResult result =
+        door.requestRelease(
+            project,
+            bump.repository,
+            bump.branch,
+            ReleaseDoorClient.summary(bump.groupName, changes(bump).size()),
+            headSha);
+    store.bumpReleaseAsked(bump.id, result.requestId(), note(bump, result.message()));
+    switch (result.outcome()) {
+      case REQUESTED ->
+          LOG.infof(
+              "The bump %s asked for %s to be released: request %s",
+              bump.id, bump.branch, result.requestId());
+      case CONVERGED ->
+          LOG.infof("The bump %s found %s already released", bump.id, bump.branch);
+      case REFUSED ->
+          LOG.warnf("The release door refused %s: %s", bump.branch, result.message());
+      case RETRY ->
+          LOG.warnf(
+              "The release door did not answer for %s: %s; the next sweep asks again",
+              bump.branch, result.message());
     }
   }
 
@@ -240,12 +350,12 @@ public class BumpService {
 
     if (passed && moved) {
       store.recordBranch(bump.repository, bump.groupName, branch, BranchState.PUSHED, after, now);
-      store.bumpFinished(
-          bump.id,
-          BumpStatus.SUCCEEDED,
-          ciRunStatus,
-          changes(bump).size() + " dependencies on " + branch,
-          now);
+      store.bumpFinished(bump.id, BumpStatus.SUCCEEDED, ciRunStatus, pushedMessage(bump), now);
+      // THE ROW IS CLOSED BEFORE THE DOOR IS ASKED, and the order is the failure policy. The bump
+      // succeeded on the strength of the run and the head; a door that will not answer must not be
+      // able to change that verdict, and a process that died between the two lines leaves a
+      // SUCCEEDED bump the sweep picks up rather than a bump with no ending at all.
+      askForRelease(bump, after);
       return;
     }
     if (passed) {
@@ -272,6 +382,26 @@ public class BumpService {
             ? branch + " was rewritten by hand; nothing will be pushed onto it"
             : "the ci run ended " + ciRunStatus,
         now);
+  }
+
+  /**
+   * What a SUCCEEDED bump's message says on its own — the sentence the ending writes, before the
+   * release ask has anything to add.
+   */
+  private static String pushedMessage(MtBump bump) {
+    return changes(bump).size() + " dependencies on " + bump.branch;
+  }
+
+  /**
+   * The bump's own sentence with the release ask's beside it.
+   *
+   * <p><b>Recomposed from the ending rather than appended to whatever is there.</b> The ask is
+   * retried once per poll tick until it settles, and an append would grow the column by a line every
+   * fifteen seconds for the length of an outage. This is idempotent: the base is derived from the
+   * frozen change list and the branch, so N attempts leave one base and the newest note.
+   */
+  private static String note(MtBump bump, String note) {
+    return note == null || note.isBlank() ? pushedMessage(bump) : pushedMessage(bump) + " — " + note;
   }
 
   /** Reads the branch's head and writes it, so the next comparison has something to compare to. */

@@ -12,7 +12,7 @@ import eu.wohlben.qits.userflows.NetworkTaps;
  * <p>This service is a <b>reader of other repositories</b>, which makes both halves of a diagram
  * load-bearing and for different reasons. What arrives is one operator pressing one button; what
  * leaves is the catalog, a head resolution, six manifest reads, a registry lookup per dependency and
- * — for a bump — a trigger into somebody else's pipeline. A diagram drawn from the near side alone
+ * — for a bump — a trigger into somebody else's pipeline and an ask at the release door. A diagram drawn from the near side alone
  * would say a scan is a POST. So there are seven feeds:
  *
  * <ul>
@@ -61,7 +61,7 @@ public final class StoryNetwork {
 
   private StoryNetwork() {}
 
-  /** Install the incoming tap and register all six far sides. */
+  /** Install the incoming tap and register all seven far sides. */
   public static void install() {
     NetworkTaps.restAssured(StoryTarget.SERVICE);
     farSide(StoryTarget.PROJECTS);
@@ -69,6 +69,7 @@ public final class StoryNetwork {
     farSide(StoryTarget.CI);
     farSide(StoryTarget.ARTIFACTS);
     farSide(StoryTarget.MIRROR);
+    farSide(StoryTarget.WORKSPACES);
     idp();
   }
 

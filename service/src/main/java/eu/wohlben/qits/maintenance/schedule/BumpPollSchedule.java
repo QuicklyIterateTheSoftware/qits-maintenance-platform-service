@@ -9,16 +9,20 @@ import org.jboss.logging.Logger;
 /**
  * What moves an unfinished bump along.
  *
- * <p><b>Two jobs, one sweep.</b> A bump qits-ci answered 503 to is REQUESTED with its changes
+ * <p><b>Three jobs, one sweep.</b> A bump qits-ci answered 503 to is REQUESTED with its changes
  * intact and is SENT AGAIN — under the same event id, so a dispatch that did reach qits-ci records
- * no second run. A bump that is RUNNING has its ci run read, and a terminal run ends it.
+ * no second run. A bump that is RUNNING has its ci run read, and a terminal run ends it. And a bump
+ * that SUCCEEDED but whose release ask did not settle has qits-workspaces' door asked again — bounded
+ * by the branch rather than by a counter, so it stops when the request exists, when the branch is
+ * released, or when it is gone.
  *
  * <p><b>The polling is not done here.</b> This only queues work; the reads and the writes happen on
  * the single worker thread, so a poll never interleaves with a scan rewriting the same rows.
  *
  * <p><b>It is also the restart recovery.</b> A bump left RUNNING by a process that died is picked
  * up by the first sweep after the successor boots — the CI run outlived this service and its answer
- * is still there to read.
+ * is still there to read. So is a bump that SUCCEEDED and died before it could ask the door: its
+ * column is still null and its branch is still PUSHED, which is exactly the third job's condition.
  */
 @ApplicationScoped
 public class BumpPollSchedule {

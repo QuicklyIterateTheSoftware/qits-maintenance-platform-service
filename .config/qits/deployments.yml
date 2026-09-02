@@ -43,14 +43,31 @@ navigation-entries: platform.Maintenance:2
 # injected as QITS_RESOURCE_DB_URL / _USERNAME / _PASSWORD — the generic contract the maintenance
 # jar's datasource defaults read verbatim.
 #
-# The third segment is omitted, so the database is the default derivation: the application name minus
+# `db` omits the third segment, so the database is the default derivation: the application name minus
 # its `qits-` prefix, dashes to underscores, under a `qits_` prefix — `qits_platform_maintenance`.
 #
 # WHAT IS IN IT is half cache and half log. The inventory — pins, groups, latest versions — is a
 # cache of the git host's files and the registries' metadata, and a fresh scan rebuilds it. The bump
 # log is not: it is the only record of which branches this service pushed and on the strength of
 # which pins, and nothing else on the platform holds it.
-resources: postgresql:db
+#
+# THE SECOND RESOURCE IS THE EVENT BUS'S, and it is mandatory rather than an optimisation. Joining
+# qits-eventstream in service/pom.xml made this deployable a subscriber, and that jar owns its own
+# datasource, its own Flyway lineage and the durable-consumer tables (`consumed_event`,
+# `consumer_watermark`) — never this service's database and never its migration history.
+#
+# THE NAME `eventstream` IS LOAD-BEARING. The deployer derives the injected variable names from the
+# resource name, and the jar's shipped defaults read exactly QITS_RESOURCE_EVENTSTREAM_URL /
+# _USERNAME / _PASSWORD. Rename it here and nothing matches — the expressions stay unresolvable and
+# the process dies at Flyway, which is the loud half of the failure; the quiet half would be a
+# fallback store nobody meant, and there is deliberately none.
+#
+# It cannot omit the third segment: the default derivation would be `qits_platform_maintenance` too,
+# and one database cannot be two stores with two Flyway lineages.
+#
+# Provisioning is idempotent and the credential lives in the deployer's registry, so a redeploy finds
+# the existing rows and injects the passwords this process is already connected with.
+resources: postgresql:db, postgresql:eventstream:qits_platform_maintenance_eventstream
 
 # The readiness endpoint the deployer's health gate curls. The convention derives it from the
 # repository name and would land on exactly this path; it is written out because a probe that 404s

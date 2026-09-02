@@ -28,7 +28,19 @@ import java.util.regex.Pattern;
  *   <li>For maven, {@code name} is COMMIT-MESSAGE ONLY. {@code location} carries the coordinates
  *       the step edits by, which is why a maven location has to be exact and a misspelled one is a
  *       silent no-op rather than a wrong edit.
+ *   <li>For GITLINK, {@code name} is LOAD-BEARING and {@code manifestPath} is a DIRECTORY. The step
+ *       derives the sibling clone url from the name — the repository the submodule's url points
+ *       at — fetches {@code refs/tags/<to>} from it, and writes the commit that resolves to as a
+ *       {@code 160000} index entry at {@code manifestPath}. So a gitlink change is the one whose
+ *       {@code manifestPath} names no file, which is why the step's {@code -f} test is inside the
+ *       npm and docker arms rather than in front of all three.
  * </ul>
+ *
+ * <p><b>Nothing below switches on the ecosystem, and that is deliberate.</b> Every rule here is
+ * about a value reaching a shell or a ref, and those are the same values whichever step applies
+ * them — so a fourth ecosystem is admitted by this validation the day its step exists, and refused
+ * by that step if it is not ready. A per-ecosystem allow-list here would be a second place to
+ * remember.
  */
 public final class BumpPayload {
 

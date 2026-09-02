@@ -31,9 +31,14 @@ classes behind when a shape changes. Port 0 is not optional on the deployment ho
 platform's own npm registry there.
 
 **Anything returned as `Response.entity(...)` is invisible to the build-time Jackson analysis**,
-which is what `api/ApiWireReflection` exists for. The 202 from a queued scan and the 202 from a
-requested bump are exactly such responses. A new response type joins that list in the commit that
+which is what `api/ApiWireReflection` exists for. The 202 from a queued scan, the 202 from a
+requested bump and the 202 from a manual sbom ingest are exactly such responses. A new response type joins that list in the commit that
 adds it; the failure is a 500 in the native binary while every JVM test stays green.
+
+**`bus/EventWireReflection` is the second registration and the same rule from the other side**: the
+event bus binds through an `ObjectMapper` the library builds by hand, so every frame and payload type
+is invisible to the same analysis. A new listener's payload record joins that list in the commit that
+adds it. See "The event bus".
 
 ## Reading another repository
 
@@ -41,6 +46,10 @@ adds it; the failure is a 500 in the native binary while every JVM test stays gr
 `main` and takes `Git-Commit-Sha` off the answer, which resolves the branch AND proves the
 repository is readable in one call. A scan that read manifests at `main` would produce an inventory
 of whatever moved while it ran — pins that correspond to no commit that ever existed.
+
+**A tree entry carries a name, a type and — where the host reports them — a mode and a sha.** The
+last two are optional and absent on the deployed git host, which is what makes a gitlink readable in
+principle and unpinnable in practice. Read them; never require them; never substitute for them.
 
 **A 404 is not an answer until it has been asked twice.** The git host spells "no such revision" and
 "no such path" the same way, so a 404 on a file is followed by the root tree at the same sha:
@@ -50,7 +59,8 @@ answered means ABSENT, 404 means GONE. The five-outcome vocabulary is qits-ci's
 **Discovery is the ROOT plus the reactor and nothing else.** A recursive walk would read every
 vendored file in every repository on the platform for a handful of pins, and it would pull in
 `service/src/main/webui` — a gitlink to an SPA's own repository, which the catalog lists in its own
-right. The module walk refuses any path containing `src/main/webui` outright.
+right. The module walk refuses any path containing `src/main/webui` outright. The gitlink ITSELF is
+a pin — see GITLINK under "Parsers" — and that is a different fact from what it contains.
 
 **Nothing over the wire throws.** A scan reads every repository in the catalog; one unreachable git
 host must cost one row's status, not the run. Every failure comes back as a `PeerAnswer` carrying
@@ -98,7 +108,30 @@ every page it appears on.
 **Adding an ecosystem is a parser, a resolver and a pipeline step together.** Two of the three is a
 column that fills up and never moves.
 
+**GITLINK is the fourth, and its "resolver" is the BUS.** `manifest/GitmodulesParser` reads
+`.gitmodules` for a submodule's path and — off the URL's basename, never the `[submodule "..."]`
+entry — its repository name; the VERSION is the mode-`160000` entry the tree carries at that path,
+because `.gitmodules` names a submodule and never its version. There is no registry to poll, so
+`LatestResolver.resolvable` refuses the ecosystem and `bus/ScmEventListener` is the only writer of
+its `mt_latest` row. `kindOf` hardcodes INTERNAL: a submodule is a repository on this platform's own
+git host, so a config key for it would be a knob whose only correct setting is the default.
+
+**And the half arms only against a git host that reports a tree entry's sha** — qits-githost
+33b0ccf teaches `serveTree` to answer a gitlink as `type: "commit"` with `sha` and `mode: "160000"`;
+the DEPLOYED githost predates it and still answers `name` and a two-valued `type`, collapsing a
+gitlink to `blob`.
+`GitHostReader` reads an optional `mode`/`sha` when they are there; `ManifestScanner` pins nothing
+when they are not, which is deliberate — a made-up version here is compared by the pending rule and
+then applied by the step, into somebody else's repository. `ManifestScannerTest` pins both arms.
+
 ## Versions
+
+**A GITLINK PIN HAS NO ORDER AT ALL, and that is the one to get right.** It is a commit sha; nothing
+ranks two of those, and maven's order would happily call one "newer" by reading the leading hex as
+digits. `pending/PendingChanges.gitlink` therefore asks a DIFFERENCE — is the pin the commit the
+newest release was cut from — over `latest/GitlinkSha`, and refuses to answer when either half is
+missing. What *is* ordered is the gitlink's `mt_latest.latest`, a calver release version, which rides
+maven's order so `recordLatestIfNewer` stays forward-only.
 
 **Three orders, because three ecosystems disagree.** Maven's is `ComparableVersion` — the class a
 resolver ranks with, so this service and a build agree. npm's is real semver, which ranks
@@ -144,9 +177,17 @@ work that reaches the front after the barrier does not exist yet.
 
 ## Bumping
 
+**Two callers, and no scan is one of them.** The button is `POST
+/repositories/{name}/groups/{group}/bumps`; the clock is `schedule/BumpSchedule` at 02:00, INTERNAL
+group only. A SCHEDULED scan used to ask for the bumps it found, gated by `bump.auto` — that key and
+that coupling are both gone. A scan is a READ whose schedule is set by how fast facts go stale; a
+bump is a WRITE into somebody else's repository whose schedule is set by when a branch is welcome.
+Welded together, the 01:00 external scan decided when the internal half got a branch.
+
 **The changes are frozen at REQUEST time**, not recomputed at dispatch. A payload recomputed later
 would not be the one the operator saw, and a retry after a 503 would send a different list under the
-same dedupe key.
+same dedupe key. **That freeze is also the coalescing**: N internal releases between two nightly runs
+are ONE branch push, one CI build, one release request and one release.
 
 **The event id IS the bump row id**, and qits-ci dedupes on (event id, repository, config path). A
 dispatch whose answer was lost records no second run when it is retried. Never generate a fresh one.
@@ -164,6 +205,32 @@ unmoved after a green run is NOTHING_TO_DO, and moved after a red one is STALE.
 **`BumpPayload.problems` refuses on this side what the step refuses on that one.** The step holds
 `to`, `group`, the refs and the manifest path to the same rules; failing here puts the reason on the
 bump row instead of in a step log somebody has to go and read.
+
+**SUCCEEDED asks the release door; the other three endings do not.** `ReleaseDoorClient` posts to
+qits-workspaces' `/branches/release` with the branch, the commit-subject summary and `expectedSha` —
+the head this bump just observed, which is what pins the request to exactly what was built. Nothing
+merges at that call: the door creates a release REQUEST that the quality gates settle, and that a
+branch was released arrives back as `SCMRelease` on the bus. NOTHING_TO_DO pushed nothing; STALE is
+somebody's hand-written commit and releasing it on their behalf is the one thing this must never do.
+
+**A door that will not answer never flips the status.** The bump succeeded — green run, moved branch,
+both facts about this service's own work. `mt_bump.release_request_id` carries the answer and
+**NULL is the one value that means work is owed**; `converged` and `refused` are sentinels that stop
+the retrying, because a permanently refused ask re-sent every fifteen seconds for the life of a
+branch is the failure mode a bare boolean would have. **The retry is bounded by the BRANCH, not a
+counter**: it ends when the request exists, when the branch reaches RELEASED, or when it is gone.
+
+**`projectId` on that call is `mt_repository.project`.** qits-projects' catalogue answers the
+project's row *id* there, and the door resolves the segment by id first then by slug — so the id
+addresses it, the same value `/git/<project>/<repo>` is read with. Nothing was added to
+`CatalogReader` for the door.
+
+**The door admits `qits:system` beside `qits:admin`** (qits-workspaces 7c0733b widened the ask arm
+to the pair its execute arm always had), so the sixth oidc client — audience `qits-workspaces` —
+needs only this service's ordinary machine grant and no person's role. Against a deployed
+qits-workspaces older than that widening the bearer authenticates and is refused; a 401/403 is
+therefore classified RETRYABLE rather than refused, so the ask heals when that release deploys
+instead of needing the bump run again.
 
 ## Persistence
 
@@ -187,6 +254,150 @@ failed the insert would leave a repository looking as though it pins nothing —
 
 Schema changes go in `maintenance/src/main/resources/db/maintenance/migration/`, hand-written, its
 own lineage on its own datasource. Keep appending, never edit an applied migration.
+
+**`ScanTrigger` and the five status enums are `@Enumerated`-style string columns under no check
+constraint, so a new value is one enum constant and no migration.** `ScanTrigger.EVENT` arrived that
+way. The invariant lives where the writes are — `ScanService.request` is the only writer of
+`mt_scan.trigger` and it takes the enum.
+
+## The dependency graph
+
+**An SBOM says what a released artifact CONTAINS; `mt_pin` says what a bump EDITS. They relate by
+`(ecosystem, name)` and they never merge.** That sentence is written into `V3__sbom_graph.sql`,
+`MtArtifact`, `ArtifactGraph` and `RepositoryDetailDto` because it is the one thing a later change
+will be tempted to undo. Neither can answer the other's question: an SBOM holds resolved coordinates
+and cannot name `property:qits.eventstream.version`, and a manifest holds what its author wrote down
+and cannot see what the resolver pulled in behind it. Merging them would produce either an inventory
+nothing can bump or a page that cannot answer an advisory.
+
+**THE ROW IS THE OUTBOX AND THE FETCH IS NEVER INSIDE THE CLAIM.** `SoftwareReleaseListener` writes
+an `mt_artifact` row PENDING and submits to `WorkQueue`; `SbomIngestService` does the call. A
+listener that fetched inline would hold a durable claim open across another service's HTTP call, and
+a qits-artifacts that was slow would make one release an event redelivered for ever with this
+consumer's watermark stuck behind it.
+
+**404 is MISSING, it is TERMINAL, and that is not laziness.** The route is newer than most of what
+the platform has released and a released version is immutable, so a retry asks about the same bytes.
+The next release brings its own row; `POST /artifacts/ingest` is the manual move. `SbomSweepSchedule`
+and `RestartRecovery` re-queue **PENDING only**.
+
+**`direct` is the ROOT's own `dependsOn` list and nothing else.** It is the only reason to read the
+document at all. A parser that marked every listed component direct would leave the whole
+transitives section empty with nothing saying why.
+
+**A null `ecosystem` on a component is a purl type this service does not map**, and it is a state
+rather than a gap: stored, shown, never matched. `Purl.parse` answers empty for such a type rather
+than guessing a mapping, because a guessed name in a join key means something else.
+
+**The two reverse reads go through the store in TWO steps rather than one join**, because
+`mt_artifact_component.artifact_id` is a plain uuid like every other relation in this schema and a
+join would have to be native SQL. The default view is **newest per dependent artifact NAME**; `all`
+is the archaeology. Both are computed on every read, for the reason pending is.
+
+**`mt_artifact_component` and `mt_artifact_edge` carry the only FOREIGN KEYS in this schema.** Every
+other relation here is a string another context owns. These two are allowed because both ends are
+this context's own tables in this context's own database, and a component has no meaning at all
+apart from the artifact it was read out of.
+
+**`PeerTarget.ARTIFACTS_SBOM` is a ninth address and the fourth on qits-artifacts, and its key
+carries no path.** The three registry keys name a MOUNT whose prefix is a repository row a
+deployment may move; `/artifacts/sboms/…` is qits-artifacts' own API, so its prefix is code. The
+name goes into the path LITERALLY — slashes kept — because `/-/` is what separates it from the
+version, which is why that separator exists.
+
+**`SbomClient` goes through `PeerClient` rather than opening a second HttpClient.** That gets the
+shared instance field (a static one is the native-image hazard), the shipped `call-timeout`, the
+forward-auth pair, the optional bearer, the response bound — and `FakePeers`, which is how the whole
+suite replaces the network.
+
+**No `mt_artifact` row is ever a `daemon` or a `gitlink`.** Daemon SBOMs exist upstream; a gitlink is
+a submodule rather than a published package and no release announces one as its `packageType`.
+`SoftwareReleaseListener.ECOSYSTEMS` maps the three qits-ci publishes and is where everything else is
+filtered out, one step before either write — GITLINK reaches `mt_latest` through the OTHER listener,
+off the same `SCMRelease` a branch's state is read from.
+
+## The event bus
+
+`service/…/bus/` is the whole of the wiring, and the machinery is the published `qits-eventstream`
+jar. Its rules live in that library's own repository and are not restated here. **This service
+subscribes and publishes nothing.**
+
+- **Two listeners, and their `consumerId()`s are STORAGE.** `maintenance-internal-latest`
+  (`SoftwareRelease`) and `maintenance-branch-tracking` (`SCMRelease`, `SCMDeleteBranch`,
+  `SCMPublishCommit`). Change one and you mint a brand-new consumer that initializes at the head of
+  the log, silently skipping everything in between; the old watermark is orphaned. Reuse one and a
+  listener inherits another's watermark, believing it has handled events it was never offered. Both
+  are pinned as literals in `bus/ForeignEventContractTest` for that reason.
+- **`mt_latest` has two writers now and they are deliberately different methods.**
+  `MaintenanceStore.recordLatest` is the POLL's and replaces the column whatever it says;
+  `recordLatestIfNewer` is the BUS's and only ever moves it forward. A poll asks a registry what the
+  newest version is — a downgrade is a real answer, because a package can be unpublished. An
+  announcement is evidence that THIS version exists and never that a higher one does not, so letting
+  the bus write through `recordLatest` would let a catch-up frame from yesterday rewind a column this
+  morning's scan filled, and every pin of that dependency would read as up to date until the next
+  scan. The guard is `VersionOrder`'s, the same comparison the pending rule makes. A frame that is not
+  newer writes **nothing at all**, `checked_at` included: stamping it would say a lookup happened.
+- **`SCMRelease` does TWO things now, and the branch row is the one that must not be lost.** Beside
+  the maintenance-branch state it records every release as the latest of a GITLINK — the version, and
+  the commit `refs/tags/<version>` resolves to, in `source_url` as `sha:<hex>`. The gitlink half runs
+  **after** the branch write and on every release whatever the branch was; both writes are
+  idempotent, so the redelivery an unreachable git host causes replays the first harmlessly. The
+  failure split is the seam's: a tag the host does not HOLD is poison (WARN, settle), a host that
+  cannot be ASKED is retryable and thrown, because no scan ever refreshes this row.
+- **`BranchState.RELEASED` is only ever written from an event, and it could not be written any other
+  way.** The release is qits-workspaces' door — it tags, pushes and deletes the source branch — so
+  polling sees a branch disappear, which is exactly what a person deleting it by hand looks like. The
+  `SCMDeleteBranch` that follows moments later writes `NONE` over it, and that is correct rather than
+  a race: a released branch IS gone. `RELEASED` is the fact recorded in between. That same delete is
+  also the only thing that ever clears a `STALE` row.
+- **A main-branch push is a SCAN and never a bump.** `ScanTrigger.EVENT`, one repository, through
+  `ScanService.request` — the same path `POST /scans {repository}` takes, so it is a row a client can
+  follow, it is behind the one worker thread, and it closes itself on failure. What a push changes is
+  a manifest; whether the pending set becomes a branch is still the clock's standing instruction or a
+  person's press, and a bump per push would put a branch on every repository somebody touched today.
+  The debounce is `MaintenanceStore.scanPending`, against the store rather than a field, so it
+  survives a restart and sees a scan a person queued a second earlier.
+- **`selects()` is left at its default in both, and the filtering is inside `onFrame`.** The seam
+  wants a predicate that is PURE and cheap; every question worth asking here is a database read (is
+  this repository in the catalog, is that its main branch, is that group one of its own), it would be
+  asked once and then asked again in the handler, and one that threw on a blip would leave the event
+  owed for ever. The price is a claim row per frame of those four signatures, and it is bounded: the
+  library's sweeper prunes claims the watermark has passed by more than `prune-horizon`.
+- **Every handler failure is a decision between two.** A throw rolls the claim back and the event
+  stays owed — offered again for ever, with this listener's watermark stuck behind it, because the
+  seam has no dead letter. So: **poison** (a payload that will not parse, one naming no version, one
+  naming a repository or group this inventory does not hold) is a WARN or a DEBUG and a return;
+  **retryable** (the store will not answer) is left to throw. Both listener tests assert both arms.
+- **The consumed payloads are TRANSCRIPTIONS and `bus/ForeignEventContractTest` is where they are
+  kept.** qits-workspaces publishes no vocabulary jar at all, and taking qits-ci-events or
+  qits-githost-events would be a compile-time dependency on another context for four field lists. So
+  each record copies a component list, the canonical bytes are produced by the library's own
+  serializer rather than by a JSON fixture, and the tests drive those bytes through the listeners'
+  records. **A rename over there is a change to that file in the same campaign**; landing it there and
+  not here leaves this suite green and a listener deaf.
+- **`bus/EventWireReflection` is the second member of `api/ApiWireReflection`'s family** and is there
+  for a related but distinct reason: `CanonicalJson` builds its OWN `ObjectMapper` — deliberately and
+  permanently, because the canonical form is a wire contract another service compares byte for byte —
+  so everything it binds is invisible to the build step that scans for what needs reflecting on. On a
+  JVM these reflect whether anyone registered them or not, which is what lets the omission survive a
+  green suite; the failure is in the binary, on the first frame. `EventPage` and the
+  `CanonicalJson$QitsEventMixin` are named as STRINGS because both are non-public in the library, and
+  `EventWireReflectionTest` resolves both so a rename cannot rot silently. Leaving `EventPage` out
+  costs **catch-up alone** — the half that only matters after a cutover. Do not "fix" a recurrence by
+  injecting the CDI mapper.
+- **The jar brings a MANDATORY deployment resource, and the resource NAME is load-bearing.**
+  `.config/qits/deployments.yml` declares
+  `postgresql:eventstream:qits_platform_maintenance_eventstream`; the jar reads
+  `QITS_RESOURCE_EVENTSTREAM_*`, whose names follow it. `qits.eventstream.enabled=false` (`%dev`,
+  `%test`) stops publishing, sweeping and dialling — never the datasource, which Quarkus opens and
+  Flyway migrates at boot regardless. That is why the suite hands out a second database
+  (`testdb/EmbeddedPgConfigSource`) and why `PackagedSurfaceIT` supplies a second triple **and** turns
+  the bus off by hand: a launched artifact runs in NORMAL mode, where `%test` does not apply.
+- **Nothing about the bus is configured in `application.properties` except the darkness.**
+  `qits.events.url`, the outbox datasource and its resilience baseline, the timeouts, the retry budget
+  and the catch-up schedule are ordinal-100 defaults in the jar. A copy here would be a second place
+  to change. (That also means `DatasourceBaselineTest` passes for the second datasource without a line
+  in this repository — the jar ships the three.)
 
 ## Identity: two tracks, one set of roles
 
@@ -219,7 +430,10 @@ a JWKS, and a clone-alone build needs no issuer. There is no third state.
   `EmbeddedPgConfigSource` hands its coordinates to every `@QuarkusTest` at an ordinal above
   `application.properties`, because the port is chosen at run time. Both are **copied** per module
   rather than shared: a test-jar dependency between two modules that have none is the higher price.
-  Each module names its own database.
+  **Every (module, datasource) pair names its own database** — `maintenance_domain`,
+  `maintenance_svc`, `maintenance_svc_eventstream`, and the two ITs' pairs — so no two suites can
+  mean one schema. `service` hands out six values rather than three because the bus jar opens a
+  second datasource whether it is dark or not.
 - **`FakePeers` is an `@Alternative` over `PeerClient.get` / `.post`** — replacing those two is
   replacing the network, at no port and no dependency, and the urls in the assertions stay the real
   ones because the inherited `url()` still resolves them from the shipped target configuration. It
@@ -232,7 +446,15 @@ a JWKS, and a clone-alone build needs no issuer. There is no third state.
   request context for the whole method, so one Hibernate session would answer every read from its
   first-level cache — the row would look unchanged for ever while the worker closed it in another
   session.
-- **`InventoryReset` empties the store between methods, after `WorkQueue.awaitIdle`.** Flyway's
+- **The same rock reaches `MaintenanceStoreTest`, and the shape that avoids it is "every write, then
+  one read".** A store read outside a transaction is answered by the request-bound session, while
+  every store WRITE runs in `DbRetry.inNewTx` on a session bound to its own transaction. Read the row
+  between two writes and the first session answers the later reads from its cache, and an assertion
+  about the last write fails against a store that is perfectly correct. Measured 2026-09-01 writing
+  the forward-only latest tests.
+- **`InventoryReset` empties the store between methods, after `WorkQueue.awaitIdle`.** The graph
+  goes first there — `mt_artifact_component` and `mt_artifact_edge` are the only rows in this schema
+  with a foreign key, and it points at `mt_artifact`. Flyway's
   `clean-at-start` runs per Quarkus start, not per test, and an active bump row holds its branch's
   lock: without the reset the second test of a class is answered 409 by the first test's leftovers.
   The drain first, or the delete lands between a running task's read and its write.
@@ -290,7 +512,7 @@ what a story sends in (the per-repo `StoryNetworkFilter` copy this repo used to 
 what left. A story sets `NetworkCapture.actor(...)` **before** each call, because the tap sees a
 request and never a narrative role, and then only asserts and notes.
 
-**The five peers are real sockets that record.** `stories/support/StoryPeers` is a `com.sun`
+**The six peers are real sockets that record.** `stories/support/StoryPeers` is a `com.sun`
 HttpServer per service — qits-projects, qits-githost, qits-ci, qits-platform-artifacts,
 qits-platform-mirror — armed by `StoryCatalog` with a two-repository platform, and the launched
 process is handed their addresses as its eight shipped `qits.maintenance.*-url` keys. It is **not**
@@ -305,7 +527,7 @@ registry and two to `URI.getPath()`.
 process where no tap of ours stands, so each story `network.declare`s it; declared edges carry
 `"declared": true` and render muted and dashed, so a claim never reads like evidence. **An absence
 is never an edge** — it is `assertNoEdgesTo(<peer>)`, which is the assertion that pays: the
-inventory story's whole subject is that five peers were up and answering and none of them was asked.
+inventory story's whole subject is that the peers were up and answering and none of them was asked.
 Every story also pins `assertEdgeCount` and `assertOnlyEdgesFrom`, so a call appearing later shows
 rather than passing quietly.
 
@@ -327,16 +549,24 @@ sweep and by nothing else, so `StoryProfile` turns the scheduler back **on** and
 other timer at its own shipped key — both scan crons are `off` (the scheduler's own value for "do
 not register this trigger"), `scan.enabled=false`, and `bump.poll-interval=1s`. The sweep is a no-op
 whenever no bump is in flight, so the only stories it can reach are the two holding one open.
-**Two paths are therefore not covered by a story**: a SCHEDULED scan asking for the bumps it found
-(`bump.auto`), and `RestartRecovery` resuming a bump across a restart, which needs a second boot.
+**Two paths are therefore not covered by a story**: the nightly internal bump (`BumpSchedule`, which
+needs the cron this profile removes), and `RestartRecovery` resuming a bump across a restart, which
+needs a second boot.
 Both keep their coverage in `MaintenanceApiTest`, which drives `bumps.sweep()` by hand.
 
 **What the catalogue does not show, because this service does not do it.** There is no story of a
-commit being made, a file being written or a ref being pushed: this service decides and a CI step
-applies, so the furthest arrow out of it is a `MaintenanceBump` trigger. There is no `event` edge
-anywhere — the `SoftwareRelease` bus listener is deliberately a later release and v1 polls. And
-nothing here transitively resolves, orders an external base image or runs `ng update`; each is a
-decision recorded under "Deliberately not here yet", not a gap in the stories.
+commit being made, a file being written or a ref being pushed: this service decides, a CI step
+applies and a door releases, so the two furthest arrows out of it are a `MaintenanceBump` trigger and
+a release ASK — neither of which touches a tree. And nothing here
+transitively resolves, orders an external base image or runs `ng update`; each is a decision recorded
+under "Deliberately not here yet", not a gap in the stories.
+
+**There is still no `event` edge in any story, and that is now a gap rather than an absence.** The
+two bus listeners are real (see "The event bus" above), and `StoryProfile` inherits the parent
+profile's `qits.eventstream.enabled=false` — so the launched process dials nothing and no story
+walks an arriving frame. Covering one would mean a qits-events stand-in on the far side of a
+websocket, which is a stand-in of a different kind from the six `StoryPeers` and a decision worth
+making deliberately. The listeners' own coverage is `bus/*Test`, driving `onFrame` directly.
 
 ## The client
 
@@ -370,17 +600,27 @@ pom, because Quinoa is in no BOM and its version does not track the platform's.
 
 Each is a decision, not an omission:
 
-- **A `SoftwareRelease` listener.** Polling only in v1 — the bus listener that turns an internal
-  release into "pending" within seconds is the second release, and it arrives with the eventstream
-  vocabulary jar every announcing service has.
-- **Transitive dependencies.** A manifest holds direct pins and only those have a line to edit.
+- **Bumping a transitive.** They are READ now — see "The dependency graph" — and shown on the
+  repository page beside the pins. What is still not here is doing anything about one: a manifest
+  holds direct pins and only those have a line to edit, so a transitive upgrade means somebody
+  adding a managed version, which is a decision about their own build.
+- **Retrying a MISSING sbom.** A released version is immutable and a 404 is the ordinary permanent
+  answer for anything published before qits-artifacts had that route. `POST /artifacts/ingest` is
+  the manual move and there is no schedule behind it.
 - **External base image tags.** `FROM eclipse-temurin:…` — ordering tags across vendors is a later
   decision, and the mirror would answer with an upstream's whole tag history with no rule to rank
   it by. `FROM qits/*` is in scope.
 - **`ng update` and tool-driven upgrades.** A group carries `name` and `deps`, and the step edits
   lines. A migration is a person's job.
 - **Workspace creation.** Pushing the branch is the whole "merge request"; it is released through
-  the workspaces door like any other branch.
+  the workspaces door like any other branch — this service now asks that door itself.
+- **Polling the release request.** The door answers a `requestId` and this service stores it and
+  stops. What became of the request arrives as `SCMRelease` on the bus, and two mechanisms watching
+  one fact would be two ways to disagree about it. A request that is REJECTED or FAILED is therefore
+  visible only in qits-projects today.
+- **Automatic EXTERNAL bumps.** `qits.maintenance.bump.external.auto` exists so the deployment
+  surface does not change the day they are implemented, and is read only to WARN when it is set.
+  Somebody else's framework major is an opinion, and it stays a person's press.
 - **Cancelling a bump.** There is no route and no column. The CI run has its own cancel, and a bump
   row saying CANCELLED would be a claim this service cannot make about a step that may already have
   pushed.

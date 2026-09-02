@@ -7,7 +7,7 @@
     <parent>
         <groupId>eu.wohlben.qits</groupId>
         <artifactId>qits-platform-maintenance</artifactId>
-        <version>2026.901.190758</version>
+        <version>2026.902.53109</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -91,6 +91,36 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-smallrye-openapi</artifactId>
+        </dependency>
+        <dependency>
+            <!-- THE PLATFORM EVENT BUS, and joining it here is what turns this deployable into a
+                 subscriber. `service/…/bus/` holds the two durable listeners; the machinery — the
+                 outbox, the durable-consumer tables, the catch-up sweeper and the stream client —
+                 is all this jar's, configured by the defaults it ships at ordinal 100. The only
+                 thing this repository says about it is where it is DARK (application.properties)
+                 and where its database comes from (.config/qits/deployments.yml).
+
+                 IT ARRIVES IN `service` AND NOT IN `maintenance`, twice over: `bus/` is an inbound
+                 adapter exactly as `api/` is, and this jar brings a SECOND datasource with its own
+                 Flyway lineage — on the domain module's classpath every one of that module's
+                 @QuarkusTests would boot an outbox they have no use for.
+
+                 IT ADDS A MANDATORY DEPLOYMENT RESOURCE. `.config/qits/deployments.yml` declares
+                 `postgresql:eventstream:qits_platform_maintenance_eventstream`, and the resource
+                 NAME is load-bearing: the jar's own defaults read QITS_RESOURCE_EVENTSTREAM_URL /
+                 _USERNAME / _PASSWORD, whose names follow it. An unset variable leaves the
+                 expression unresolvable and the process refuses to boot rather than opening some
+                 fallback store. Being dark in %dev/%test does not change that — dark stops
+                 publishing, sweeping and dialling, never the datasource — which is why the suite
+                 hands out a second database (testdb/EmbeddedPgConfigSource) and why
+                 PackagedSurfaceIT supplies a second resource triple.
+
+                 It brings quarkus-websockets-next (the stream client), and quarkus-scheduler,
+                 which this module already had for the two crons. It does NOT bring a servlet
+                 stack — check with the dependency:tree line above before believing that of any
+                 other extension. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-eventstream</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>

@@ -3,14 +3,10 @@ package eu.wohlben.qits.maintenance.scan;
 import eu.wohlben.qits.maintenance.catalog.CatalogEntry;
 import eu.wohlben.qits.maintenance.catalog.CatalogReader;
 import eu.wohlben.qits.maintenance.config.MaintenanceConfig;
-import eu.wohlben.qits.maintenance.entity.MtGroup;
-import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
-import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.latest.LatestLookup;
 import eu.wohlben.qits.maintenance.latest.LatestResolver;
 import eu.wohlben.qits.maintenance.manifest.ManifestScanner;
-import eu.wohlben.qits.maintenance.model.BumpTrigger;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.PinKind;
 import eu.wohlben.qits.maintenance.model.RepositoryStatus;
@@ -18,7 +14,6 @@ import eu.wohlben.qits.maintenance.model.ScanScope;
 import eu.wohlben.qits.maintenance.model.ScanStatus;
 import eu.wohlben.qits.maintenance.pending.PendingChanges;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
-import eu.wohlben.qits.maintenance.bump.BumpService;
 import eu.wohlben.qits.maintenance.work.WorkQueue;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -31,8 +26,8 @@ import java.util.UUID;
 import org.jboss.logging.Logger;
 
 /**
- * A scan: read the catalog, re-read every repository's manifests, refresh the latest versions the
- * scope covers, and — on a schedule, when configured — ask for the bumps that fall out.
+ * A scan: read the catalog, re-read every repository's manifests, and refresh the latest versions
+ * the scope covers. That is the whole of it — it writes an inventory and asks for nothing.
  *
  * <p><b>The manifests are ALWAYS re-read, whatever the scope.</b> That is one git-host call per
  * repository plus a handful of blobs, and it is what keeps the inventory honest: a scope that
@@ -44,9 +39,15 @@ import org.jboss.logging.Logger;
  * the pins it had. A peer that could not be asked is not evidence that a repository stopped pinning
  * anything.
  *
- * <p><b>Auto-bump belongs to the SCHEDULE, not to the button.</b> A person pressing Scan is asking
- * what is out of date; a person who wants a branch presses Bump. The clock is the caller that has
- * standing instructions.
+ * <p><b>A SCAN NEVER BUMPS ANYTHING, whoever asked for it.</b> It used to: a SCHEDULED scan whose
+ * {@code bump.auto} was on asked for one bump per group it found pending, at the end of its own run.
+ * That is gone, and the reason is that it welded two decisions together. A scan is a READ — of the
+ * catalog, of every manifest, of half the registries — and its schedule is set by how fast those
+ * facts go stale; a bump is a WRITE into somebody else's repository, and its schedule is set by when
+ * a branch is welcome. Coupling them meant the external scan's 01:00 read decided when the internal
+ * half got a branch, and moving either cron moved the other's meaning. The clock still has standing
+ * instructions — they live in {@code schedule/BumpSchedule}, which reads the inventory this service
+ * wrote and asks for the bumps on its own cron.
  */
 @ApplicationScoped
 public class ScanService {
@@ -62,8 +63,6 @@ public class ScanService {
   @Inject MaintenanceStore store;
 
   @Inject MaintenanceConfig config;
-
-  @Inject BumpService bumps;
 
   @Inject WorkQueue queue;
 
@@ -81,7 +80,7 @@ public class ScanService {
     String what =
         "the " + trigger.name().toLowerCase(java.util.Locale.ROOT) + " " + scope + " scan " + id
             + (repository == null ? "" : " of " + repository);
-    queue.submit(what, () -> run(id, scope, repository, trigger, what));
+    queue.submit(what, () -> run(id, scope, repository, what));
     return id;
   }
 
@@ -93,9 +92,9 @@ public class ScanService {
    * RUNNING for ever — a scan that is not running and does not say so is worse than a failed one,
    * because nothing and nobody can tell the difference from a slow one.
    */
-  void run(UUID id, ScanScope scope, String repository, ScanTrigger trigger, String what) {
+  void run(UUID id, ScanScope scope, String repository, String what) {
     try {
-      scan(id, scope, repository, trigger, what);
+      scan(id, scope, repository, what);
     } catch (RuntimeException e) {
       LOG.errorf(e, "%s could not be completed", what);
       store.scanStatus(id, ScanStatus.FAILED, message(e), Instant.now());
@@ -103,7 +102,7 @@ public class ScanService {
   }
 
   /** What a scan does, with the row's ending left to {@link #run}. */
-  private void scan(UUID id, ScanScope scope, String repository, ScanTrigger trigger, String what) {
+  private void scan(UUID id, ScanScope scope, String repository, String what) {
     Instant now = Instant.now();
     store.scanStatus(id, ScanStatus.RUNNING, null, now);
     CatalogReader.Result read = catalog.read();
@@ -131,9 +130,6 @@ public class ScanService {
     }
     refreshLatest(scope, repository);
 
-    if (trigger == ScanTrigger.SCHEDULED && config.bumpEnabled() && config.bumpAuto()) {
-      autoBump(entries);
-    }
     LOG.infof("%s finished over %d repositories", what, entries.size());
     store.scanStatus(
         id,
@@ -214,46 +210,6 @@ public class ScanService {
         store.recordLatest(lookup.ecosystem(), lookup.name(), latest, Instant.now());
       } catch (RuntimeException e) {
         LOG.warnf("The latest of %s could not be written: %s", lookup.name(), e.toString());
-      }
-    }
-  }
-
-  /**
-   * One bump per group that has pending changes and no active bump.
-   *
-   * <p>A repository whose configuration did not parse is skipped outright — that is what
-   * CONFIG_ERROR means. A group already being bumped is skipped by the store's own check, which is
-   * where the refusal belongs; the exception is expected here and is not a fault.
-   */
-  private void autoBump(List<CatalogEntry> entries) {
-    Map<String, MtLatest> latest = PendingChanges.index(store.allLatest());
-    for (CatalogEntry entry : entries) {
-      Optional<MtRepository> row = store.repository(entry.name());
-      if (row.isEmpty() || !RepositoryStatus.OK.name().equals(row.get().status)) {
-        continue;
-      }
-      List<MtPin> pins = store.pins(entry.name());
-      List<MtGroup> groups = store.groups(entry.name());
-      Map<String, Integer> counts = PendingChanges.countByGroup(pins, latest, groups);
-      for (Map.Entry<String, Integer> count : counts.entrySet()) {
-        if (count.getValue() == 0) {
-          continue;
-        }
-        if (store.activeBump(entry.name(), count.getKey()).isPresent()) {
-          continue;
-        }
-        try {
-          UUID id = bumps.request(entry.name(), count.getKey(), BumpTrigger.SCHEDULED);
-          LOG.infof(
-              "Requested the scheduled bump %s of %s/%s (%d changes)",
-              id, entry.name(), count.getKey(), count.getValue());
-        } catch (RuntimeException e) {
-          // A refusal here is a branch somebody else is already writing, or a store that would not
-          // answer. Either way the next scan asks again.
-          LOG.warnf(
-              "Could not request the scheduled bump of %s/%s: %s",
-              entry.name(), count.getKey(), e.getMessage());
-        }
       }
     }
   }

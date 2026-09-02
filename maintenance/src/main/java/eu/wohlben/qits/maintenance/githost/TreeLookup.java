@@ -20,20 +20,45 @@ public record TreeLookup(
     FileLookup.Status status, String headSha, List<TreeEntry> entries, String message) {
 
   /**
-   * One entry of a tree. The git host reports two fields and no more — there is no per-entry sha
-   * and no path, because the listing is not recursive.
+   * One entry of a tree, and the two fields the git host reports beyond its name.
+   *
+   * <p><b>{@code type} is a two-valued collapse and always has been</b>: the host answers
+   * {@code tree} for a directory and {@code blob} for everything else, so a symlink and a submodule
+   * gitlink both arrive as {@code blob}. What tells a gitlink apart is the {@code mode} — git's
+   * {@code 160000} — or a host that answers the git object type {@code commit} in {@code type}.
+   * Both are read, because only one of them exists on the deployed git host at a time.
+   *
+   * <p><b>{@code sha} is the ENTRY's object name, not the commit's</b>, and for a gitlink it is the
+   * whole of what a submodule pin is. It is null on a host that does not report it, which is what
+   * makes a gitlink unpinnable there rather than pinnable at a wrong version — see
+   * {@code ManifestScanner}.
    *
    * @param name the entry's own name, not a path
-   * @param type {@code tree} or {@code blob}; a gitlink and a symlink both report {@code blob}
+   * @param type {@code tree}, {@code blob}, or {@code commit} on a host that spells a gitlink out
+   * @param mode the octal file mode as text ({@code 160000} for a gitlink), null when not reported
+   * @param sha the entry's object name, null when not reported
    */
-  public record TreeEntry(String name, String type) {
+  public record TreeEntry(String name, String type, String mode, String sha) {
+
+    /** Git's mode for a gitlink — a commit recorded inside a tree. */
+    public static final String GITLINK_MODE = "160000";
+
+    /** The two-field entry a git host without modes or shas answers. */
+    public TreeEntry(String name, String type) {
+      this(name, type, null, null);
+    }
 
     public boolean isBlob() {
-      return "blob".equals(type);
+      return "blob".equals(type) && !isGitlink();
     }
 
     public boolean isTree() {
       return "tree".equals(type);
+    }
+
+    /** Whether this entry is a submodule: the mode says so, or the type names a commit. */
+    public boolean isGitlink() {
+      return GITLINK_MODE.equals(mode) || "commit".equals(type);
     }
   }
 
@@ -60,5 +85,10 @@ public record TreeLookup(
   /** Whether the listing holds a blob of that exact name. */
   public boolean hasBlob(String name) {
     return entries.stream().anyMatch(entry -> entry.isBlob() && entry.name().equals(name));
+  }
+
+  /** The entry of that exact name, whatever its kind. */
+  public java.util.Optional<TreeEntry> entry(String name) {
+    return entries.stream().filter(entry -> entry.name().equals(name)).findFirst();
   }
 }

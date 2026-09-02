@@ -8,8 +8,13 @@ import jakarta.persistence.Table;
 import java.util.UUID;
 
 /**
- * One group of one repository: a name, which is also a branch, and the globs that claim pins for
- * it.
+ * One group of one repository: a name, which is also a branch, and what claims pins for it.
+ *
+ * <p><b>A group claims by KIND or by GLOB, never by both.</b> {@link #kind} set means the group
+ * takes every pin of that {@code PinKind} and {@link #patterns} is an empty array nothing reads;
+ * {@link #kind} null means the patterns decide. The two built-in groups a repository with no
+ * configuration gets — {@code dependencies} for INTERNAL, {@code external} for EXTERNAL — are the
+ * kind kind; a repository's own {@code .config/qits/maintenance.yml} declares the glob kind.
  *
  * <p><b>{@link #ordinal} carries the declaration order and is load-bearing.</b> A pin matching two
  * groups belongs to the FIRST one declared, so without this column "first" would be whatever order
@@ -33,9 +38,19 @@ public class MtGroup extends PanacheEntityBase {
   @Column(nullable = false)
   public int ordinal;
 
-  /** The globs as a JSON array of strings — read and written whole, never queried by. */
+  /**
+   * The globs as a JSON array of strings — read and written whole, never queried by. A kind group
+   * stores {@code []} here and nothing reads it.
+   */
   @Column(nullable = false, columnDefinition = "text")
   public String patterns;
+
+  /**
+   * {@code PinKind}'s names — INTERNAL or EXTERNAL — when this group claims by kind, null when it
+   * claims by glob. Nullable because the glob mechanism is the older of the two and stays.
+   */
+  @Column(length = 32)
+  public String kind;
 
   /** {@code GroupSource}'s names: CONFIG or DEFAULT. */
   @Column(nullable = false, length = 32)
