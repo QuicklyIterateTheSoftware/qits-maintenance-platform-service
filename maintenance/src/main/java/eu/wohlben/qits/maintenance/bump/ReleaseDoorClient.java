@@ -25,11 +25,12 @@ import java.util.Locale;
  * maintenance branch was released, from the {@code SCMRelease} the door publishes when it lands, and
  * two mechanisms watching one fact would be two ways to disagree about it.
  *
- * <p><b>The ask is CONVERGENT, which is what makes the rollout safe.</b> During the transition every
- * repository still carries {@code .config/qits/ci-event-maintenance-release.yml}, whose step fires on
- * the same push this bump caused; the door answers the second ask with the request the first made
- * ("created or converged"), so double-asking costs one HTTP call and nothing else. Those per-repo
- * triggers are removed at the end of the epic, and this becomes the only caller.
+ * <p><b>The ask is CONVERGENT, and that is what carried the rollout.</b> Through the transition every
+ * repository also carried {@code .config/qits/ci-event-maintenance-release.yml} (or the same step
+ * inline in {@code ci-post-receive.yml}), firing on the same push this bump caused; the door answers
+ * the second ask with the request the first made ("created or converged"), so double-asking cost one
+ * HTTP call and nothing else. Those per-repo triggers are gone as of 2026-09-03 and this is the only
+ * caller. Convergence stays because it is also what makes a retry of this call free.
  *
  * <h2>{@code expectedSha} pins the ask to what was built</h2>
  *

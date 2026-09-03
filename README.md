@@ -280,10 +280,10 @@ which is what writes `BranchState.RELEASED` (see *The event bus*).
   project's row id. The door resolves that segment by id first and then by slug, so the id addresses
   it — the same value `/git/<project>/<repo>` is read with. Nothing had to be added to the catalog
   read.
-- **The ask is CONVERGENT, which is what makes the rollout safe.** Every repository still carries
-  `.config/qits/ci-event-maintenance-release.yml`, whose step fires on the same push; the door
-  answers the second ask with the request the first made. Those triggers are removed at the end of
-  the epic and this becomes the only caller.
+- **The ask is CONVERGENT, and that is what carried the rollout.** Every repository also carried a
+  per-repo release trigger firing on the same push; the door answered the second ask with the
+  request the first made. Those triggers were removed on 2026-09-03 and this is the only caller
+  now — convergence stays because it is also what makes a retry of this call free.
 
 **`mt_bump.release_request_id` holds the answer, and NULL is the one value that means work is owed.**
 
@@ -596,7 +596,7 @@ claim is not optional — it is a route this service cannot use without it.
 | what | why |
 |---|---|
 | roles `qits:system`, `qits-platform:system` | the same pair qits-platform-orchestrator's client carries. It covers qits-projects' catalog, qits-githost's content policy, qits-ci's trigger and — since qits-ci a3ecce2 — the read-only run and repository routes the bump poller follows. |
-| a qits-workspaces carrying the widened door | **NEW, and it is a release over there rather than a grant here.** `POST /branches/release` now admits `qits:system` beside `qits:admin` (the pair the execute arm always had), so this client's ordinary machine grant opens it and no `qits:admin` lands on a service — the bootstrap's "qits:admin is a person's role" doctrine stands. Until that qits-workspaces release is deployed every release ask is a 403; that is retried rather than fatal, and the per-repo `ci-event-maintenance-release.yml` trigger still releases the branch in the meantime. |
+| a qits-workspaces carrying the widened door | **NEW, and it is a release over there rather than a grant here.** `POST /branches/release` now admits `qits:system` beside `qits:admin` (the pair the execute arm always had), so this client's ordinary machine grant opens it and no `qits:admin` lands on a service — the bootstrap's "qits:admin is a person's role" doctrine stands. Until that qits-workspaces release is deployed every release ask is a 403; that is retried rather than fatal. The per-repo triggers that covered that gap are gone as of 2026-09-03 — a refused ask now leaves the branch unreleased until the retry succeeds. |
 | claim `project` = `*` | qits-ci's trigger calls `machineAuth.requireProject("*")`, which passes only for a token literally granted every project. The bump names one repository but the trigger route demands them all. Today the only such grant is qits-platform-artifacts'; this service needs its own. |
 | audiences `<env>-qits-ci`, `qits-projects`, `qits-githost` | a token is cut for one service. qits-githost ships `qits.auth.machine.required=true`, so its content reads need a real bearer addressed to it. |
 | audience `qits-workspaces` | the release door. Not environment-qualified — qits-workspaces is platform tier like this service. |
