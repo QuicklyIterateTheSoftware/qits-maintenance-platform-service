@@ -15,9 +15,13 @@ import org.jboss.logging.Logger;
  * The catalog: every repository this service is responsible for.
  *
  * <p><b>qits-projects is the source of truth and nothing here caches it beyond one scan.</b> A
- * repository that leaves the catalog stops being scanned on the next run; its inventory rows stay
- * until somebody removes them, because a listing that briefly lost a name is not evidence that the
- * repository is gone.
+ * repository that leaves the catalog stops being scanned on the next run — and, since 2026-09-03,
+ * <b>its inventory follows it out</b>: a full scan marks the row ABSENT and drops its pins and its
+ * groups. See {@code ScanService.reconcile}. The old stance was that a listing which briefly lost a
+ * name is not evidence that a repository is gone; what that produced was 96 rows against a catalog
+ * of 48 and a nightly bump asking qits-ci for branches on names nobody holds. The doubt is answered
+ * where it belongs instead — a read that FAILED and a read that listed NOTHING both reconcile
+ * nothing at all, so only a listing this service actually believes is ever acted on.
  *
  * <p><b>A row with no name is skipped.</b> qits-projects lists rows whose alias is not set, and
  * every read this service makes is name-addressed — there is no address for such a row, so it is

@@ -71,6 +71,20 @@ inventory alone — a peer that could not be asked is not evidence that a reposi
 anything, and wiping on every hiccup would make "pending" flicker to zero whenever the git host
 restarted.
 
+**A repository the CATALOG dropped does not, and that is the opposite case rather than the same
+one.** `ScanService.reconcile` marks every unlisted row ABSENT with `dropped from the catalog` and
+deletes its `mt_pin` and `mt_group` rows; the row itself, its `catalog_id` and the three log tables
+stay. The scan used to only ever upsert, so a rename left the old name at OK with its pins for ever
+— **measured 2026-09-03**: 96 rows against a catalog of 48, ~800 pending, and 23 of the first 30
+nightly bumps FAILED with `no run recorded for MaintenanceBump` against ghosts. The difference
+between the two rules is the EVIDENCE: an unreachable git host says nothing about anything, while a
+catalog that answered its whole listing and did not name a repository has said something. That is
+why the three refusals are absolute — a scan of ONE repository never reconciles (a listing of one is
+evidence about one, and `ScanTrigger.EVENT` fires it on every push), a FAILED catalog read never
+does, and a listing that is EMPTY never does. The last is spelled twice, in `ScanService` and again
+in `MaintenanceStore.reconcileCatalog`, because reconciling against nothing empties the whole store
+in one transaction. `ScanReconciliationTest` is where all five arms are pinned.
+
 ## Parsers
 
 **XML-aware, never a regular expression.** A pom is read to find WHERE a version is set, and the

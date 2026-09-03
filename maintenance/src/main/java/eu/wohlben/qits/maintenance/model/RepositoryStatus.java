@@ -10,7 +10,20 @@ public enum RepositoryStatus {
   /** Scanned; the pins in {@code mt_pin} are this repository's, at {@code head_sha}. */
   OK,
 
-  /** The catalog names it but the git host has no such repository, or it has no {@code main}. */
+  /**
+   * There is nothing to scan, for one of two reasons, and the row's message says which.
+   *
+   * <ul>
+   *   <li>the catalog names it and the git host has no such repository, or it has no {@code main};
+   *   <li><b>the catalog no longer names it at all</b> — a rename or a removal, found by a full
+   *       scan reconciling the inventory against the listing. The row is KEPT so the name still
+   *       answers honestly and so {@code catalog_id} survives for the graph rows that translate
+   *       through it, but its pins and its groups are gone: a repository the catalog dropped has no
+   *       line anybody can edit and contributes no pending change.
+   * </ul>
+   *
+   * <p>Either way the pins are gone, and the clock never bumps a row that is not {@link #OK}.
+   */
   ABSENT,
 
   /** The git host could not be asked. The previous scan's pins are left standing — an unreachable

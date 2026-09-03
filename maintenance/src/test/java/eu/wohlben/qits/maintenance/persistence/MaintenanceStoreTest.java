@@ -43,6 +43,10 @@ class MaintenanceStoreTest {
 
   @Inject MaintenanceStore store;
 
+  /** The sentence a dropped row carries. The shipped one is {@code ScanService}'s; the store takes
+   * whatever its caller hands it, so the tests here supply their own. */
+  private static final String DROPPED = "dropped from the catalog";
+
   private static ParsedPin pin(String name, String version, String location) {
     return ParsedPin.of(Ecosystem.MAVEN, "pom.xml", name, version, null, location);
   }
@@ -190,6 +194,112 @@ class MaintenanceStoreTest {
     MtRepository row = store.repository(repository).orElseThrow();
     assertEquals(catalogId, row.catalogId);
     assertEquals("sha2", row.headSha);
+  }
+
+  /**
+   * <b>THE INVENTORY FOLLOWS THE CATALOG OUT.</b> A row the listing does not name goes ABSENT and
+   * loses the two tables that are a cache of the catalog's world; the row itself, its
+   * {@code catalog_id} and the log tables stay.
+   *
+   * <p><b>The listing is built from the store rather than written out by hand</b>, and that is not
+   * fussiness: reconciliation is global by nature and this class shares one database across its
+   * methods, so a hand-written listing would drop every other test's repository as a side effect.
+   */
+  @Test
+  void aRepositoryTheCatalogNoLongerListsGoesAbsentAndLosesItsPinsAndGroups() {
+    String kept = "kept-" + UUID.randomUUID();
+    String ghost = "ghost-" + UUID.randomUUID();
+    String catalogId = UUID.randomUUID().toString();
+    scanned(kept, null, "1.0.0");
+    scanned(ghost, catalogId, "1.0.0");
+
+    List<String> listing = everyRepositoryExcept(ghost);
+    List<String> dropped = store.reconcileCatalog(listing, DROPPED, Instant.now());
+
+    assertEquals(List.of(ghost), dropped, "only the unlisted row is reported");
+    MtRepository row =
+        store
+            .repository(ghost)
+            .orElseThrow(() -> new AssertionError("the row is KEPT, so the name still answers"));
+    assertEquals(RepositoryStatus.ABSENT.name(), row.status);
+    assertEquals(DROPPED, row.message);
+    // The translation every mt_artifact row written under another context's spelling still needs.
+    assertEquals(catalogId, row.catalogId, "the catalog_id survives the drop");
+    assertTrue(store.pins(ghost).isEmpty(), "a repository the catalog dropped pins nothing");
+    assertTrue(store.groups(ghost).isEmpty(), "and offers the clock no group to bump");
+
+    // The listed one is untouched — reconciliation is about absence and nothing else.
+    assertEquals(RepositoryStatus.OK.name(), store.repository(kept).orElseThrow().status);
+    assertEquals(1, store.pins(kept).size());
+
+    // And the next night says nothing new about it: the write is idempotent, the report is not.
+    assertTrue(
+        store.reconcileCatalog(listing, DROPPED, Instant.now()).isEmpty(),
+        "a row already dropped for this reason is not reported again");
+  }
+
+  /**
+   * <b>THE GUARD WITH TEETH.</b> An empty listing would mark every repository on the platform absent
+   * and wipe every pin in one transaction — which is exactly what a catalog answering
+   * {@code {"repositories":[]}} looks like from here. The caller refuses it a line earlier; this is
+   * the belt under that brace, because the cost of the two disagreeing is the whole store.
+   */
+  @Test
+  void anEmptyOrAbsentListingReconcilesNothingAtAll() {
+    String repository = "no-listing-" + UUID.randomUUID();
+    scanned(repository, null, "1.0.0");
+
+    assertTrue(store.reconcileCatalog(List.of(), DROPPED, Instant.now()).isEmpty());
+    assertTrue(store.reconcileCatalog(null, DROPPED, Instant.now()).isEmpty());
+
+    MtRepository row = store.repository(repository).orElseThrow();
+    assertEquals(RepositoryStatus.OK.name(), row.status, "nothing was marked");
+    assertEquals(1, store.pins(repository).size(), "and nothing was wiped");
+  }
+
+  /**
+   * A repository that comes BACK needs nothing of its own: the ordinary upsert path writes OK over
+   * the ABSENT row with fresh pins and fresh groups, which is what makes the drop safe to make.
+   */
+  @Test
+  void aRepositoryThatReturnsToTheCatalogIsScannedBackToOk() {
+    String repository = "returning-" + UUID.randomUUID();
+    scanned(repository, null, "1.0.0");
+    store.reconcileCatalog(everyRepositoryExcept(repository), DROPPED, Instant.now());
+    assertEquals(RepositoryStatus.ABSENT.name(), store.repository(repository).orElseThrow().status);
+
+    scanned(repository, null, "2.0.0");
+
+    MtRepository row = store.repository(repository).orElseThrow();
+    assertEquals(RepositoryStatus.OK.name(), row.status);
+    assertNull(row.message, "and the drop's sentence goes with the status");
+    assertEquals(List.of("2.0.0"), store.pins(repository).stream().map(p -> p.version).toList());
+    assertEquals(1, store.groups(repository).size(), "with its groups back");
+  }
+
+  /** One repository as a successful scan of it would leave it: one pin, one group, OK. */
+  private void scanned(String repository, String catalogId, String version) {
+    store.replaceInventory(
+        repository,
+        "qits",
+        catalogId,
+        "main",
+        RepositoryStatus.OK,
+        "sha1",
+        null,
+        List.of(pin("g:a", version, "dependency:g:a")),
+        List.of(GroupConfig.Group.ofKind("dependencies", PinKind.INTERNAL)),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+  }
+
+  /** The catalog listing that drops exactly one name and leaves this database's others standing. */
+  private List<String> everyRepositoryExcept(String dropped) {
+    return store.repositories().stream()
+        .map(row -> row.name)
+        .filter(name -> !name.equals(dropped))
+        .toList();
   }
 
   @Test

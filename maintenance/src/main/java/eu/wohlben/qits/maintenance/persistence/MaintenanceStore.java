@@ -207,6 +207,82 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
         });
   }
 
+  /**
+   * <b>THE INVENTORY FOLLOWS THE CATALOG OUT, NOT ONLY IN.</b> Every row whose name the catalog no
+   * longer lists is marked {@link RepositoryStatus#ABSENT} and loses its pins and its groups.
+   *
+   * <p>Until 2026-09-03 a scan only ever UPSERTED what the catalog listed, so a repository that was
+   * renamed or deleted kept the status, the pins and the groups of the last scan that found it —
+   * for ever, because nothing else writes those rows. Measured on the first nightly bump: 96
+   * repository rows against a catalog of 48, ~800 pending changes counted against pins nothing can
+   * edit, and 23 of 30 bumps FAILED with {@code no run recorded for MaintenanceBump} because the
+   * clock was bumping pre-rename ghosts (qits-spa-artifacts, qits-stt, qits-projects,
+   * qits-platform-spa-*). An inventory is a CACHE of the catalog's world, and a cache that only ever
+   * grows is not one.
+   *
+   * <p><b>The row is KEPT rather than deleted</b>, and that is the point of ABSENT existing as a
+   * status. The name still answers on {@code GET /repositories/{name}} with an honest sentence
+   * instead of a 404 that says nothing about why, and {@code catalog_id} — the translation every
+   * {@code mt_artifact} row written under another context's spelling still needs — survives with it.
+   *
+   * <p><b>The pins and the groups go</b>, because they are the cache: a repository the catalog
+   * dropped contributes no pending change, offers the clock no group to bump (see {@code
+   * BumpSchedule}, which additionally skips everything that is not OK), and has no line anybody
+   * could edit. <b>{@code mt_branch} is left standing</b>, with {@code mt_scan} and {@code mt_bump}:
+   * those three are the LOG of what was asked and what came back, derivable from nothing, and a
+   * repository leaving the catalog does not un-push a branch that was pushed.
+   *
+   * <p><b>A repository that RETURNS needs nothing from here.</b> The next scan lists it again and
+   * {@link #replaceInventory} writes OK with fresh pins and fresh groups over the ABSENT row.
+   *
+   * <p><b>An empty listing reconciles NOTHING</b>, whatever the caller believes it read. That is the
+   * one failure mode with teeth — a catalog that answered `[]`, or a caller that reached here with a
+   * partial listing, would mark the whole inventory absent and wipe every pin in one transaction.
+   * The caller guards it too (a scan of a single repository never calls this, and a failed catalog
+   * read closes the scan before it gets here); this is the belt under that brace, because the cost
+   * of the two guards disagreeing is the whole store.
+   *
+   * @param listed every name the catalog answered — the WHOLE catalog, never a filtered subset
+   * @param message the sentence the dropped rows carry
+   * @return the names newly dropped, which is what is worth a log line; a row already ABSENT for
+   *     this reason is rewritten idempotently and not reported again
+   */
+  @ActivateRequestContext
+  public List<String> reconcileCatalog(
+      java.util.Collection<String> listed, String message, Instant now) {
+    if (listed == null || listed.isEmpty()) {
+      return List.of();
+    }
+    List<String> names = List.copyOf(listed);
+    return DbRetry.inNewTx(
+        "reconcile the inventory against the catalog",
+        () -> {
+          List<MtRepository> gone = find("name not in ?1", names).list();
+          if (gone.isEmpty()) {
+            return List.<String>of();
+          }
+          List<String> dropped = new java.util.ArrayList<>();
+          List<String> absent = new java.util.ArrayList<>();
+          for (MtRepository row : gone) {
+            // NEWLY dropped, so a nightly scan does not report the same twenty-three names for ever.
+            if (!RepositoryStatus.ABSENT.name().equals(row.status)
+                || !java.util.Objects.equals(message, row.message)) {
+              dropped.add(row.name);
+            }
+            row.status = RepositoryStatus.ABSENT.name();
+            row.message = message;
+            row.lastScanAt = now;
+            absent.add(row.name);
+          }
+          // Two bulk deletes rather than two per row: this runs over the whole inventory on every
+          // full scan, and the updates above are flushed by the first query anyway.
+          MtPin.delete("repository in ?1", absent);
+          MtGroup.delete("repository in ?1", absent);
+          getEntityManager().flush();
+          return List.copyOf(dropped);
+        });
+  }
+
   /** One dependency's latest, written whether the lookup succeeded or failed. */
   @ActivateRequestContext
   public void recordLatest(Ecosystem ecosystem, String name, LatestLookup lookup, Instant now) {

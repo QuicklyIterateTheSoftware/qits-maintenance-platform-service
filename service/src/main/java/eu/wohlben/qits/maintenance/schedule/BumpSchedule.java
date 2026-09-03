@@ -67,7 +67,13 @@ import org.jboss.logging.Logger;
  *   <li><b>a repository whose status is not OK</b> — UNREACHABLE means the git host could not be
  *       read and the pins are yesterday's, CONFIG_ERROR means the repository's own grouping file did
  *       not parse and a payload composed against the fallback would land on a branch its author
- *       configured against;
+ *       configured against, and <b>ABSENT means there is no such repository to bump</b> — either the
+ *       git host does not hold it or the catalog stopped listing it. That last one is what the first
+ *       live run of this schedule found out the hard way on 2026-09-03: 30 bumps asked for, 23
+ *       FAILED with {@code no run recorded for MaintenanceBump} against pre-rename ghosts whose rows
+ *       nothing had ever reconciled away. This filter was already right; what was wrong was that a
+ *       ghost's status still said OK. The fix is {@code ScanService.reconcile}, and this line is
+ *       what makes it enough;
  *   <li><b>a group with an active bump</b> — one branch, one writer. The store refuses it anyway,
  *       inside the transaction where the refusal belongs; the read here is what keeps the ordinary
  *       case out of the log as an exception.

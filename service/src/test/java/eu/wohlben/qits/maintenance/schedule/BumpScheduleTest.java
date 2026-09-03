@@ -155,6 +155,40 @@ class BumpScheduleTest {
     assertTrue(bumpsOf("dependencies").isEmpty(), "only an OK repository is bumped by the clock");
   }
 
+  /**
+   * <b>THE GHOST TEST, AND IT IS THE ONE THIS SCHEDULE WAS TAUGHT BY.</b> The first live run asked
+   * for 30 bumps and 23 came back FAILED with {@code no run recorded for MaintenanceBump} — every
+   * one of them a pre-rename name whose row a scan had upserted months ago and nothing had ever
+   * reconciled away. This filter was already correct; what was wrong was that a repository the
+   * catalog had dropped still said OK.
+   *
+   * <p>So this drives the real seam rather than writing an ABSENT row by hand: the catalog stops
+   * listing the repository, a full scan reconciles it, and the clock finds nothing to ask for.
+   */
+  @Test
+  void aRepositoryTheCatalogDroppedIsNeverBumped() {
+    scan();
+
+    // The catalog now names somebody else entirely — a rename, which is what the live outage was.
+    peers.answer(
+        eu.wohlben.qits.maintenance.peer.PeerTarget.PROJECTS,
+        eu.wohlben.qits.maintenance.catalog.CatalogReader.PATH,
+        FakePeers.Scripted.ok(
+            "{\"repositories\":[{\"id\":\"r9\",\"projectId\":\"" + Fixture.PROJECT
+                + "\",\"name\":\"qits-ci-service\",\"mainBranch\":\"main\"}]}"));
+    scan();
+
+    schedule.onInternalSchedule();
+
+    assertEquals(
+        RepositoryStatus.ABSENT.name(),
+        store.repository(Fixture.REPOSITORY).orElseThrow().status,
+        "the scan dropped it");
+    assertTrue(
+        bumpsOf("dependencies").isEmpty(),
+        "a repository the catalog no longer lists has nothing the clock may bump");
+  }
+
   /** A group with nothing pending is not a bump that finds nothing — it is no bump at all. */
   @Test
   void aGroupWithNothingPendingIsNotAskedFor() {
