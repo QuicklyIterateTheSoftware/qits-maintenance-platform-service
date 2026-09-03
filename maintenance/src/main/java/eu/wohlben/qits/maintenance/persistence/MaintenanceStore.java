@@ -46,11 +46,30 @@ import java.util.UUID;
  * thread and a Hibernate session is bound to that context. A route's call already has one and
  * activating a second is a no-op, so one annotation covers both callers.
  *
- * <p><b>Every write is a {@code DbRetry.inNewTx}.</b> {@code inNewTx} owns the transaction
- * boundary, which is the only way a retry can tell "the body threw, so it certainly never
- * committed" from "the transaction manager reported it" — Narayana spells a lost commit and a real
- * rollback with the same exception. Each write ends with a flush, which keeps a lost connection on
- * the body's side of that line.
+ * <p><b>Every METHOD is a {@code DbRetry.inNewTx} — reads included.</b> {@code inNewTx} owns the
+ * transaction boundary, which is the only way a retry can tell "the body threw, so it certainly
+ * never committed" from "the transaction manager reported it" — Narayana spells a lost commit and a
+ * real rollback with the same exception. Each write ends with a flush, which keeps a lost connection
+ * on the body's side of that line.
+ *
+ * <p><b>And the reads are in for a second reason, which is why the rule is UNIFORM rather than
+ * audited.</b> A durable bus frame is handled INSIDE the eventstream datasource's claim
+ * transaction. A BARE read on this datasource from that path enlists a second, non-XA connection
+ * into that claim — and the next {@code inNewTx} then dies on "failed to enlist / exception in
+ * association of connection to existing transaction", the frame is classified retryable, and the
+ * consumer wedges for ever behind one frame. That was measured twice: 2026-09-02, through the graph
+ * fix's new {@code repositoryName} read, and again on 2026-09-03 through {@link #groups(String)},
+ * reached from {@code ScmEventListener.onMaintenanceBranchReleased}. The first fix spot-audited the
+ * four methods a listener was then known to touch; the second wedge came through a fifth. <b>Spot-
+ * auditing has failed twice, so it is not the rule any more</b> — a read from a bus path must never
+ * enlist this datasource into somebody else's claim transaction, and the only way to know that of
+ * every method is for every method to own its transaction. A caller that is not a listener pays one
+ * transaction it did not need, which is the cheap side of this trade.
+ *
+ * <p>The entities here are flat — every column a scalar, no association and nothing LAZY — so an
+ * entity read inside its own transaction is fully materialized before it detaches, and every listing
+ * is a {@code list()} taken inside the same boundary. Nothing outside this class mutates a row it
+ * was handed.
  *
  * <p><b>One repository's inventory is replaced in ONE transaction.</b> Pins and groups are deleted
  * and rewritten together with the row that carries the sha they were read at; a scan that committed
@@ -284,12 +303,11 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
 
   @ActivateRequestContext
   public List<MtRepository> repositories() {
-    return listAll(Sort.by("name"));
+    return DbRetry.inNewTx("read every repository row", () -> listAll(Sort.by("name")));
   }
 
   @ActivateRequestContext
   public Optional<MtRepository> repository(String name) {
-    // Own transaction for the outage-class reason on repositoryName above: listeners read this.
     return DbRetry.inNewTx(
         "read one repository row", () -> Optional.ofNullable(findById(name)));
   }
@@ -321,12 +339,8 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
     if (spelling == null || spelling.isBlank()) {
       return spelling;
     }
-    // In its OWN transaction, like every write below — measured outage 2026-09-02: this method's
-    // caller is a durable listener, whose frame arrives inside the eventstream datasource's claim
-    // transaction. A bare read here enlists THIS datasource's connection into that transaction,
-    // and the next inNewTx write then trips "failed to enlist / used without active transaction"
-    // — every frame retryable, the consumer wedged behind one frame for hours. No listener-reached
-    // store method may touch this datasource outside its own transaction; reads included.
+    // In its own transaction like every other method here — this one is where the wedge was first
+    // measured (2026-09-02). See the class doctrine.
     return DbRetry.inNewTx(
         "resolve a repository spelling",
         () -> {
@@ -337,28 +351,46 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
 
   @ActivateRequestContext
   public List<MtPin> pins(String repository) {
-    return MtPin.find("repository = ?1", Sort.by("manifestPath").and("name"), repository).list();
+    return DbRetry.inNewTx(
+        "read the pins of one repository",
+        () ->
+            MtPin.find("repository = ?1", Sort.by("manifestPath").and("name"), repository).list());
   }
 
   @ActivateRequestContext
   public List<MtPin> allPins() {
-    return MtPin.findAll(Sort.by("repository").and("manifestPath").and("name")).list();
+    return DbRetry.inNewTx(
+        "read every pin",
+        () -> MtPin.findAll(Sort.by("repository").and("manifestPath").and("name")).list());
   }
 
+  /**
+   * The groups one repository declares, in the order they claim pins in.
+   *
+   * <p>This is the read the second wedge came through — {@code
+   * ScmEventListener.onMaintenanceBranchReleased} asks it about a released maintenance branch, one
+   * line after a read that already owned its transaction. See the class doctrine.
+   */
   @ActivateRequestContext
   public List<MtGroup> groups(String repository) {
-    return MtGroup.find("repository = ?1", Sort.by("ordinal"), repository).list();
+    return DbRetry.inNewTx(
+        "read the groups of one repository",
+        () -> MtGroup.find("repository = ?1", Sort.by("ordinal"), repository).list());
   }
 
   @ActivateRequestContext
   public List<MtLatest> allLatest() {
-    return MtLatest.listAll();
+    return DbRetry.inNewTx("read every latest row", () -> MtLatest.listAll());
   }
 
   @ActivateRequestContext
   public Optional<MtLatest> latest(Ecosystem ecosystem, String name) {
-    return Optional.ofNullable(
-        MtLatest.find("ecosystem = ?1 and name = ?2", ecosystem.wireName(), name).firstResult());
+    return DbRetry.inNewTx(
+        "read the latest of one dependency",
+        () ->
+            Optional.ofNullable(
+                MtLatest.find("ecosystem = ?1 and name = ?2", ecosystem.wireName(), name)
+                    .firstResult()));
   }
 
   // --- scans --------------------------------------------------------------------------------
@@ -446,7 +478,6 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
    */
   @ActivateRequestContext
   public boolean scanPending(String repository) {
-    // Own transaction: the push-rescan listener asks this. See repositoryName.
     return DbRetry.inNewTx(
         "count pending scans",
         () ->
@@ -459,25 +490,29 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
 
   @ActivateRequestContext
   public Optional<MtScan> scan(UUID id) {
-    return Optional.ofNullable(MtScan.findById(id));
+    return DbRetry.inNewTx(
+        "read one scan row", () -> Optional.ofNullable(MtScan.findById(id)));
   }
 
   /** The newest scans. */
   @ActivateRequestContext
   public List<MtScan> scans(int limit) {
-    return MtScan.findAll(Sort.by("startedAt").descending()).page(0, limit).list();
+    return DbRetry.inNewTx(
+        "read the newest scans",
+        () -> MtScan.findAll(Sort.by("startedAt").descending()).page(0, limit).list());
   }
 
   // --- branches -----------------------------------------------------------------------------
 
   @ActivateRequestContext
   public List<MtBranch> branches(String repository) {
-    return MtBranch.find("repository = ?1", Sort.by("groupName"), repository).list();
+    return DbRetry.inNewTx(
+        "read the branches of one repository",
+        () -> MtBranch.find("repository = ?1", Sort.by("groupName"), repository).list());
   }
 
   @ActivateRequestContext
   public Optional<MtBranch> branch(String repository, String group) {
-    // Own transaction: the branch-tracking listener asks this. See repositoryName.
     return DbRetry.inNewTx(
         "read one branch row",
         () ->
@@ -654,42 +689,58 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
    */
   @ActivateRequestContext
   public List<MtBump> bumpsOwedARelease() {
-    return MtBump.find(
-            "status = ?1 and releaseRequestId is null",
-            Sort.by("startedAt"),
-            BumpStatus.SUCCEEDED.name())
-        .list();
+    return DbRetry.inNewTx(
+        "read the bumps owed a release ask",
+        () ->
+            MtBump.find(
+                    "status = ?1 and releaseRequestId is null",
+                    Sort.by("startedAt"),
+                    BumpStatus.SUCCEEDED.name())
+                .list());
   }
 
   @ActivateRequestContext
   public Optional<MtBump> bump(UUID id) {
-    return Optional.ofNullable(MtBump.findById(id));
+    return DbRetry.inNewTx(
+        "read one bump row", () -> Optional.ofNullable(MtBump.findById(id)));
   }
 
   /** The newest bumps, of one repository or of all of them. */
   @ActivateRequestContext
   public List<MtBump> bumps(String repository, int limit) {
-    Sort newestFirst = Sort.by("startedAt").descending();
-    if (repository == null || repository.isBlank()) {
-      return MtBump.findAll(newestFirst).page(0, limit).list();
-    }
-    return MtBump.find("repository = ?1", newestFirst, repository).page(0, limit).list();
+    return DbRetry.inNewTx(
+        "read the newest bumps",
+        () -> {
+          Sort newestFirst = Sort.by("startedAt").descending();
+          if (repository == null || repository.isBlank()) {
+            List<MtBump> all = MtBump.findAll(newestFirst).page(0, limit).list();
+            return all;
+          }
+          List<MtBump> ofOne =
+              MtBump.find("repository = ?1", newestFirst, repository).page(0, limit).list();
+          return ofOne;
+        });
   }
 
   /** Every bump that has not ended — what the poller drives. */
   @ActivateRequestContext
   public List<MtBump> activeBumps() {
-    return MtBump.find(
-            "status in ?1",
-            Sort.by("startedAt"),
-            List.of(BumpStatus.REQUESTED.name(), BumpStatus.RUNNING.name()))
-        .list();
+    return DbRetry.inNewTx(
+        "read the bumps still running",
+        () ->
+            MtBump.find(
+                    "status in ?1",
+                    Sort.by("startedAt"),
+                    List.of(BumpStatus.REQUESTED.name(), BumpStatus.RUNNING.name()))
+                .list());
   }
 
   /** The bump holding one branch's lock, if there is one. */
   @ActivateRequestContext
   public Optional<MtBump> activeBump(String repository, String group) {
-    return Optional.ofNullable(activeBumpRow(repository, group));
+    return DbRetry.inNewTx(
+        "read the active bump of one group",
+        () -> Optional.ofNullable(activeBumpRow(repository, group)));
   }
 
   private static MtBump activeBumpRow(String repository, String group) {
@@ -883,18 +934,25 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
   /** Every artifact still waiting for its document — what the sweep re-queues. */
   @ActivateRequestContext
   public List<MtArtifact> pendingArtifacts() {
-    return MtArtifact.find("sbomStatus = ?1", Sort.by("occurredAt"), SbomStatus.PENDING.name())
-        .list();
+    return DbRetry.inNewTx(
+        "read the artifacts still owed an sbom",
+        () ->
+            MtArtifact.find(
+                    "sbomStatus = ?1", Sort.by("occurredAt"), SbomStatus.PENDING.name())
+                .list());
   }
 
   @ActivateRequestContext
   public Optional<MtArtifact> artifact(UUID id) {
-    return Optional.ofNullable(MtArtifact.findById(id));
+    return DbRetry.inNewTx(
+        "read one artifact row", () -> Optional.ofNullable(MtArtifact.findById(id)));
   }
 
   @ActivateRequestContext
   public Optional<MtArtifact> artifact(Ecosystem ecosystem, String name, String version) {
-    return Optional.ofNullable(artifactRow(ecosystem, name, version));
+    return DbRetry.inNewTx(
+        "read one artifact by coordinate",
+        () -> Optional.ofNullable(artifactRow(ecosystem, name, version)));
   }
 
   private static MtArtifact artifactRow(Ecosystem ecosystem, String name, String version) {
@@ -929,41 +987,49 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
   @ActivateRequestContext
   public List<Dependent> dependents(
       Ecosystem ecosystem, String name, boolean newestPerArtifactOnly) {
-    List<MtArtifactComponent> components =
-        MtArtifactComponent.find("ecosystem = ?1 and name = ?2", ecosystem.wireName(), name).list();
-    if (components.isEmpty()) {
-      return List.of();
-    }
-    List<UUID> artifactIds =
-        components.stream().map(component -> component.artifactId).distinct().toList();
-    Map<UUID, MtArtifact> artifacts = new LinkedHashMap<>();
-    for (MtArtifact row : MtArtifact.<MtArtifact>find("id in ?1", artifactIds).list()) {
-      artifacts.put(row.id, row);
-    }
+    return DbRetry.inNewTx(
+        "read the dependents of " + name,
+        () -> {
+          // BOTH reads inside the one transaction, which they wanted anyway: the second is keyed by
+          // what the first answered.
+          List<MtArtifactComponent> components =
+              MtArtifactComponent.find(
+                      "ecosystem = ?1 and name = ?2", ecosystem.wireName(), name)
+                  .list();
+          if (components.isEmpty()) {
+            return List.<Dependent>of();
+          }
+          List<UUID> artifactIds =
+              components.stream().map(component -> component.artifactId).distinct().toList();
+          Map<UUID, MtArtifact> artifacts = new LinkedHashMap<>();
+          for (MtArtifact row : MtArtifact.<MtArtifact>find("id in ?1", artifactIds).list()) {
+            artifacts.put(row.id, row);
+          }
 
-    List<Dependent> found = new java.util.ArrayList<>();
-    for (MtArtifactComponent component : components) {
-      MtArtifact artifact = artifacts.get(component.artifactId);
-      if (artifact != null) {
-        found.add(new Dependent(artifact, component));
-      }
-    }
-    // The dependent name, then newest first — the order the API serves and the order the
-    // newest-per-name filter below reads.
-    found.sort(dependentOrder());
-    if (!newestPerArtifactOnly) {
-      return List.copyOf(found);
-    }
-    List<Dependent> newest = new java.util.ArrayList<>();
-    String previous = null;
-    for (Dependent dependent : found) {
-      String key = dependent.artifact().ecosystem + " " + dependent.artifact().name;
-      if (!key.equals(previous)) {
-        newest.add(dependent);
-        previous = key;
-      }
-    }
-    return List.copyOf(newest);
+          List<Dependent> found = new java.util.ArrayList<>();
+          for (MtArtifactComponent component : components) {
+            MtArtifact artifact = artifacts.get(component.artifactId);
+            if (artifact != null) {
+              found.add(new Dependent(artifact, component));
+            }
+          }
+          // The dependent name, then newest first — the order the API serves and the order the
+          // newest-per-name filter below reads.
+          found.sort(dependentOrder());
+          if (!newestPerArtifactOnly) {
+            return List.copyOf(found);
+          }
+          List<Dependent> newest = new java.util.ArrayList<>();
+          String previous = null;
+          for (Dependent dependent : found) {
+            String key = dependent.artifact().ecosystem + " " + dependent.artifact().name;
+            if (!key.equals(previous)) {
+              newest.add(dependent);
+              previous = key;
+            }
+          }
+          return List.copyOf(newest);
+        });
   }
 
   /** Dependent name ascending, then the newest release of it first. */
@@ -987,22 +1053,32 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
    */
   @ActivateRequestContext
   public List<MtArtifact> newestArtifactPerName() {
-    List<MtArtifact> all =
-        MtArtifact.findAll(Sort.by("ecosystem").and("name").and("occurredAt", Sort.Direction.Descending))
-            .list();
-    List<MtArtifact> newest = new java.util.ArrayList<>();
-    String previous = null;
-    for (MtArtifact row : all) {
-      String key = row.ecosystem + " " + row.name;
-      if (!key.equals(previous)) {
-        newest.add(row);
-        previous = key;
-      }
-    }
-    return List.copyOf(newest);
+    return DbRetry.inNewTx(
+        "read the newest artifact per name",
+        () -> {
+          List<MtArtifact> all =
+              MtArtifact.findAll(
+                      Sort.by("ecosystem").and("name").and("occurredAt", Sort.Direction.Descending))
+                  .list();
+          List<MtArtifact> newest = new java.util.ArrayList<>();
+          String previous = null;
+          for (MtArtifact row : all) {
+            String key = row.ecosystem + " " + row.name;
+            if (!key.equals(previous)) {
+              newest.add(row);
+              previous = key;
+            }
+          }
+          return List.copyOf(newest);
+        });
   }
 
-  /** Every artifact one repository has released, newest first. */
+  /**
+   * Every artifact one repository has released, newest first.
+   *
+   * <p>A pure delegate — the transaction is the one the overload below opens, and opening a second
+   * around this call would be two boundaries for one read.
+   */
   @ActivateRequestContext
   public List<MtArtifact> artifactsOfRepository(String repository) {
     return artifactsOfRepository(List.of(repository));
@@ -1021,26 +1097,37 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
     if (spellings == null || spellings.isEmpty()) {
       return List.of();
     }
-    return MtArtifact.find(
-            "repository in ?1",
-            Sort.by("ecosystem").and("name").and("occurredAt", Sort.Direction.Descending),
-            spellings)
-        .list();
+    return DbRetry.inNewTx(
+        "read the artifacts of one repository",
+        () ->
+            MtArtifact.find(
+                    "repository in ?1",
+                    Sort.by("ecosystem").and("name").and("occurredAt", Sort.Direction.Descending),
+                    spellings)
+                .list());
   }
 
   /** Everything one artifact's document listed. */
   @ActivateRequestContext
   public List<MtArtifactComponent> components(UUID artifactId) {
-    return MtArtifactComponent.find("artifactId = ?1", Sort.by("name"), artifactId).list();
+    return DbRetry.inNewTx(
+        "read the components of one artifact",
+        () -> MtArtifactComponent.find("artifactId = ?1", Sort.by("name"), artifactId).list());
   }
 
   /** One artifact's adjacency, for walking "what pulled this in". */
   @ActivateRequestContext
   public List<MtArtifactEdge> edges(UUID artifactId) {
-    return MtArtifactEdge.find("artifactId = ?1", artifactId).list();
+    return DbRetry.inNewTx(
+        "read the edges of one artifact",
+        () -> MtArtifactEdge.find("artifactId = ?1", artifactId).list());
   }
 
   // --- json ---------------------------------------------------------------------------------
+  //
+  // THE THREE BELOW ARE THE ONLY METHODS HERE THAT OWN NO TRANSACTION, and they are static column
+  // codecs rather than store methods: they touch no datasource, so there is nothing for them to
+  // enlist. Everything that does reach the database is wrapped, without exception.
 
   /** A list into the text column that holds it. Two columns are json and neither is queried by. */
   static String writeJson(Object value) {

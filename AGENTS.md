@@ -234,10 +234,30 @@ instead of needing the bump run again.
 
 ## Persistence
 
-`MaintenanceStore` is the only writer. **Every write is a `DbRetry.inNewTx` ending in a flush**:
-`inNewTx` owns the transaction boundary, which is the only way a retry can tell "the body threw, so
-it certainly never committed" from "the transaction manager reported it" — Narayana spells a lost
-commit and a real rollback with the same exception.
+`MaintenanceStore` is the only writer. **Every METHOD is a `DbRetry.inNewTx` — reads included — and
+every write ends in a flush**: `inNewTx` owns the transaction boundary, which is the only way a
+retry can tell "the body threw, so it certainly never committed" from "the transaction manager
+reported it" — Narayana spells a lost commit and a real rollback with the same exception.
+
+**The reads are in for a second reason, and it is why the rule is UNIFORM rather than audited.** A
+durable frame is handled inside the eventstream datasource's claim transaction. Neither datasource
+is XA and Narayana admits one last resource, so a BARE read on the `maintenance` datasource from a
+bus path enlists a second one into that claim — "Failed to enlist / Exception in association of
+connection to existing transaction" — every frame is then classified retryable and the consumer
+wedges for ever behind one of them. Measured twice: **2026-09-02** through `repositoryName`, and
+**2026-09-03** through `groups`, reached from `ScmEventListener.onMaintenanceBranchReleased`. The
+first fix spot-audited the four methods a listener was then known to touch and the second wedge came
+through a fifth, so spot-auditing is not the rule any more. The only three methods here that own no
+transaction are `writeJson`, `readStrings` and `readObjects`, which are static column codecs and
+touch no datasource. A caller that is not a listener pays one transaction it did not need, which is
+the cheap side of the trade; the entities are flat — no association, nothing LAZY — so a row read
+inside its own transaction is fully materialized before it detaches, and nothing outside the store
+mutates one.
+
+**`bus/ClaimTransactionTest` is what holds that.** It opens a transaction with the eventstream
+datasource enlisted, walks every read the store offers and then writes, and drives `onFrame` inside
+the same sandwich. The other bus tests drive `onFrame` against a store whose tables are maps, which
+is exactly why they stayed green through both outages.
 
 **Every method is `@ActivateRequestContext`**, because the caller is usually the worker thread and a
 Hibernate session is bound to that context. A route's call already has one, so the annotation covers
@@ -460,12 +480,14 @@ a JWKS, and a clone-alone build needs no issuer. There is no third state.
   request context for the whole method, so one Hibernate session would answer every read from its
   first-level cache — the row would look unchanged for ever while the worker closed it in another
   session.
-- **The same rock reaches `MaintenanceStoreTest`, and the shape that avoids it is "every write, then
-  one read".** A store read outside a transaction is answered by the request-bound session, while
-  every store WRITE runs in `DbRetry.inNewTx` on a session bound to its own transaction. Read the row
-  between two writes and the first session answers the later reads from its cache, and an assertion
-  about the last write fails against a store that is perfectly correct. Measured 2026-09-01 writing
-  the forward-only latest tests.
+- **The same rock reached `MaintenanceStoreTest`, and the shape that avoids it is "every write, then
+  one read".** It used to be that a store read outside a transaction was answered by the
+  request-bound session while every store WRITE ran in `DbRetry.inNewTx` on a session bound to its
+  own transaction — so a read between two writes was answered from the first session's cache and an
+  assertion about the last write failed against a store that was perfectly correct. Measured
+  2026-09-01 writing the forward-only latest tests. **The uniform wrap of 2026-09-03 took that away**
+  — a read now runs in its own transaction like a write does — but keep the shape: it is the one
+  that says what a test means, and it costs nothing.
 - **`InventoryReset` empties the store between methods, after `WorkQueue.awaitIdle`.** The graph
   goes first there — `mt_artifact_component` and `mt_artifact_edge` are the only rows in this schema
   with a foreign key, and it points at `mt_artifact`. Flyway's
