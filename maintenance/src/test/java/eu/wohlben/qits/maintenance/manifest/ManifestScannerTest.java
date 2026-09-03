@@ -24,8 +24,10 @@ import org.junit.jupiter.api.Test;
  * does not report produces no pin at all</b>. The shipped git host is exactly that host today; it
  * collapses every non-directory entry to {@code blob} and has never reported an object name.
  *
- * <p>The same seam carries the {@code ignore:} half at the end of the file: which ecosystems a
- * repository is scanned for at all, proved by the reads that are and are not made.
+ * <p>The same seam carries the two halves after it: which Dockerfiles the discovery reaches — the
+ * root, and the {@code docker/} directory below it — and the {@code ignore:} question of which
+ * ecosystems a repository is scanned for at all. Both are proved by the reads that are and are not
+ * made.
  */
 class ManifestScannerTest {
 
@@ -198,6 +200,67 @@ class ManifestScannerTest {
         1,
         host.read.stream().filter(call -> call.equals("tree components/qits-ci")).count(),
         "one directory, one listing");
+  }
+
+  // --- docker: the root, and the one directory below it ---------------------------------------
+
+  /**
+   * THE BASE IMAGE OF A DAEMON IS PINNED IN AN ARG, IN A DIRECTORY, and both halves of that were
+   * misses. qits-workspace-daemon builds from {@code docker/Dockerfile} — a path the root-only
+   * discovery never read — and pins its base in an {@code ARG} default rather than on the FROM, so
+   * even a file that was read produced nothing. The pin this makes is an ordinary internal one:
+   * {@code qits/workspace-base}, the name {@code mt_latest} is keyed by, with the registry host the
+   * {@code docker build} needs dropped from it.
+   */
+  @Test
+  void aDockerfileInTheDockerDirectoryIsFoundAndItsArgDefaultIsThePin() {
+    Host host =
+        new Host()
+            .tree("", new TreeLookup.TreeEntry("docker", "tree"))
+            .tree("docker", new TreeLookup.TreeEntry("Dockerfile", "blob"))
+            .blob(
+                "docker/Dockerfile",
+                """
+                ARG WORKSPACE_BASE=registry.dev.localhost:8080/qits/workspace-base:2026.902.143920
+                FROM ${WORKSPACE_BASE}
+                """);
+
+    List<ParsedPin> pins = read(host).pins();
+
+    assertEquals(1, pins.size());
+    ParsedPin pin = pins.get(0);
+    assertEquals(Ecosystem.DOCKER, pin.ecosystem());
+    assertEquals("qits/workspace-base", pin.name(), "the host is an address, not part of the name");
+    assertEquals("2026.902.143920", pin.version());
+    assertEquals("docker/Dockerfile", pin.manifestPath(), "the path the bump step edits");
+    assertEquals("arg:WORKSPACE_BASE", pin.location());
+  }
+
+  /** The other spelling of a qualified build file, which qits-projects-daemon uses. */
+  @Test
+  void aQualifiedDockerfileIsReadUnderEitherSpelling() {
+    Host host =
+        new Host()
+            .tree("", new TreeLookup.TreeEntry("node.Dockerfile", "blob"), new TreeLookup.TreeEntry("docker", "tree"))
+            .tree("docker", new TreeLookup.TreeEntry("Dockerfile.projects", "blob"))
+            .blob("node.Dockerfile", "FROM qits/build-images/node-base:2026.813.1\n")
+            .blob("docker/Dockerfile.projects", "ARG BASE=qits/workspace-base:2026.902.143920\n");
+
+    assertEquals(
+        List.of("node.Dockerfile", "docker/Dockerfile.projects"),
+        read(host).pins().stream().map(ParsedPin::manifestPath).toList());
+  }
+
+  /** A repository without the directory is not asked to list one: the root listing already says. */
+  @Test
+  void aRepositoryWithNoDockerDirectoryIsNotAskedForOne() {
+    Host host = new Host().tree("", new TreeLookup.TreeEntry("Dockerfile", "blob"))
+        .blob("Dockerfile", "FROM qits/build-images/maven-base:2026.813.1\n");
+
+    assertEquals(1, read(host).pins().size());
+    assertTrue(
+        host.read.stream().noneMatch(call -> call.equals("tree docker")),
+        "one listing is one round trip against another service");
   }
 
   // --- ignore: the repository takes a whole ecosystem off its own scan -------------------------

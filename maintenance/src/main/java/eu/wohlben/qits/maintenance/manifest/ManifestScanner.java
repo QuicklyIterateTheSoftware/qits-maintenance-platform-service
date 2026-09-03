@@ -26,10 +26,12 @@ import org.jboss.logging.Logger;
  * manifest at {@code main} would produce an inventory of whatever moved while it ran, and the pins
  * of one repository would not correspond to any commit that ever existed.
  *
- * <p><b>Discovery is the repository ROOT plus the reactor.</b> The root listing is read, the
- * manifests in it are taken, and a root pom's declared modules are followed for their poms —
- * transitively, because a module may name modules of its own. Nothing else is walked: a recursive
- * search would read every vendored file in every repository on the platform for a handful of pins.
+ * <p><b>Discovery is the repository ROOT plus the reactor, plus one named directory.</b> The root
+ * listing is read, the manifests in it are taken, and a root pom's declared modules are followed
+ * for their poms — transitively, because a module may name modules of its own. The one addition is
+ * {@code docker/}, which is where several repositories keep the build file the root does not hold.
+ * Nothing else is walked: a recursive search would read every vendored file in every repository on
+ * the platform for a handful of pins.
  *
  * <p><b>{@code service/src/main/webui} is NOT scanned, and the shape of the discovery is what keeps
  * it out.</b> It is a gitlink to the SPA's own repository, which the catalog lists in its own
@@ -62,6 +64,9 @@ public class ManifestScanner {
 
   /** The path fragment a gitlink to an embedded SPA sits at on this platform. */
   private static final String EMBEDDED_CLIENT = "src/main/webui";
+
+  /** The one directory below the root that a Dockerfile is looked for in. */
+  private static final String DOCKER_DIRECTORY = "docker";
 
   /** What PomParser writes as the location of a {@code <parent>} pin. */
   private static final String PARENT_LOCATION = "parent:";
@@ -276,16 +281,41 @@ public class ManifestScanner {
     return NpmParser.parse("package.json", manifest.content(), lock);
   }
 
-  /** Every {@code Dockerfile} and {@code *.Dockerfile} in the repository root. */
+  /**
+   * Every Dockerfile in the repository root, and every one in a {@code docker/} directory beside it.
+   *
+   * <p><b>ONE named directory, not a walk.</b> The root alone was the whole of this pass and it
+   * missed real files: qits-workspace-daemon builds from {@code docker/Dockerfile} and
+   * qits-projects-daemon from {@code docker/Dockerfile.projects}, so their base images were pinned
+   * in the inventory of nothing. A recursive search would read every vendored file in every
+   * repository on the platform to find them; {@code docker/} is the one place on this platform that
+   * holds a build file that is not in the root, and naming it costs exactly one extra listing — and
+   * that only for a repository that has the directory, because the root listing already says.
+   */
   private List<ParsedPin> dockerPins(String project, String name, String sha, TreeLookup root) {
     List<ParsedPin> pins = new ArrayList<>();
-    for (TreeLookup.TreeEntry entry : root.entries()) {
+    pins.addAll(dockerPins(project, name, sha, root, ""));
+    if (root.entry(DOCKER_DIRECTORY).filter(TreeLookup.TreeEntry::isTree).isPresent()) {
+      TreeLookup listing = gitHost.tree(project, name, sha, DOCKER_DIRECTORY);
+      if (listing.found()) {
+        pins.addAll(dockerPins(project, name, sha, listing, DOCKER_DIRECTORY + "/"));
+      }
+    }
+    return pins;
+  }
+
+  /** The Dockerfiles of one listing, read at the path that listing sits at. */
+  private List<ParsedPin> dockerPins(
+      String project, String name, String sha, TreeLookup listing, String directory) {
+    List<ParsedPin> pins = new ArrayList<>();
+    for (TreeLookup.TreeEntry entry : listing.entries()) {
       if (!entry.isBlob() || !isDockerfile(entry.name())) {
         continue;
       }
-      FileLookup file = gitHost.blob(project, name, sha, entry.name());
+      String path = directory + entry.name();
+      FileLookup file = gitHost.blob(project, name, sha, path);
       if (file.found()) {
-        pins.addAll(DockerParser.parse(entry.name(), file.content()));
+        pins.addAll(DockerParser.parse(path, file.content()));
       }
     }
     return pins;
@@ -395,8 +425,16 @@ public class ManifestScanner {
     return new ArrayList<>(byLine.values());
   }
 
+  /**
+   * Both spellings of a qualified build file, because this platform writes both:
+   * {@code node.Dockerfile} beside {@code Dockerfile.projects}. Neither is a convention anybody
+   * here owns — they are docker's two — and a repository that picked the other one is not a
+   * repository whose base image goes uninventoried.
+   */
   static boolean isDockerfile(String name) {
-    return "Dockerfile".equals(name) || name.endsWith(".Dockerfile");
+    return "Dockerfile".equals(name)
+        || name.endsWith(".Dockerfile")
+        || name.startsWith("Dockerfile.");
   }
 
   /**
