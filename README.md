@@ -19,7 +19,7 @@ The contract — routes, model, config keys, schedules and the bump payload — 
 
 | Fact | Peer | How |
 |---|---|---|
-| the catalog | qits-projects | `GET /projects/api/repositories`; a row with no `name` has no address and is skipped. The row's `id` is kept as `mt_repository.catalog_id` — never an address here, and the only way another context's spelling of a repository is read back as a name |
+| the catalog | qits-projects | `GET /projects/api/repositories`; a row with no `name` has no address and is skipped. The row's `id` is kept as `mt_repository.catalog_id` — never an address here, and the only way another context's spelling of a repository is read back as a name. **The listing is authoritative in both directions**: what it stops naming goes ABSENT — see below |
 | manifests at `main` | qits-githost | `GET /git/<project>/<repo>/tree/<rev>[/<path>]` and `…/blob/<rev>/<path>` |
 | internal latest | qits-artifacts | maven `maven-metadata.xml`, npm packument, OCI `/<name>/tags/list` |
 | external latest | qits-platform-mirror | `central` maven-metadata, `npmjs` packument |
@@ -37,6 +37,33 @@ would be an inventory of whatever moved while it ran.
 **A 404 from the git host is followed by a second read.** It answers "no such revision" and "no such
 path" identically, so the root tree at the same sha is what tells ABSENT from GONE — qits-ci's
 `HttpGitConfigSource` model, copied on purpose.
+
+**THE INVENTORY FOLLOWS THE CATALOG OUT, NOT ONLY IN.** A scan that read the whole catalog marks
+every `mt_repository` row the listing does not name `ABSENT` with `dropped from the catalog`, and
+deletes its `mt_pin` and `mt_group` rows. Until 2026-09-03 a scan only ever upserted what the catalog
+listed, so a renamed or removed repository kept the status its last successful scan wrote — OK — with
+its pins, its groups and its pending count, for ever, because nothing else writes those rows.
+**Measured on the first live nightly bump, 2026-09-03**: 48 repositories in the catalog against 96
+rows here and ~800 pending changes; the clock asked for 30 bumps and 23 came back FAILED with `no run
+recorded for MaintenanceBump`, every one of them a pre-rename ghost (`qits-spa-artifacts`,
+`qits-stt`, `qits-projects`, `qits-platform-spa-*`).
+
+- **The row is KEPT, not deleted.** The name still answers on `GET /repositories/{name}` with an
+  honest status instead of a 404 that says nothing about why, and `catalog_id` — the translation
+  every `mt_artifact` row written under another context's spelling reads back through — survives
+  with it. `mt_branch`, `mt_scan` and `mt_bump` stay too: those are the LOG of what was asked and
+  what came back, and a repository leaving the catalog does not un-push a branch that was pushed.
+- **The pins and the groups go**, because they are a cache of the catalog's world. A repository the
+  catalog dropped contributes no pending change and offers the clock no group; `BumpSchedule` skips
+  everything that is not OK, and the button 404s on a repository that declares no group.
+- **Three things never reconcile, and each of them would mark the whole platform absent.** A scan of
+  ONE repository (`POST /scans {repository}`, and every `ScanTrigger.EVENT` push) read a listing of
+  one and is evidence about nothing else; a catalog read that FAILED carries an empty list and is one
+  peer's outage; and a read that succeeded and listed NOTHING closes the scan FAILED before the
+  reconciliation is reached. The last guard is spelled twice, in `ScanService` and again in
+  `MaintenanceStore.reconcileCatalog`, because the cost of the two disagreeing is the whole store.
+- **A repository that RETURNS needs nothing of its own**: the next scan lists it and the ordinary
+  upsert writes OK over the ABSENT row with fresh pins and fresh groups.
 
 ## What it scans
 

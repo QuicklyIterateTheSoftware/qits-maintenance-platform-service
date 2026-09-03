@@ -39,6 +39,15 @@ import org.jboss.logging.Logger;
  * the pins it had. A peer that could not be asked is not evidence that a repository stopped pinning
  * anything.
  *
+ * <p><b>A FULL scan also reconciles the other way: the inventory follows the catalog OUT.</b> Until
+ * 2026-09-03 this loop only ever upserted what the catalog listed, so a repository that was renamed
+ * or removed kept its last status (OK), its pins and its groups for ever — nothing else writes those
+ * rows. Measured on the first nightly bump schedule: 96 repository rows against a catalog of 48, and
+ * 23 of 30 bumps FAILED with {@code no run recorded for MaintenanceBump} because the clock was
+ * bumping pre-rename ghosts. So a scan that read the WHOLE catalog now marks every unlisted row
+ * ABSENT and drops its pins and groups — see {@link #reconcile}, which is where the three guards
+ * are.
+ *
  * <p><b>A SCAN NEVER BUMPS ANYTHING, whoever asked for it.</b> It used to: a SCHEDULED scan whose
  * {@code bump.auto} was on asked for one bump per group it found pending, at the end of its own run.
  * That is gone, and the reason is that it welded two decisions together. A scan is a READ — of the
@@ -53,6 +62,13 @@ import org.jboss.logging.Logger;
 public class ScanService {
 
   private static final Logger LOG = Logger.getLogger(ScanService.class);
+
+  /**
+   * What a row says once the catalog stopped listing it. It is the repository's own sentence rather
+   * than the scan's, in the shape every other status message here takes — the UI shows the reason,
+   * never the word.
+   */
+  public static final String DROPPED_FROM_THE_CATALOG = "dropped from the catalog";
 
   @Inject CatalogReader catalog;
 
@@ -119,6 +135,11 @@ public class ScanService {
             .filter(entry -> repository == null || entry.name().equals(repository))
             .toList();
     if (entries.isEmpty()) {
+      // AND THIS IS ALSO THE EMPTY-CATALOG GUARD. A read that succeeded and listed nothing — every
+      // row unaddressable, or qits-projects answering `{"repositories":[]}` after somebody emptied
+      // the wrong database — closes the scan FAILED here, one line before the reconciliation below
+      // could mark the entire inventory ABSENT against it. A listing that lost every name is not
+      // evidence that every repository is gone.
       LOG.warnf("%s matched no repository in the catalog", what);
       store.scanStatus(
           id, ScanStatus.FAILED, "no repository in the catalog matched", Instant.now());
@@ -128,6 +149,9 @@ public class ScanService {
     for (CatalogEntry entry : entries) {
       scanOne(entry, now);
     }
+    // BEFORE the registry half, so no ghost's pins are looked up: a dropped repository's rows are
+    // gone by the time refreshLatest reads the inventory back out of the store.
+    reconcile(read, repository, what, now);
     refreshLatest(scope, repository);
 
     LOG.infof("%s finished over %d repositories", what, entries.size());
@@ -179,6 +203,51 @@ public class ScanService {
         read.groupSource(),
         config::kindOf,
         now);
+  }
+
+  /**
+   * <b>THE HALF THAT WAS MISSING: every row the catalog no longer lists, marked ABSENT.</b>
+   *
+   * <p>The scan above upserts what the catalog HAS. This is the other direction, and without it the
+   * inventory is a set that only ever grows: a repository that was renamed keeps its last status —
+   * OK, because the scan that recorded it succeeded — along with its pins, its groups and therefore
+   * its pending count, and nothing anywhere ever says otherwise. What that cost was measured on
+   * 2026-09-03: 30 nightly bumps, 23 of them FAILED with {@code no run recorded for MaintenanceBump}
+   * against names qits-projects has not held for weeks.
+   *
+   * <h2>The three guards, and why each of them is here</h2>
+   *
+   * <ul>
+   *   <li><b>the catalog read SUCCEEDED</b> — a failed read never reaches this method at all,
+   *       because {@code scan} closes the row FAILED and returns the moment {@code read.ok()} is
+   *       false. Reconciling against the empty list a failed read carries would mark every
+   *       repository on the platform absent and wipe every pin, on one peer's outage;
+   *   <li><b>the scan covers the WHOLE catalog</b> — {@code repository == null}. A scan OF ONE
+   *       repository is a listing of one, and it says nothing whatsoever about the other
+   *       forty-seven. That is the ordinary shape of {@code ScanTrigger.EVENT}: a push to a main
+   *       branch queues a scan of exactly that repository, several times an hour, and a single-repo
+   *       scan that reconciled would empty the inventory on every push;
+   *   <li><b>the listing is not empty</b> — held one line earlier by the {@code entries.isEmpty()}
+   *       refusal, and again inside {@code MaintenanceStore.reconcileCatalog}. Two places, because
+   *       the failure mode is the whole store in one transaction.
+   * </ul>
+   *
+   * <p><b>The names are the WHOLE listing</b>, taken off the catalog read rather than off the
+   * filtered loop above — which is the same list here by construction, and would silently stop being
+   * one the day a scope learns to narrow the repositories rather than the lookups.
+   */
+  private void reconcile(CatalogReader.Result read, String repository, String what, Instant now) {
+    if (repository != null) {
+      // A scan of one repository read a listing of one. Nothing here is evidence about anything
+      // else, and the whole inventory is "anything else".
+      return;
+    }
+    List<String> listed = read.entries().stream().map(CatalogEntry::name).toList();
+    List<String> dropped = store.reconcileCatalog(listed, DROPPED_FROM_THE_CATALOG, now);
+    if (!dropped.isEmpty()) {
+      LOG.infof(
+          "%s dropped %d repositories the catalog no longer lists: %s", what, dropped.size(), dropped);
+    }
   }
 
   /**
