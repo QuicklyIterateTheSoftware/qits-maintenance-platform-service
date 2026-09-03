@@ -110,7 +110,7 @@ A value that never became a version must never become a URL.
 **THE REACTOR IS READ BEFORE IT IS PARSED, and that ordering is load-bearing.** "Is this dependency
 one of our own modules" cannot be answered from a single pom, and it is what decides whether a pin
 is bumpable at all. A one-pass parser offered `eu.wohlben.qits:qits-ci-domain` as an upgrade to
-qits-ci — an offer to overwrite what its own release door stamps. Two consequences, both in
+qits-ci — an offer to overwrite what its own release stamps. Two consequences, both in
 `ManifestScanner`: a dependency whose `g:a` is in the reactor is `REACTOR`, and a **parent** that is
 in the reactor is not recorded at all. A parent from outside it stays a pin.
 
@@ -220,31 +220,33 @@ unmoved after a green run is NOTHING_TO_DO, and moved after a red one is STALE.
 `to`, `group`, the refs and the manifest path to the same rules; failing here puts the reason on the
 bump row instead of in a step log somebody has to go and read.
 
-**SUCCEEDED asks the release door; the other three endings do not.** `ReleaseDoorClient` posts to
-qits-workspaces' `/branches/release` with the branch, the commit-subject summary and `expectedSha` —
-the head this bump just observed, which is what pins the request to exactly what was built. Nothing
-merges at that call: the door creates a release REQUEST that the quality gates settle, and that a
-branch was released arrives back as `SCMRelease` on the bus. NOTHING_TO_DO pushed nothing; STALE is
-somebody's hand-written commit and releasing it on their behalf is the one thing this must never do.
+**SUCCEEDED asks for the release; the other three endings do not.** `ReleaseRequestClient` posts to
+qits-projects' `POST /projects/api/repositories/<repoId>/release-requests` with the branch and the
+commit-subject summary. Nothing merges and nothing is released at that call: a release REQUEST is
+OPENED, the quality gates settle the fold it makes, and Auto Release tags it. **The train's job ends
+there** — nothing here polls the request or waits for a version. NOTHING_TO_DO pushed nothing; STALE
+is somebody's hand-written commit and releasing it on their behalf is the one thing this must never
+do.
 
-**A door that will not answer never flips the status.** The bump succeeded — green run, moved branch,
-both facts about this service's own work. `mt_bump.release_request_id` carries the answer and
-**NULL is the one value that means work is owed**; `converged` and `refused` are sentinels that stop
-the retrying, because a permanently refused ask re-sent every fifteen seconds for the life of a
-branch is the failure mode a bare boolean would have. **The retry is bounded by the BRANCH, not a
-counter**: it ends when the request exists, when the branch reaches RELEASED, or when it is gone.
+**A qits-projects that will not answer never flips the status.** The bump succeeded — green run,
+moved branch, both facts about this service's own work. `mt_bump.release_request_id` carries the
+answer and **NULL is the one value that means work is owed**; `converged` and `refused` are sentinels
+that stop the retrying, because a permanently refused ask re-sent every fifteen seconds for the life
+of a branch is the failure mode a bare boolean would have. **The retry is bounded by the BRANCH, not
+a counter**: it ends when the request exists or when the branch is gone — which is also what a landed
+release leaves behind, since a request's named sources are deleted when it lands.
 
-**`projectId` on that call is `mt_repository.project`.** qits-projects' catalogue answers the
-project's row *id* there, and the door resolves the segment by id first then by slug — so the id
-addresses it, the same value `/git/<project>/<repo>` is read with. Nothing was added to
-`CatalogReader` for the door.
+**The `repoId` on that call is `mt_repository.catalog_id`**, the `id` qits-projects' own listing
+answers, which `CatalogReader` has copied onto the row since V5. That route resolves its path
+parameter against qits-projects' repository table and nothing else, so neither the name nor the
+project can address it — the pair the retired qits-workspaces door took. A row with no catalog id is
+a refusal, not a retry: the next scan fills the column and the next bump asks with it.
 
-**The door admits `qits:system` beside `qits:admin`** (qits-workspaces 7c0733b widened the ask arm
-to the pair its execute arm always had), so the sixth oidc client — audience `qits-workspaces` —
-needs only this service's ordinary machine grant and no person's role. Against a deployed
-qits-workspaces older than that widening the bearer authenticates and is refused; a 401/403 is
-therefore classified RETRYABLE rather than refused, so the ask heals when that release deploys
-instead of needing the bump run again.
+**The ask needs no credential of its own.** It is a qits-projects route and the route admits
+`qits:system` beside `qits:admin`, so the `projects` client every catalog read already mints opens
+it. There was a sixth oidc client once — audience `qits-workspaces`, for the release door — and it
+went with the door. A 401/403 is still classified RETRYABLE rather than refused, so a grant that has
+not landed heals rather than needing the bump run again.
 
 ## Persistence
 
@@ -385,19 +387,21 @@ subscribes and publishes nothing.**
   morning's scan filled, and every pin of that dependency would read as up to date until the next
   scan. The guard is `VersionOrder`'s, the same comparison the pending rule makes. A frame that is not
   newer writes **nothing at all**, `checked_at` included: stamping it would say a lookup happened.
-- **`SCMRelease` does TWO things now, and the branch row is the one that must not be lost.** Beside
-  the maintenance-branch state it records every release as the latest of a GITLINK — the version, and
-  the commit `refs/tags/<version>` resolves to, in `source_url` as `sha:<hex>`. The gitlink half runs
-  **after** the branch write and on every release whatever the branch was; both writes are
-  idempotent, so the redelivery an unreachable git host causes replays the first harmlessly. The
-  failure split is the seam's: a tag the host does not HOLD is poison (WARN, settle), a host that
-  cannot be ASKED is retryable and thrown, because no scan ever refreshes this row.
-- **`BranchState.RELEASED` is only ever written from an event, and it could not be written any other
-  way.** The release is qits-workspaces' door — it tags, pushes and deletes the source branch — so
-  polling sees a branch disappear, which is exactly what a person deleting it by hand looks like. The
-  `SCMDeleteBranch` that follows moments later writes `NONE` over it, and that is correct rather than
-  a race: a released branch IS gone. `RELEASED` is the fact recorded in between. That same delete is
-  also the only thing that ever clears a `STALE` row.
+- **`SCMRelease` does ONE thing here, and it is the gitlink.** Every release records the latest of a
+  GITLINK — the version, and the commit `refs/tags/<version>` resolves to, in `source_url` as
+  `sha:<hex>`. It runs on every release whatever the branch was, and it is idempotent, so the
+  redelivery an unreachable git host causes replays it harmlessly. The failure split is the seam's: a
+  tag the host does not HOLD is poison (WARN, settle), a host that cannot be ASKED is retryable and
+  thrown, because no scan ever refreshes this row.
+- **The maintenance-branch arm of `SCMRelease` is GONE, and `BranchState.RELEASED` is a word nothing
+  writes.** It was there because qits-workspaces' door published the event naming the branch it had
+  just tagged over, which was the one fact nothing else could tell this service. A release is now a
+  tag on a release request's fold, `release/<id>`, published by qits-projects — so `branch` on that
+  event names the fold and never a `maintenance/` one, and the arm could not fire. A maintenance
+  branch's whole ending is the `SCMDeleteBranch` that follows the release (a request's named sources
+  are deleted when it lands), which is the same signal a person deleting it by hand sends, and `NONE`
+  is the right answer to both. That delete is also the only thing that ever clears a `STALE` row.
+  `RELEASED` stays in the enum because old rows hold it.
 - **A main-branch push is a SCAN and never a bump.** `ScanTrigger.EVENT`, one repository, through
   `ScanService.request` — the same path `POST /scans {repository}` takes, so it is a row a client can
   follow, it is behind the one worker thread, and it closes itself on failure. What a push changes is
@@ -417,7 +421,7 @@ subscribes and publishes nothing.**
   naming a repository or group this inventory does not hold) is a WARN or a DEBUG and a return;
   **retryable** (the store will not answer) is left to throw. Both listener tests assert both arms.
 - **The consumed payloads are TRANSCRIPTIONS and `bus/ForeignEventContractTest` is where they are
-  kept.** qits-workspaces publishes no vocabulary jar at all, and taking qits-ci-events or
+  kept.** qits-projects keeps its `SCMRelease` in its own `bus/` package, and taking qits-ci-events or
   qits-githost-events would be a compile-time dependency on another context for four field lists. So
   each record copies a component list, the canonical bytes are produced by the library's own
   serializer rather than by a JSON fixture, and the tests drive those bytes through the listeners'
@@ -558,14 +562,14 @@ reading the other's rows.
 framework in 2026.829 and there is nothing to replace it with. `stories/support/StoryNetwork.install()`
 is the whole wiring in one call: the framework's **shipped** `NetworkTaps.restAssured(SERVICE)` for
 what a story sends in (the per-repo `StoryNetworkFilter` copy this repo used to carry is deleted —
-`NetworkTaps` is where it lives now), and six cumulative `NetworkCapture.source` registrations for
+`NetworkTaps` is where it lives now), and five cumulative `NetworkCapture.source` registrations for
 what left. A story sets `NetworkCapture.actor(...)` **before** each call, because the tap sees a
 request and never a narrative role, and then only asserts and notes.
 
-**The six peers are real sockets that record.** `stories/support/StoryPeers` is a `com.sun`
+**The five peers are real sockets that record.** `stories/support/StoryPeers` is a `com.sun`
 HttpServer per service — qits-projects, qits-githost, qits-ci, qits-platform-artifacts,
 qits-platform-mirror — armed by `StoryCatalog` with a two-repository platform, and the launched
-process is handed their addresses as its eight shipped `qits.maintenance.*-url` keys. It is **not**
+process is handed their addresses as its shipped `qits.maintenance.*-url` keys. It is **not**
 `FakePeers` and it is not a `MockService`, for three reasons that are each independently fatal: a
 CDI alternative does not exist in a launched fast-jar; a recording of the CALL cannot label an edge
 with the status that came BACK; and neither can stop answering mid-story, which is what
@@ -606,8 +610,8 @@ Both keep their coverage in `MaintenanceApiTest`, which drives `bumps.sweep()` b
 
 **What the catalogue does not show, because this service does not do it.** There is no story of a
 commit being made, a file being written or a ref being pushed: this service decides, a CI step
-applies and a door releases, so the two furthest arrows out of it are a `MaintenanceBump` trigger and
-a release ASK — neither of which touches a tree. And nothing here
+applies and the platform releases, so the two furthest arrows out of it are a `MaintenanceBump`
+trigger and a release ASK — neither of which touches a tree. And nothing here
 transitively resolves, orders an external base image or runs `ng update`; each is a decision recorded
 under "Deliberately not here yet", not a gap in the stories.
 
@@ -662,12 +666,13 @@ Each is a decision, not an omission:
   it by. `FROM qits/*` is in scope.
 - **`ng update` and tool-driven upgrades.** A group carries `name` and `deps`, and the step edits
   lines. A migration is a person's job.
-- **Workspace creation.** Pushing the branch is the whole "merge request"; it is released through
-  the workspaces door like any other branch — this service now asks that door itself.
-- **Polling the release request.** The door answers a `requestId` and this service stores it and
-  stops. What became of the request arrives as `SCMRelease` on the bus, and two mechanisms watching
-  one fact would be two ways to disagree about it. A request that is REJECTED or FAILED is therefore
-  visible only in qits-projects today.
+- **Workspace creation.** Pushing the branch is the whole "merge request"; it is released through a
+  qits-projects release request like any other branch — this service opens that request itself.
+- **Polling the release request.** qits-projects answers an id and this service stores it and stops.
+  The train's job ends at "request opened": the gates settle it, Auto Release tags it, and two
+  mechanisms watching one fact would be two ways to disagree about it. A request that is REJECTED,
+  CONFLICTED or FAILED is therefore visible only in qits-projects today — the one thing a person
+  loses by this service not polling, and the price of the single writer.
 - **Automatic EXTERNAL bumps.** `qits.maintenance.bump.external.auto` exists so the deployment
   surface does not change the day they are implemented, and is read only to WARN when it is set.
   Somebody else's framework major is an opinion, and it stays a person's press.

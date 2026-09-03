@@ -72,7 +72,7 @@ class BumpScheduleTest {
     Fixture.scriptScan(peers);
     Fixture.scriptBranchAbsent(peers);
     Fixture.scriptCiAccepts(peers, "run-scheduled");
-    Fixture.scriptDoorAccepts(peers, "rr-scheduled");
+    Fixture.scriptReleaseRequestAccepted(peers, "rr-scheduled");
   }
 
   /**

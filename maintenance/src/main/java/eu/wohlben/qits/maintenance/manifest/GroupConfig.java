@@ -71,7 +71,7 @@ public final class GroupConfig {
 
   /**
    * The INTERNAL half of the fallback. The name is unchanged from when it was the one catch-all
-   * group: {@code maintenance/dependencies} is a branch the release door already cleans and three
+   * group: {@code maintenance/dependencies} is a branch a release already deletes and three
    * repositories already name, and renaming it would have been a cutover nobody asked for.
    */
   public static final String DEFAULT_GROUP = "dependencies";

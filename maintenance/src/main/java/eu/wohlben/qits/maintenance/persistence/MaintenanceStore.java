@@ -724,15 +724,15 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
   }
 
   /**
-   * Records what the release door said, without touching the bump's status.
+   * Records what the release ask answered, without touching the bump's status.
    *
    * <p><b>The status is deliberately untouched and that is the whole failure policy.</b> A bump that
    * reached SUCCEEDED had a green run and a branch that moved — facts about this service's own work.
-   * Whether a fourth peer answered is not one of them, and flipping the row to FAILED because
-   * qits-workspaces was restarting would report somebody else's downtime as this service's, over a
-   * branch that really is pushed.
+   * Whether qits-projects answered is not one of them, and flipping the row to FAILED because that
+   * service was restarting would report somebody else's downtime as this service's, over a branch
+   * that really is pushed.
    *
-   * @param releaseRequestId the door's request id, or the {@code converged} / {@code refused}
+   * @param releaseRequestId the release request's id, or the {@code converged} / {@code refused}
    *     sentinel — or NULL to leave the column alone, which is what a retryable answer writes: the
    *     message is updated so a person can see what happened, and the sweep asks again on the next
    *     tick because the column is still empty
@@ -760,8 +760,8 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
    * Every bump that pushed a branch and has not settled its release ask — what the sweep re-attempts.
    *
    * <p>Bounded by construction rather than by a limit: every outcome of the ask writes the column, so
-   * a row leaves this listing after one tick. The rows that stay are the ones whose door call is
-   * genuinely owed, and the branch-state check the caller makes is what ends even those.
+   * a row leaves this listing after one tick. The rows that stay are the ones whose ask is genuinely
+   * owed, and the branch-state check the caller makes is what ends even those.
    */
   @ActivateRequestContext
   public List<MtBump> bumpsOwedARelease() {

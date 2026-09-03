@@ -3,7 +3,7 @@ package eu.wohlben.qits.maintenance.peer;
 /**
  * Every address this service reads or writes, and the credential each one takes.
  *
- * <p><b>Ten targets, six credentials.</b> A target is an ADDRESS — a configured base url a path
+ * <p><b>Nine targets, five credentials.</b> A target is an ADDRESS — a configured base url a path
  * is appended to — while a credential is an oidc client, and a token is cut for one SERVICE. The
  * three registry targets on qits-artifacts share one client because they are one service behind
  * three path prefixes; splitting them would be three tokens for one audience.
@@ -13,7 +13,16 @@ package eu.wohlben.qits.maintenance.peer;
  */
 public enum PeerTarget {
 
-  /** qits-projects — the catalog, the name-addressed coordinate every other read uses. */
+  /**
+   * qits-projects — the catalog, the name-addressed coordinate every other read uses, and since the
+   * release door was retired the RELEASE ASK as well.
+   *
+   * <p>A bump that ends SUCCEEDED opens a release request here on the branch it just pushed:
+   * {@code POST /projects/api/repositories/<repoId>/release-requests}, addressed by the catalog row's
+   * own id. See {@link eu.wohlben.qits.maintenance.bump.ReleaseRequestClient}. It is the same
+   * credential every catalog read already mints — the route admits {@code qits:system}, which is what
+   * {@link PeerClient} presents — so the write cost this service nothing a read did not already have.
+   */
   PROJECTS("qits.maintenance.targets.projects-url", Credential.PROJECTS),
 
   /** qits-githost — the manifests, read at one revision per repository. */
@@ -45,30 +54,15 @@ public enum PeerTarget {
   MAVEN_MIRROR("qits.maintenance.mirror.maven-url", Credential.MIRROR),
 
   /** qits-platform-mirror's npmjs pull-through. */
-  NPM_MIRROR("qits.maintenance.mirror.npm-url", Credential.MIRROR),
+  NPM_MIRROR("qits.maintenance.mirror.npm-url", Credential.MIRROR);
 
-  /**
-   * qits-workspaces — the RELEASE DOOR, and the only address here this service WRITES to besides
-   * qits-ci's trigger.
-   *
-   * <p>A bump that ends SUCCEEDED asks it for a release request on the branch it just pushed. It is
-   * platform-wide like qits-projects and qits-githost, so the bare alias holds.
-   *
-   * <p><b>Its route wants {@code qits:admin}</b>, unlike every other call this service makes: the
-   * door is a human-shaped operation that a machine is being let through, and qits-workspaces guards
-   * it accordingly. That is a grant on this service's idp client, not a header — see
-   * {@link eu.wohlben.qits.maintenance.bump.ReleaseDoorClient}.
-   */
-  WORKSPACES("qits.maintenance.targets.workspaces-url", Credential.WORKSPACES);
-
-  /** The six oidc client names — one per SERVICE, because a token is cut for one service. */
+  /** The five oidc client names — one per SERVICE, because a token is cut for one service. */
   public static final class Credential {
     public static final String PROJECTS = "projects";
     public static final String GITHOST = "githost";
     public static final String CI = "ci";
     public static final String ARTIFACTS = "artifacts";
     public static final String MIRROR = "mirror";
-    public static final String WORKSPACES = "workspaces";
 
     private Credential() {}
   }

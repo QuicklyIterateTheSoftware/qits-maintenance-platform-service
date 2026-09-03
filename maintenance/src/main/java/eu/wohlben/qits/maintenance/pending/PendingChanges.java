@@ -127,7 +127,7 @@ public final class PendingChanges {
     // A REACTOR or UNRESOLVED pin has no line to bump and no version worth comparing. It is never
     // pending, whatever a registry says — a module depending on its sibling at ${project.version}
     // is the ordinary case, and offering an upgrade for it would be offering to overwrite the
-    // release door's own stamp.
+    // release's own stamp.
     if (!kindOf(pin).actionable()) {
       return Optional.empty();
     }

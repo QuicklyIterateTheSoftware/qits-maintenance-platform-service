@@ -127,7 +127,6 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
     overrides.put("qits.maintenance.targets.projects-url", url(StoryTarget.PROJECTS));
     overrides.put("qits.maintenance.targets.githost-url", url(StoryTarget.GITHOST));
     overrides.put("qits.maintenance.targets.ci-url", url(StoryTarget.CI));
-    overrides.put("qits.maintenance.targets.workspaces-url", url(StoryTarget.WORKSPACES));
     overrides.put(
         "qits.maintenance.registries.maven-url",
         url(StoryTarget.ARTIFACTS, StoryTarget.MAVEN_REGISTRY_PREFIX));

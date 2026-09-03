@@ -13,6 +13,8 @@ import eu.wohlben.qits.maintenance.model.GroupSource;
 import eu.wohlben.qits.maintenance.model.PinKind;
 import eu.wohlben.qits.maintenance.model.RepositoryStatus;
 import eu.wohlben.qits.maintenance.model.ScanScope;
+import eu.wohlben.qits.maintenance.peer.FakePeers;
+import eu.wohlben.qits.maintenance.peer.PeerTarget;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
 import io.agroal.api.AgroalDataSource;
 import io.quarkus.agroal.DataSource;
@@ -25,6 +27,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -59,8 +62,13 @@ class ClaimTransactionTest {
   private static final String REPOSITORY = "qits-claim-tx";
   private static final String GROUP = "dependencies";
   private static final String BRANCH = "maintenance/" + GROUP;
+  private static final String MAIN = "main";
+  private static final String RELEASE_SHA = "0011223344556677889900aabbccddeeff001122";
 
   @Inject MaintenanceStore store;
+
+  /** The peers, faked at the client — the git host has to answer the released tag. */
+  @Inject FakePeers peers;
 
   @Inject ScmEventListener scm;
 
@@ -162,16 +170,32 @@ class ClaimTransactionTest {
         "the write behind the reads must have committed");
   }
 
+  /**
+   * The same sandwich on the one arm {@code SCMRelease} still has.
+   *
+   * <p>The 2026-09-03 wedge came through {@code onMaintenanceBranchReleased -> group -> groups},
+   * which is gone: a release names its request's fold, never a {@code maintenance/} branch, so that
+   * arm was removed with the release door. What is left is the GITLINK half, and it is the same
+   * shape — a store read ({@code repository}), a peer call, and a store WRITE behind them, all
+   * inside the claim. The read is what enlists and the write is what dies, so this is the path that
+   * has to be pinned now.
+   */
   @Test
-  void aReleasedMaintenanceBranchIsRecordedWhenTheFrameArrivesInsideItsClaim() {
-    // The exact stack of the 2026-09-03 wedge: onMaintenanceBranchReleased -> group -> groups.
+  void aReleasedGitlinkIsRecordedWhenTheFrameArrivesInsideItsClaim() {
+    String version = "2026.903.1";
+    // The tag, spelled the way GitHostReader asks for it: one path segment, slashes encoded.
+    peers.answer(
+        PeerTarget.GITHOST,
+        "/git/qits/" + REPOSITORY + "/tree/refs%2Ftags%2F" + version,
+        FakePeers.Scripted.ok("{\"entries\":[]}", Map.of("Git-Commit-Sha", RELEASE_SHA)));
+
     insideAClaim(
-        () -> scm.onFrame(frame("SCMRelease", scmReleasePayload(REPOSITORY, BRANCH, "2026.903.1"))));
+        () -> scm.onFrame(frame("SCMRelease", scmReleasePayload(REPOSITORY, MAIN, version))));
 
     assertEquals(
-        BranchState.RELEASED.name(),
-        store.branch(REPOSITORY, GROUP).orElseThrow().state,
-        "the branch row is what must survive a frame handled inside a claim");
+        version,
+        store.latest(Ecosystem.GITLINK, REPOSITORY).orElseThrow().latest,
+        "the gitlink latest is what must survive a frame handled inside a claim");
   }
 
   @Test

@@ -184,7 +184,7 @@ public class ManifestScanner {
    * "is this dependency one of our own modules" cannot be answered from a single pom, and it is the
    * question that decides whether a pin is bumpable at all. A one-pass parser reported
    * {@code eu.wohlben.qits:qits-ci-domain} as a dependency of {@code qits-ci} to upgrade, which
-   * would have been an offer to overwrite what its own release door stamps.
+   * would have been an offer to overwrite what its own release stamps.
    */
   private List<ParsedPin> mavenPins(String project, String name, String sha, TreeLookup root) {
     if (!root.hasBlob("pom.xml")) {

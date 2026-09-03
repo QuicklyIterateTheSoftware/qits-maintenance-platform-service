@@ -22,13 +22,14 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 
 /**
- * <b>The far side of this catalogue: one of the six services qits-platform-maintenance reads or
+ * <b>The far side of this catalogue: one of the five services qits-platform-maintenance reads or
  * writes, standing on a real port, recording what it was asked and answerable differently in the
  * middle of a story.</b>
  *
  * <p>This service is a <em>reader of other repositories</em>. Everything it knows it learned from
  * qits-projects, qits-githost and three registries, and the two things it makes happen anywhere else
- * are a {@code MaintenanceBump} trigger at qits-ci and a release ask at qits-workspaces' door. A diagram that showed only what a story sent
+ * are a {@code MaintenanceBump} trigger at qits-ci and a release request opened at qits-projects. A
+ * diagram that showed only what a story sent
  * <em>here</em> would document the API and nothing about the service — so the outgoing half is
  * where the evidence is, and this class is what produces it.
  *

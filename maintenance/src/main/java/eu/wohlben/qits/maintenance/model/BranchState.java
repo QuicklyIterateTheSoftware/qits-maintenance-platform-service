@@ -7,8 +7,8 @@ package eu.wohlben.qits.maintenance.model;
  * column is the only place its life is recorded.
  */
 public enum BranchState {
-  /** Never pushed, or deleted by the release door's cleanup after it was released. The next bump
-   * starts fresh from {@code main}. */
+  /** Never pushed, or deleted — by hand, or by the release that consumed it, which drops its named
+   * source branches when it lands. The next bump starts fresh from {@code main}. */
   NONE,
 
   /** It exists on the git host and this service put it there. A further bump commits on top of it,
@@ -20,7 +20,15 @@ public enum BranchState {
    * until it is gone. */
   STALE,
 
-  /** It went through the workspaces release door. */
+  /**
+   * <b>A word rows still hold and nothing writes any more.</b> It meant "this branch went through
+   * qits-workspaces' release door", which the door's {@code SCMRelease} was the only thing that
+   * could say. A release is a tag on {@code release/<id>} now — the request's fold, not this branch
+   * — so no event names a {@code maintenance/} branch as released, and the ending a branch really
+   * has is the {@code SCMDeleteBranch} that follows the release: NONE.
+   *
+   * <p>Kept because the column is a stored word and old rows carry it; never assigned.
+   */
   RELEASED,
 
   /** The last bump run went red. */

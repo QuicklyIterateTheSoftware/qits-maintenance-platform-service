@@ -77,14 +77,15 @@ public class MtBump extends PanacheEntityBase {
   public String message;
 
   /**
-   * What came of asking qits-workspaces' release door for the branch this bump pushed.
+   * What came of asking qits-projects to release the branch this bump pushed.
    *
    * <p><b>Three shapes, and NULL is the one that means work is owed.</b> A release request id is the
-   * row to poll in qits-projects; {@code converged} is "there was nothing to ask for" — the door said
-   * already-integrated, or the branch was released or deleted first; {@code refused} is a refusal a
-   * retry cannot fix, with the reason on {@link #message}. The sweep re-attempts the door for exactly
-   * the SUCCEEDED rows where this is null and the branch is still PUSHED, so every ending writes
-   * something here and stops being read.
+   * row to follow in qits-projects — <b>open, not released</b>: the gates settle it and Auto Release
+   * tags it afterwards, and this service does not watch either. {@code converged} is "there was
+   * nothing to hold on to" — no id came back, or the branch was deleted before the ask could be
+   * made; {@code refused} is a refusal a retry cannot fix, with the reason on {@link #message}. The
+   * sweep re-attempts the ask for exactly the SUCCEEDED rows where this is null and the branch is
+   * still PUSHED, so every ending writes something here and stops being read.
    *
    * <p>Null for ever on a bump that is not SUCCEEDED: there is no branch to release.
    */
