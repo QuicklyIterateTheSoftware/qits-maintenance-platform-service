@@ -393,11 +393,13 @@ class MaintenanceApiTest {
         .get(BASE + "/repositories/" + Fixture.REPOSITORY)
         .then()
         .statusCode(200)
+        // The fixture writes `FROM mirror.dev.localhost:8080/quay/…`, and the name recorded is the
+        // image without the registry it was reached through — an address is not part of a name.
         .body(
-            "pins.find { it.name == 'mirror.dev.localhost:8080/quay/quarkus/ubi9-quarkus-mandrel-builder-image' }.kind",
+            "pins.find { it.name == 'quay/quarkus/ubi9-quarkus-mandrel-builder-image' }.kind",
             equalTo("EXTERNAL"))
         .body(
-            "pins.find { it.name == 'mirror.dev.localhost:8080/quay/quarkus/ubi9-quarkus-mandrel-builder-image' }.latest",
+            "pins.find { it.name == 'quay/quarkus/ubi9-quarkus-mandrel-builder-image' }.latest",
             nullValue());
   }
 
