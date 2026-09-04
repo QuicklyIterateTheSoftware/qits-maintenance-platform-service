@@ -11,9 +11,9 @@
 # `SCMPublishCommit`: without this event the fold exists and nothing builds it.
 #
 # THE BUMP BRANCH IS WHERE THIS REPOSITORY FEELS THE CHANGE MOST, so it is worth stating: a
-# `maintenance/*` push no longer fires CI anywhere. This service already asks the release door
-# itself, with its own credential, on the push that creates a bump — so the bump becomes a release
-# REQUEST, that request's fold is what gets built, and the QA below is what proves it. A bump branch
+# `maintenance/*` push no longer fires CI anywhere. This service opens the release REQUEST itself,
+# with its own credential, on the push that creates a bump — so that request's fold is what gets
+# built, and the QA below is what proves it. A bump branch
 # is exactly a commit whose pins moved, and proving it is still what this pipeline is for; it is
 # proved one hop later than it used to be.
 #

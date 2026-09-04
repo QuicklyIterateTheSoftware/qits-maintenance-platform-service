@@ -539,7 +539,8 @@ a JWKS, and a clone-alone build needs no issuer. There is no third state.
 ## The userflows
 
 Nine `@UserStory` methods across five classes, emitting `service/target/userstories/` and published
-per commit by `.config/qits/ci-event-userflows.yml` as `@userflows/qits-platform-maintenance`.
+as `@userflows/qits-platform-maintenance` by the non-gating second step of
+`.config/qits/ci-event-release-request.yml` — once per release-request fold, not per commit.
 `skipITs` stays true and the pipeline names the classes:
 `-DskipITs=false "-Dit.test=TokenValidationBootstrapIT,ScanCycleIT,InventoryIT,BumpIT,MaintenanceRefusalIT"`.
 
@@ -638,7 +639,8 @@ pom, because Quinoa is in no BOM and its version does not track the platform's.
   give it a segment of its own, because an entry protects a segment and not a string prefix.
 - **The bundle is built OUTSIDE the docker build.** `@qits/ui-components` exists only on the
   platform's own npm registry, which a `RUN` reaches by no address at all. So
-  `.config/qits/ci-post-receive.yml` builds it in the step container (on qits-net) and the
+  the pipeline step (`.config/qits/ci-event-release.yml`, or `ci-event-release-request.yml` for a
+  fold) builds it in the step container (on qits-net) and the
   Dockerfile neuters Quinoa's install/ci/build commands with `--version`, guards the staged bundle
   with a `test -f` before the multi-minute native compile, and `cp`s the bundle onto itself so
   Quinoa's MOVE does not hit overlayfs' EXDEV.

@@ -1,16 +1,17 @@
 # The release pipeline: this repository reacts to its OWN release and pushes the image under the
-# released VERSION. The shape is qits-workspaces' file since the client landed — that repo is where
-# the two-half release pattern is maintained and the copies should keep matching. The short form of
-# the rules that bite:
+# released VERSION. The two-half release pattern is copied across the platform's SPA-serving
+# services and the copies should keep matching. The short form of the rules that bite:
 #
-# - The selection naming this repository is not a loop: SCMRelease comes from qits-workspaces, and
-#   nothing in this file publishes it.
+# - The selection naming this repository is not a loop: SCMRelease comes from qits-projects' Auto
+#   Release, and nothing in this file publishes it.
 # - `artifacts:` is a declaration, not a report — qits-ci cannot see what the step pushed and
 #   announces on the strength of it. One entry, because this pipeline pushes one image: the jars
 #   this repo builds stay inside it and no maven release publishes them.
 # - The name is unqualified on purpose; the reader supplies its own registry host.
-# - The build below is ci-post-receive.yml's, and the two must stay matched: one image content, two
-#   coordinates. `:$QITS_CI_SHA` there remains the whole contract with the deployer.
+# - The build below is ci-event-release-request.yml's gating step, and the two must stay matched:
+#   the QA pipeline proves a release request's fold with this same build, minus the push. The
+#   version tag this pushes is the only coordinate — the per-push sha image went with per-push CI,
+#   and a Deployment Request names the version.
 # - This file is inert until an SCMRelease for this repository exists, and it lands first on
 #   purpose — the bus is at-most-once, so the trigger must precede the event it selects.
 event: SCMRelease
@@ -19,7 +20,7 @@ when:
 artifacts:
   - { type: docker, name: qits/qits-platform-maintenance }
 steps:
-    # node-docker-base, the image ci-post-receive.yml already uses: node, npm and git for the
+    # node-docker-base, the image ci-event-release-request.yml already uses: node, npm and git for the
     # bundle half, the docker CLI for the image half — and node is also what reads the event
     # payload, which is JSON. qits-platform-idp's 2026.814.191019 release burned on the old ci-base form of this
     # file: no node, no bundle, and the Dockerfile's guard stopped the version image cold.
@@ -52,7 +53,7 @@ steps:
       # --- half one: the bundle -----------------------------------------------------------------
       # The daemon's clone is shallow and does not recurse, so the qits-maintenance-platform-frontend submodule
       # arrives as an empty directory and the Dockerfile's guard fails the image build on it. See
-      # ci-post-receive.yml for why the lockfile origins are rewritten and why the registry is
+      # ci-event-release-request.yml for why the lockfile origins are rewritten and why the registry is
       # passed as environment rather than as a file — the SPA's committed .npmrc outranks any
       # ~/.npmrc this step could write.
       frontend_url="${QITS_CI_REPOSITORY_URL%/*}/qits-maintenance-platform-frontend"
@@ -62,7 +63,7 @@ steps:
       # Two registries since the byte-plane split, so the swap reads the PATH: an entry under the
       # hosted registry's own pathname ($QITS_NPM_REGISTRY_URL's, /artifacts/npm/npm/) gets the
       # hosted origin and everything else gets the proxy's, and the broad expression has to run
-      # before the narrow one. ci-post-receive.yml carries the full reasoning.
+      # before the narrow one. ci-event-release-request.yml carries the full reasoning.
       npm_hosted_origin=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).origin')
       npm_proxy_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
       npm_hosted_path=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).pathname')
@@ -80,13 +81,13 @@ steps:
 
       # --- half two: the image ------------------------------------------------------------------
       ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/qits-platform-maintenance:$version"
-      # Same doctrine as ci-post-receive.yml: host network + derived maven address, or the
+      # Same doctrine as ci-event-release-request.yml: host network + derived maven address, or the
       # qits-db-core and qits-arch-rules resolve dies inside the build.
       # And the same credential doctrine: a SECRET MOUNT, never a build arg, because an arg is
       # recorded in the history of a pullable image. The launcher injects the run's commissioned
       # client as $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET. Unconditional — a
       # missing env source is NOT a buildx error, measured on v0.36.1 — so it is inert until a run
-      # carries the pair. ci-post-receive.yml has the same two flags; keep them matched.
+      # carries the pair. ci-event-release-request.yml has the same two flags; keep them matched.
       docker build --network host \
         --build-arg QITS_MAVEN_REPOSITORY_URL="http://$QITS_REGISTRY/artifacts/maven/maven" \
         --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
@@ -104,7 +105,7 @@ steps:
       # `SoftwareRelease` only for a green run, so ordering is the whole guarantee: no consumer is
       # ever told about a version whose bill of materials is missing. A failed PUT fails the release
       # ON PURPOSE — the store being down is not a reason to announce a version nobody can audit.
-      # Only THIS pipeline uploads one: ci-post-receive.yml's sha push announces no release, so it
+      # Only THIS pipeline uploads one: the QA pipeline's fold build announces no release, so it
       # owes no document.
       #
       # The second `docker build` reaches the Dockerfile's `sbom` stage — a `FROM scratch` holding

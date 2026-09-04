@@ -22,7 +22,8 @@
 # NOTE THE ASYMMETRY with the platform's generic Quinoa recipe, which excludes the client's dist/ as
 # well: here dist/ is the PAYLOAD. The client depends on @qits/ui-components, which exists only on
 # the platform's own npm registry and is reachable from no address a docker build has, so the bundle
-# is built BEFORE this image by the step in .config/qits/ci-post-receive.yml. Excluding dist/ would
+# is built BEFORE this image by the step in .config/qits/ci-event-release.yml (or
+# ci-event-release-request.yml, for a fold). Excluding dist/ would
 # fail the build at the `test -f` guard on the mvnw line.
 **/node_modules
 service/src/main/webui/.angular
