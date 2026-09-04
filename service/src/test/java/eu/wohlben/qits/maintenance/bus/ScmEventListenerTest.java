@@ -236,20 +236,23 @@ class ScmEventListenerTest {
   // --- the branch's life ------------------------------------------------------------------------
 
   /**
-   * The whole point of consuming SCMRelease: RELEASED is a state only the release door can report,
-   * and it is what tells a released branch from one a person deleted.
+   * <b>THE DELETE IS THE WHOLE OF A MAINTENANCE BRANCH'S ENDING NOW.</b> This listener used to write
+   * RELEASED off {@code SCMRelease}, because qits-workspaces' release door published that event
+   * naming the branch it had just tagged over. A release is a tag on a release request's fold,
+   * {@code release/<id>}, so no event names a {@code maintenance/} branch any more — and the ending
+   * a branch really has is the delete the release performs on its named sources, which is the same
+   * signal a person deleting it by hand sends. NONE is the right answer to both.
    */
   @Test
-  void aReleasedMaintenanceBranchBecomesRELEASEDAndThenTheDeleteMakesItNONE() {
+  void aMaintenanceBranchEndsAtTheDeleteAndTheReleaseDoesNotTouchIt() {
     store.branch(REPOSITORY, GROUP, BranchState.PUSHED, "abc1234");
 
     released(REPOSITORY, BRANCH);
     MtBranch afterRelease = store.branchRow(REPOSITORY, GROUP);
-    assertEquals(BranchState.RELEASED.name(), afterRelease.state);
     assertEquals(
-        "abc1234",
-        afterRelease.headSha,
-        "at this instant the branch is released and not yet deleted, so its head is still known");
+        BranchState.PUSHED.name(),
+        afterRelease.state,
+        "a release names its own fold, never this branch, so nothing here moves");
 
     deleted(REPOSITORY, BRANCH);
     MtBranch afterDelete = store.branchRow(REPOSITORY, GROUP);
@@ -267,19 +270,14 @@ class ScmEventListenerTest {
     assertEquals(BranchState.NONE.name(), store.branchRow(REPOSITORY, GROUP).state);
   }
 
-  /** Every release on the platform rides this signature and almost none of them is one of ours. */
+  /** Every release on the platform rides this signature, and no branch row is any of their business. */
   @Test
-  void aReleaseOfAnOrdinaryBranchTouchesNothing() {
+  void noReleaseWritesABranchRowWhateverBranchItNames() {
     released(REPOSITORY, MAIN);
-    deleted(REPOSITORY, "feature/something");
-
-    assertTrue(store.branches.isEmpty());
-  }
-
-  @Test
-  void aReleaseOfAnUnknownRepositoryOrGroupIsSettled() {
+    released(REPOSITORY, BRANCH);
+    released(REPOSITORY, "release/6f0d1f2e-0000-4000-8000-000000000000");
     released("some-repository-nobody-scanned", BRANCH);
-    released(REPOSITORY, "maintenance/a-group-this-repository-does-not-have");
+    deleted(REPOSITORY, "feature/something");
 
     assertTrue(store.branches.isEmpty());
   }
@@ -316,15 +314,18 @@ class ScmEventListenerTest {
         "the tag is spelled in full, so no branch of that name can answer for it");
   }
 
-  /** Both halves of a release run, and the branch row is the one that must not be lost. */
+  /**
+   * A release of a repository whose maintenance branch is pushed records the gitlink and leaves the
+   * branch alone — the two facts are independent, and only one of them is this event's to state.
+   */
   @Test
-  void aMaintenanceBranchReleaseWritesTheBranchRowAndTheGitlinkLatest() {
+  void aReleaseWritesTheGitlinkLatestAndLeavesThePushedBranchWhereItIs() {
     store.branch(REPOSITORY, GROUP, BranchState.PUSHED, "abc1234");
     gitHost.holds(REPOSITORY, "refs/tags/" + VERSION, RELEASE_SHA);
 
     released(REPOSITORY, BRANCH, VERSION);
 
-    assertEquals(BranchState.RELEASED.name(), store.branchRow(REPOSITORY, GROUP).state);
+    assertEquals(BranchState.PUSHED.name(), store.branchRow(REPOSITORY, GROUP).state);
     assertEquals(VERSION, store.latestRow(Ecosystem.GITLINK, REPOSITORY).latest);
   }
 

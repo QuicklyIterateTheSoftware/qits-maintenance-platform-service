@@ -30,12 +30,10 @@ import org.jboss.logging.Logger;
  * <table>
  *   <caption>The three events and what each one moves</caption>
  *   <tr><th>event</th><th>publisher</th><th>what it means here</th></tr>
- *   <tr><td>{@code SCMRelease}</td><td>qits-workspaces</td>
- *       <td>TWO things. A {@code maintenance/<group>} branch went through the release door — the
- *           branch row becomes RELEASED, which nothing else on the platform could ever tell this
- *           service. And, whatever the branch was, a repository has a new released commit, so every
- *           GITLINK pinned at it has somewhere to move: {@code mt_latest} is written with the
- *           version and the sha its tag resolves to</td></tr>
+ *   <tr><td>{@code SCMRelease}</td><td>qits-projects</td>
+ *       <td>a repository has a new released commit, so every GITLINK pinned at it has somewhere to
+ *           move: {@code mt_latest} is written with the version and the sha its tag resolves
+ *           to</td></tr>
  *   <tr><td>{@code SCMDeleteBranch}</td><td>qits-githost</td>
  *       <td>a {@code maintenance/<group>} branch is gone — the branch row becomes NONE, so the next
  *           bump starts fresh from main</td></tr>
@@ -44,19 +42,21 @@ import org.jboss.logging.Logger;
  *           inventory holds — one repository is queued for a rescan</td></tr>
  * </table>
  *
- * <h2>Why RELEASED finally gets written</h2>
+ * <h2>{@code SCMRelease} no longer says anything about a maintenance branch</h2>
  *
- * <p>{@code BranchState.RELEASED} has existed since the schema did and nothing wrote it. The reason
- * is that the release is somebody else's operation entirely: an operator opens the branch this
- * service pushed, releases it through qits-workspaces' door, and the door pushes a tag and deletes
- * the source branch. Polling could see the branch disappear, which is indistinguishable from a
- * person deleting it by hand; only the door knows a release happened, and only the event says so.
+ * <p>It used to say two things, and the second one is gone. qits-workspaces' release door published
+ * it the instant it pushed a tag over the branch it had been given, so the event named that branch
+ * and this listener could write {@code BranchState.RELEASED} from it — the one fact nothing else on
+ * the platform could tell this service.
  *
- * <p>{@code SCMDeleteBranch} then arrives moments later and writes NONE over it. That is not a
- * conflict — a released branch IS gone, and NONE is exactly "the next bump starts fresh from main".
- * RELEASED is the fact recorded in between, and it is the state a branch a person deleted by hand
- * never passes through. The same delete is also what clears a STALE row: a branch somebody rewrote
- * is one this service stops writing to until it is gone, and this is how it learns that it is.
+ * <p>The door is retired. A release is now a tag on a release request's fold, {@code
+ * release/<id>}, published by qits-projects — so {@code branch} on this event names that fold and
+ * never a {@code maintenance/} one, and there is nothing left to match. A maintenance branch's whole
+ * ending is the {@code SCMDeleteBranch} that follows the release (a request's named sources are
+ * deleted when it lands), which is the same signal a person deleting it by hand sends, and NONE is
+ * the right answer to both: the next bump starts fresh from main. That delete is also what clears a
+ * STALE row — a branch somebody rewrote is one this service stops writing to until it is gone, and
+ * this is how it learns that it is.
  *
  * <h2>Why a main-branch push is a scan and not a bump</h2>
  *
@@ -89,9 +89,9 @@ import org.jboss.logging.Logger;
  *
  * <h2>The three payloads are TRANSCRIPTIONS, and that is a standing instruction</h2>
  *
- * <p>Neither publisher ships a vocabulary jar this repository could depend on — qits-workspaces
- * publishes none at all, and taking qits-githost-events would be a compile-time dependency on
- * another context for three field lists. So each record below transcribes only the fields this
+ * <p>Neither publisher ships a vocabulary jar this repository could depend on — qits-projects keeps
+ * {@code SCMRelease} in its own {@code service/…/bus/} package, and taking qits-githost-events would
+ * be a compile-time dependency on another context for three field lists. So each record below transcribes only the fields this
  * listener consumes, decoded by {@link CanonicalJson} exactly as the publisher encoded them, and
  * {@code bus/ForeignEventContractTest} pins every name against the canonical form. <b>A rename over
  * there is a change to that transcription in the same campaign</b>; landing it there and not here
@@ -120,7 +120,7 @@ public class ScmEventListener implements QitsDurableEventListener {
    */
   static final String CONSUMER_ID = "maintenance-branch-tracking";
 
-  /** qits-workspaces' "this version is on the default branch, pushed and tagged". */
+  /** qits-projects' "this version of this repository is tagged". */
   static final String RELEASE_SIGNATURE = "SCMRelease";
 
   /** qits-githost's "this branch is gone, and here is the tip it last had". */
@@ -142,15 +142,18 @@ public class ScmEventListener implements QitsDurableEventListener {
   static final String TAG_PREFIX = "refs/tags/";
 
   /**
-   * The {@code SCMRelease} fields this listener consumes, transcribed from qits-workspaces'
-   * {@code workspaces-events/…/SCMRelease.java}.
+   * The {@code SCMRelease} fields this listener consumes, transcribed from qits-projects'
+   * {@code service/…/bus/SCMRelease.java} — which is itself a field-for-field replica of the record
+   * qits-workspaces published before the release door was retired, so the transcription did not have
+   * to move when the publisher did.
    *
    * <p>{@code repositoryName} is the coordinate this service is keyed by and {@code repository} is
    * the registry's row id, which for a repository the platform manifest declares happens to be the
    * same string — so the name is preferred and the id is the fallback, exactly the tolerance
    * qits-ci's release join carries and for the same reason. {@code projectId} is transcribed
    * because it is part of the shape and deliberately unused: this service resolves a project from
-   * its own {@code mt_repository} row.
+   * its own {@code mt_repository} row. So is {@code branch}: it names the release request's fold,
+   * {@code release/<id>}, and nothing here has an opinion about that ref.
    */
   public record ScmReleasePayload(
       String projectId, String repository, String repositoryName, String branch, String version) {}
@@ -219,51 +222,13 @@ public class ScmEventListener implements QitsDurableEventListener {
 
   // --- SCMRelease -----------------------------------------------------------------------------
 
-  /** A maintenance branch went through the release door — and, whatever branch it was, a gitlink's
-   * latest. */
+  /** A repository was released — which here is one fact and one only: a gitlink's latest. */
   private void onRelease(EventFrame frame) {
     ScmReleasePayload release = decode(frame, ScmReleasePayload.class);
     if (release == null) {
       return;
     }
-    onMaintenanceBranchReleased(frame, release);
-    // AFTER the branch row, and on EVERY release rather than only a maintenance one: the branch
-    // write is this listener's first duty and must not be lost to a git host that will not answer
-    // the second. Both writes are idempotent, so a redelivery caused by the read below replays the
-    // first harmlessly.
     onGitlinkReleased(frame, release);
-  }
-
-  private void onMaintenanceBranchReleased(EventFrame frame, ScmReleasePayload release) {
-    String branch = trimmed(release.branch());
-    if (branch == null || !branch.startsWith(BRANCH_PREFIX)) {
-      // The ordinary case by a long way: every release of every repository on the platform rides
-      // this signature, and almost none of them is one of ours.
-      LOG.debugf(
-          "%s %s released the branch '%s', which is not a maintenance branch",
-          frame.name(), frame.id(), release.branch());
-      return;
-    }
-    // The registry may answer with no name. The id is the same string for a manifest repository,
-    // which is what makes the fallback worth having rather than a refusal.
-    String repository = repositoryName(release);
-    String group = branch.substring(BRANCH_PREFIX.length());
-    Optional<MtGroup> known = group(repository, group);
-    if (known.isEmpty()) {
-      LOG.warnf(
-          "%s %s released %s of a repository or group this inventory does not hold (%s/%s);"
-              + " it is settled",
-          frame.name(), frame.id(), branch, release.repositoryName(), group);
-      return;
-    }
-    // The head is kept rather than nulled: at this instant the branch has been released and not yet
-    // deleted, so the sha this service last read is still the truest thing it knows about it. The
-    // SCMDeleteBranch that follows is what clears it.
-    String head = store.branch(repository, group).map(row -> row.headSha).orElse(null);
-    store.recordBranch(repository, group, branch, BranchState.RELEASED, head, Instant.now());
-    LOG.infof(
-        "%s %s released %s of %s as %s; the branch row is RELEASED",
-        frame.name(), frame.id(), branch, repository, release.version());
   }
 
   // --- SCMRelease, the gitlink half -----------------------------------------------------------
@@ -290,10 +255,9 @@ public class ScmEventListener implements QitsDurableEventListener {
    * there is nothing to compare a gitlink pin against: a pin is a commit and a release is a name,
    * and the pending rule refuses to guess across that gap.
    *
-   * <p><b>The tag is resolved rather than correlated with a push.</b> A release is an atomic
-   * push of the default branch and its tag and the {@code SCMRelease} is published after it, so the
-   * tag is there when this frame arrives; reading it is one call whose answer is the release's own
-   * commit. The alternative — remembering the {@code SCMPublishCommit} that came past a moment
+   * <p><b>The tag is resolved rather than correlated with a push.</b> A release IS the tag, and the
+   * {@code SCMRelease} is published the moment qits-githost's tag primitive answers, so the tag is
+   * there when this frame arrives; reading it is one call whose answer is the release's own commit. The alternative — remembering the {@code SCMPublishCommit} that came past a moment
    * earlier and pairing it up by repository and time — is a correlation over two publishers'
    * clocks, and it is wrong exactly when two releases of one repository are close together.
    *

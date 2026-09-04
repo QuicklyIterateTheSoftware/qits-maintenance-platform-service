@@ -16,19 +16,28 @@ public final class Fixture {
 
   public static final String PROJECT = "qits";
   public static final String REPOSITORY = "qits-ci";
+
+  /**
+   * The catalog row's own id, as {@link #scriptScan} answers it — and the ONE thing the release ask
+   * is addressed by. A fixture whose listing carried no {@code id} would leave every pushed branch
+   * recording "has no catalog id on its inventory row" instead of asking.
+   */
+  public static final String CATALOG_ID = "r1";
+
   public static final String HEAD_SHA = "3f1a9c0b7d2e4f5a6b8c9d0e1f2a3b4c5d6e7f80";
   public static final String BRANCH = "maintenance/dependencies";
   public static final String BUMPED_SHA = "aa11bb22cc33dd44ee55ff6677889900aabbccdd";
 
   /**
-   * The release door's path AS THIS SERVICE SPELLS IT, query included. {@code FakePeers} keys on the
-   * target and the whole path, so a fixture that armed a different query string would leave the door
-   * unscripted and the call would read the unregistered-path 404 — which is a refusal shape, and the
-   * test would fail somewhere else entirely.
+   * The release-request route AS THIS SERVICE SPELLS IT. {@code FakePeers} keys on the target and
+   * the whole path, so a fixture that armed a different one would leave the route unscripted and the
+   * call would read the unregistered-path 404 — which is a refusal shape, and the test would fail
+   * somewhere else entirely.
    */
-  public static final String DOOR_PATH =
-      eu.wohlben.qits.maintenance.bump.ReleaseDoorClient.RELEASE_PATH
-          + "?projectId=" + PROJECT + "&repositoryName=" + REPOSITORY;
+  public static final String RELEASE_REQUESTS_PATH =
+      eu.wohlben.qits.maintenance.bump.ReleaseRequestClient.REQUESTS_PATH_PREFIX
+          + CATALOG_ID
+          + eu.wohlben.qits.maintenance.bump.ReleaseRequestClient.REQUESTS_PATH_SUFFIX;
 
   private static final String TREE = "/git/" + PROJECT + "/" + REPOSITORY + "/tree/";
   private static final String BLOB = "/git/" + PROJECT + "/" + REPOSITORY + "/blob/" + HEAD_SHA + "/";
@@ -139,7 +148,7 @@ public final class Fixture {
         PeerTarget.PROJECTS,
         "/projects/api/repositories",
         FakePeers.Scripted.ok(
-            "{\"repositories\":[{\"id\":\"r1\",\"projectId\":\""
+            "{\"repositories\":[{\"id\":\"" + CATALOG_ID + "\",\"projectId\":\""
                 + PROJECT
                 + "\",\"name\":\""
                 + REPOSITORY
@@ -234,25 +243,36 @@ public final class Fixture {
         FakePeers.Scripted.ok("{\"id\":\"" + runId + "\",\"status\":\"" + status + "\"}"));
   }
 
-  /** The release door creates (or converges onto) a release request and names it. */
-  public static void scriptDoorAccepts(FakePeers peers, String requestId) {
+  /**
+   * qits-projects opens (or converges onto) a release request and names it.
+   *
+   * <p>The wrapper is the point of the shape: the controller answers {@code {"request": {…}}}, so a
+   * client reading a flat body would find no id and record a convergence against a service that
+   * answered perfectly well.
+   */
+  public static void scriptReleaseRequestAccepted(FakePeers peers, String requestId) {
     peers.answer(
-        PeerTarget.WORKSPACES,
-        DOOR_PATH,
+        PeerTarget.PROJECTS,
+        RELEASE_REQUESTS_PATH,
         FakePeers.Scripted.ok(
-            "{\"requestId\":\"" + requestId + "\",\"state\":\"PENDING\",\"branch\":\""
-                + BRANCH + "\",\"commitSha\":\"" + BUMPED_SHA + "\",\"detail\":null}"));
+            "{\"request\":{\"id\":\"" + requestId + "\",\"repoId\":\"" + CATALOG_ID
+                + "\",\"backingBranch\":\"release/" + requestId + "\",\"state\":\"PENDING\","
+                + "\"mergedSha\":null,\"summary\":\"bump(dependencies): 5 dependencies\","
+                + "\"detail\":null,\"version\":null,\"retryable\":false}}"));
   }
 
-  /** The release door answers something else — a 5xx, or the already-integrated refusal. */
-  public static void scriptDoorAnswers(FakePeers peers, int status, String body) {
-    peers.answer(PeerTarget.WORKSPACES, DOOR_PATH, FakePeers.Scripted.status(status, body));
-  }
-
-  /** The release door is not there at all: no status, a transport failure. */
-  public static void scriptDoorUnreachable(FakePeers peers) {
+  /** qits-projects answers something else — a 5xx, a refusal, an auth failure. */
+  public static void scriptReleaseRequestAnswers(FakePeers peers, int status, String body) {
     peers.answer(
-        PeerTarget.WORKSPACES, DOOR_PATH, FakePeers.Scripted.unreachable("connection refused"));
+        PeerTarget.PROJECTS, RELEASE_REQUESTS_PATH, FakePeers.Scripted.status(status, body));
+  }
+
+  /** qits-projects is not there at all: no status, a transport failure. */
+  public static void scriptReleaseRequestUnreachable(FakePeers peers) {
+    peers.answer(
+        PeerTarget.PROJECTS,
+        RELEASE_REQUESTS_PATH,
+        FakePeers.Scripted.unreachable("connection refused"));
   }
 
   private static String metadata(String... versions) {

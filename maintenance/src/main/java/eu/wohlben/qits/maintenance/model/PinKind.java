@@ -22,7 +22,7 @@ public enum PinKind {
    *
    * <p>Either way it moves with this repository's own release train and there is no line anywhere
    * to bump. Nearly every multi-module pom on the platform has several, and offering an upgrade for
-   * one would be offering to overwrite what the release door stamps.
+   * one would be offering to overwrite what a release stamps.
    */
   REACTOR,
 

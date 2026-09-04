@@ -43,6 +43,13 @@ public final class StoryCatalog {
   /** The rich reactor: a pom with modules, an npm client, a Dockerfile and a grouping file. */
   public static final String REPOSITORY = "qits-ci";
 
+  /**
+   * {@link #REPOSITORY}'s row id in the catalog, and the ONE thing a release ask is addressed by:
+   * qits-projects resolves that route's path parameter against its own repository table. A word
+   * rather than a uuid, so no label is scrubbed as a generated id.
+   */
+  public static final String CATALOG_ID = "r1";
+
   /** A small library repository, so the second bump story has a branch of its own. */
   public static final String SECOND_REPOSITORY = "qits-eventstream";
 
@@ -87,8 +94,8 @@ public final class StoryCatalog {
   public static final String SECOND_RUN = "run-beta";
 
   /**
-   * The release request qits-workspaces' door names for {@link #REPOSITORY}'s pushed branch. A word,
-   * so no label and no assertion is scrubbed as a generated id.
+   * The release request qits-projects opens for {@link #REPOSITORY}'s pushed branch. A word, so no
+   * label and no assertion is scrubbed as a generated id.
    */
   public static final String RELEASE_REQUEST = "rr-alpha";
 
@@ -99,6 +106,9 @@ public final class StoryCatalog {
 
   /** Where a bump is asked for. */
   public static final String TRIGGER_PATH = "/ci/api/events/trigger";
+
+  /** …and where the branch it pushed is asked to be released. */
+  public static final String RELEASE_REQUESTS_PATH = StoryTarget.releaseRequests(CATALOG_ID);
 
   private StoryCatalog() {}
 
@@ -305,10 +315,10 @@ public final class StoryCatalog {
     StoryPeers artifacts = StoryPeers.named(StoryTarget.ARTIFACTS);
     StoryPeers mirror = StoryPeers.named(StoryTarget.MIRROR);
     // qits-ci is started here too, so its address is in the launch command; what it ANSWERS is armed
-    // by the bump stories, because a trigger's answer is the thing those stories move. So is
-    // qits-workspaces, whose release door only one story ever reaches: the one whose branch moved.
+    // by the bump stories, because a trigger's answer is the thing those stories move. The release
+    // ask is armed there too, by the one story whose branch moved — and it lands on qits-projects,
+    // which is already started for the catalog.
     StoryPeers.named(StoryTarget.CI);
-    StoryPeers.named(StoryTarget.WORKSPACES);
 
     // THE CATALOG, with a row that has no name. qits-projects lists rows whose alias is unset, every
     // read this service makes is name-addressed, and a scan must skip such a row rather than fail on
@@ -316,7 +326,7 @@ public final class StoryCatalog {
     projects.json(
         CATALOG_PATH,
         "{\"repositories\":["
-            + "{\"id\":\"r1\",\"projectId\":\"" + PROJECT + "\",\"name\":\"" + REPOSITORY
+            + "{\"id\":\"" + CATALOG_ID + "\",\"projectId\":\"" + PROJECT + "\",\"name\":\"" + REPOSITORY
             + "\",\"mainBranch\":\"main\"},"
             + "{\"id\":\"r2\",\"projectId\":\"" + PROJECT + "\",\"name\":\"" + SECOND_REPOSITORY
             + "\",\"mainBranch\":\"main\"},"

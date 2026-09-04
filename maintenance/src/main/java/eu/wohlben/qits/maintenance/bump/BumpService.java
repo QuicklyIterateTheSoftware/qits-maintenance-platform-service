@@ -51,17 +51,25 @@ import org.jboss.logging.Logger;
  * it is gone.
  *
  * <p><b>SUCCEEDED asks for the release itself.</b> A branch nobody asks about is a branch that sits
- * there, so the ending that pushed one calls qits-workspaces' release door — see {@link
- * ReleaseDoorClient} for what the door is and why the ask is convergent. NOTHING_TO_DO and STALE do
+ * there, so the ending that pushed one opens a release request in qits-projects — see {@link
+ * ReleaseRequestClient} for what that ask is and why it is convergent. NOTHING_TO_DO and STALE do
  * not: there is nothing to release in the first case, and in the second somebody owns the branch by
  * hand and asking for their commits to be released is precisely the thing that must not happen.
+ *
+ * <p><b>The ask is where this service's part ends.</b> It opens a request; the quality gates settle
+ * it, Auto Release tags it and the merge back to main follows the deployment, all in qits-projects.
+ * Nothing here waits for a version, polls the request or records a release.
  */
 @ApplicationScoped
 public class BumpService {
 
   private static final Logger LOG = Logger.getLogger(BumpService.class);
 
-  /** Every maintenance branch is under this prefix, which is also what the release door cleans. */
+  /**
+   * Every maintenance branch is under this prefix. It is also what the release deletes: a request's
+   * named sources are dropped when it lands, and the {@code SCMDeleteBranch} that follows is what
+   * puts the branch row back to NONE.
+   */
   public static final String BRANCH_PREFIX = "maintenance/";
 
   @Inject MaintenanceStore store;
@@ -72,7 +80,7 @@ public class BumpService {
 
   @Inject GitHostReader gitHost;
 
-  @Inject ReleaseDoorClient door;
+  @Inject ReleaseRequestClient releases;
 
   @Inject WorkQueue queue;
 
@@ -218,8 +226,8 @@ public class BumpService {
   }
 
   /**
-   * Three jobs: send every REQUESTED bump again, follow every RUNNING one, and ask the release door
-   * again for every pushed branch whose ask has not settled.
+   * Three jobs: send every REQUESTED bump again, follow every RUNNING one, and ask qits-projects
+   * again for every pushed branch whose release ask has not settled.
    */
   public void sweep() {
     for (MtBump bump : store.activeBumps()) {
@@ -232,24 +240,24 @@ public class BumpService {
     }
     for (MtBump bump : store.bumpsOwedARelease()) {
       UUID id = bump.id;
-      queue.submit("ask the release door for bump " + id, () -> retryRelease(id));
+      queue.submit("ask for the release of bump " + id, () -> retryRelease(id));
     }
   }
 
   /**
-   * One more attempt at the release door, for a bump that pushed a branch and got no answer worth
+   * One more attempt at the release ask, for a bump that pushed a branch and got no answer worth
    * keeping.
    *
    * <p><b>It is bounded by the BRANCH, not by a counter.</b> There is no attempt limit and no backoff
    * schedule, because the thing that ends the retrying is the thing the retrying is for: the branch
-   * either gets a release request (the column fills), reaches RELEASED (the {@code SCMRelease} the
-   * door publishes, read by {@code bus/ScmEventListener}), or vanishes (NONE, from
-   * {@code SCMDeleteBranch}). A counter would additionally have to be right about how long
-   * qits-workspaces may be down for, which is not a question this service can answer.
+   * either gets a release request (the column fills) or vanishes (NONE, from {@code
+   * SCMDeleteBranch} — which is also what a landed release leaves behind, since a request's named
+   * sources are deleted when it lands). A counter would additionally have to be right about how long
+   * qits-projects may be down for, which is not a question this service can answer.
    *
-   * <p>So each of the three endings writes the column and the row stops being read, and until one of
-   * them happens the door is asked once per poll tick — which is the same tick that follows a running
-   * CI run and is a no-op whenever nothing is owed.
+   * <p>So each ending writes the column and the row stops being read, and until one of them happens
+   * qits-projects is asked once per poll tick — which is the same tick that follows a running CI run
+   * and is a no-op whenever nothing is owed.
    */
   public void retryRelease(UUID id) {
     Optional<MtBump> found = store.bump(id);
@@ -265,55 +273,54 @@ public class BumpService {
     Optional<MtBranch> branch = store.branch(bump.repository, bump.groupName);
     String state = branch.map(row -> row.state).orElse(null);
     if (!BranchState.PUSHED.name().equals(state)) {
-      // RELEASED, NONE, STALE, or no row at all. In every one of them the branch this bump pushed is
-      // no longer this bump's to ask about — it landed, it is gone, or somebody owns it by hand.
+      // NONE, STALE, or no row at all. In every one of them the branch this bump pushed is no
+      // longer this bump's to ask about — it is gone, or somebody owns it by hand.
       store.bumpReleaseAsked(
           id,
-          ReleaseDoorClient.CONVERGED,
+          ReleaseRequestClient.CONVERGED,
           note(
               bump,
               bump.branch + " is " + (state == null ? "no longer tracked" : state)
-                  + "; the release door was not asked again"));
+                  + "; no release was asked for again"));
       return;
     }
-    askForRelease(bump, branch.get().headSha);
+    askForRelease(bump);
   }
 
   /**
-   * Asks qits-workspaces to release the branch this bump pushed, and records what it said.
+   * Opens a release request in qits-projects for the branch this bump pushed, and records what came
+   * back.
    *
-   * <p>Everything about WHY the ask looks like this is in {@link ReleaseDoorClient}; what belongs
-   * here is the one refusal that is this service's own: a repository row with no project. The door's
-   * public identity is the {@code (projectId, repositoryName)} pair, and half of it lives on
-   * {@code mt_repository} — a row a scan never completed cannot address the door at all, and that is
-   * a refusal rather than a retry, because no number of attempts adds a project to it.
-   *
-   * @param headSha the head this bump observed, sent as {@code expectedSha} so the request is pinned
-   *     to exactly the commits the run produced
+   * <p>Everything about WHY the ask looks like this is in {@link ReleaseRequestClient}; what belongs
+   * here is the one refusal that is this service's own: a repository row with no catalog id. The ask
+   * is addressed by qits-projects' OWN row id, which {@code CatalogReader} copies onto {@code
+   * mt_repository.catalog_id} — a row the catalog listed without one, or one no scan has re-read
+   * since that column existed, cannot address the route at all. That is a refusal rather than a
+   * retry, because no number of attempts adds an id to it; the next scan does, and the next bump
+   * then asks with it.
    */
-  private void askForRelease(MtBump bump, String headSha) {
+  private void askForRelease(MtBump bump) {
     Optional<MtRepository> repository = store.repository(bump.repository);
-    String project = repository.map(row -> row.project).orElse(null);
-    if (project == null || project.isBlank()) {
+    String repoId = repository.map(row -> row.catalogId).orElse(null);
+    if (repoId == null || repoId.isBlank()) {
       store.bumpReleaseAsked(
           bump.id,
-          ReleaseDoorClient.REFUSED,
+          ReleaseRequestClient.REFUSED,
           note(
               bump,
-              "the release door cannot be addressed: "
+              "the release request cannot be addressed: "
                   + bump.repository
-                  + " has no project on its inventory row"));
-      LOG.warnf("The bump %s pushed %s but has no project to address the release door with",
+                  + " has no catalog id on its inventory row"));
+      LOG.warnf(
+          "The bump %s pushed %s but has no catalog id to address qits-projects with",
           bump.id, bump.branch);
       return;
     }
-    ReleaseDoorClient.DoorResult result =
-        door.requestRelease(
-            project,
-            bump.repository,
+    ReleaseRequestClient.RequestResult result =
+        releases.requestRelease(
+            repoId,
             bump.branch,
-            ReleaseDoorClient.summary(bump.groupName, changes(bump).size()),
-            headSha);
+            ReleaseRequestClient.summary(bump.groupName, changes(bump).size()));
     store.bumpReleaseAsked(bump.id, result.requestId(), note(bump, result.message()));
     switch (result.outcome()) {
       case REQUESTED ->
@@ -321,12 +328,13 @@ public class BumpService {
               "The bump %s asked for %s to be released: request %s",
               bump.id, bump.branch, result.requestId());
       case CONVERGED ->
-          LOG.infof("The bump %s found %s already released", bump.id, bump.branch);
+          LOG.infof("The bump %s has nothing left to ask about %s", bump.id, bump.branch);
       case REFUSED ->
-          LOG.warnf("The release door refused %s: %s", bump.branch, result.message());
+          LOG.warnf("The release request for %s was refused: %s", bump.branch, result.message());
       case RETRY ->
           LOG.warnf(
-              "The release door did not answer for %s: %s; the next sweep asks again",
+              "qits-projects did not answer the release request for %s: %s; the next sweep asks"
+                  + " again",
               bump.branch, result.message());
     }
   }
@@ -351,11 +359,11 @@ public class BumpService {
     if (passed && moved) {
       store.recordBranch(bump.repository, bump.groupName, branch, BranchState.PUSHED, after, now);
       store.bumpFinished(bump.id, BumpStatus.SUCCEEDED, ciRunStatus, pushedMessage(bump), now);
-      // THE ROW IS CLOSED BEFORE THE DOOR IS ASKED, and the order is the failure policy. The bump
-      // succeeded on the strength of the run and the head; a door that will not answer must not be
-      // able to change that verdict, and a process that died between the two lines leaves a
-      // SUCCEEDED bump the sweep picks up rather than a bump with no ending at all.
-      askForRelease(bump, after);
+      // THE ROW IS CLOSED BEFORE THE RELEASE IS ASKED FOR, and the order is the failure policy. The
+      // bump succeeded on the strength of the run and the head; a qits-projects that will not answer
+      // must not be able to change that verdict, and a process that died between the two lines
+      // leaves a SUCCEEDED bump the sweep picks up rather than a bump with no ending at all.
+      askForRelease(bump);
       return;
     }
     if (passed) {

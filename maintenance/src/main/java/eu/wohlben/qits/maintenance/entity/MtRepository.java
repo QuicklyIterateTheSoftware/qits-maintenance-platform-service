@@ -29,12 +29,23 @@ public class MtRepository extends PanacheEntityBase {
   public String project;
 
   /**
-   * The catalog row's own id, as qits-projects answers it. <b>Not an identity here and never an
-   * address</b> — the name above is both — but the one column that can turn ANOTHER context's
-   * spelling of this repository back into a name: qits-ci's {@code SoftwareRelease} names the
-   * repository by this id, so {@code mt_artifact.repository} would otherwise hold a uuid where the
-   * whole read side joins on a name. Null for a row the catalog listed without one, and for every
-   * row not yet re-scanned since V5.
+   * The catalog row's own id, as qits-projects answers it. <b>Not an identity here</b> — the name
+   * above is that, and every read is addressed by it — but the column that speaks ANOTHER context's
+   * spelling of this repository. Two things need it:
+   *
+   * <ul>
+   *   <li>qits-ci's {@code SoftwareRelease} names the repository by this id, so {@code
+   *       mt_artifact.repository} would otherwise hold a uuid where the whole read side joins on a
+   *       name;
+   *   <li><b>the release ask is addressed with it.</b> {@code POST
+   *       /projects/api/repositories/<repoId>/release-requests} resolves its path parameter against
+   *       qits-projects' own repository table, so this — not the name, not the project — is what
+   *       opens a release request. See {@code bump/ReleaseRequestClient}.
+   * </ul>
+   *
+   * <p>Null for a row the catalog listed without one, and for every row not yet re-scanned since V5.
+   * A bump on such a row records a refusal rather than retrying: the next scan fills the column, and
+   * the next bump asks with it.
    */
   @Column(name = "catalog_id", length = 64)
   public String catalogId;

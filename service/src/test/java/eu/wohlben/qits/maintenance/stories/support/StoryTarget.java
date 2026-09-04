@@ -30,9 +30,17 @@ public final class StoryTarget {
    */
   public static final String STORE = "its own inventory store";
 
-  // --- the six peers -----------------------------------------------------------------------------
+  // --- the five peers -----------------------------------------------------------------------------
 
-  /** The catalog: every repository this service is responsible for. */
+  /**
+   * The catalog — every repository this service is responsible for — and, since the release door was
+   * retired, THE RELEASE ASK as well.
+   *
+   * <p>A bump that pushed a branch opens a release request on it here, rather than leaving the
+   * branch for a per-repository CI trigger to notice. Nothing merges and nothing is released at that
+   * call — the quality gates settle the request and Auto Release tags it afterwards — so what a
+   * diagram shows is a request being OPENED and never a release happening.
+   */
   public static final String PROJECTS = "qits-projects";
 
   /** Where the manifests are, read at one revision per repository. */
@@ -40,16 +48,6 @@ public final class StoryTarget {
 
   /** One of the two peers this service WRITES to — and it writes a trigger, never a commit. */
   public static final String CI = "qits-ci";
-
-  /**
-   * The RELEASE DOOR: the other one it writes to, and it writes an ASK, never a merge.
-   *
-   * <p>A bump that pushed a branch asks qits-workspaces for a release request on it, rather than
-   * leaving the branch for a per-repository CI trigger to notice. Nothing merges at that call — the
-   * quality gates settle the request afterwards — so what the diagram shows is a request being made
-   * and never a release happening.
-   */
-  public static final String WORKSPACES = "qits-workspaces";
 
   /** The internal registries: maven, npm and OCI behind three path prefixes of one service. */
   public static final String ARTIFACTS = "qits-platform-artifacts";
@@ -60,11 +58,19 @@ public final class StoryTarget {
   // --- the wire surface --------------------------------------------------------------------------
 
   /**
-   * The release door, as {@code ReleaseDoorClient} spells it — the PATH only. {@link StoryPeers}
-   * arms and matches on the decoded path and records the raw one with its query, so a story arms
-   * this and then reads a label carrying {@code ?projectId=…&repositoryName=…}.
+   * The catalog listing, as {@code CatalogReader} spells it. It is also the PREFIX the release ask
+   * is built on, which is why the two live beside each other.
    */
-  public static final String RELEASE_DOOR = "/workspaces/api/branches/release";
+  public static final String CATALOG = "/projects/api/repositories";
+
+  /**
+   * The release ask, as {@code ReleaseRequestClient} spells it for one repository. <b>The catalog
+   * id is in the path</b>, because that id IS how qits-projects addresses a repository — a label
+   * without it would not say which repository was handed on.
+   */
+  public static String releaseRequests(String repoId) {
+    return CATALOG + "/" + repoId + "/release-requests";
+  }
 
   /** The machine surface's root. Path-routed verbatim by the edge on every vhost. */
   public static final String API = "/maintenance/api";
