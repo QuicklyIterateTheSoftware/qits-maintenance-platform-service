@@ -5,6 +5,7 @@ import eu.wohlben.qits.maintenance.dto.BumpDto;
 import eu.wohlben.qits.maintenance.dto.DependencyDto;
 import eu.wohlben.qits.maintenance.dto.GroupDto;
 import eu.wohlben.qits.maintenance.dto.PinDto;
+import eu.wohlben.qits.maintenance.dto.PinSourceDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDetailDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDto;
 import eu.wohlben.qits.maintenance.dto.ScanDto;
@@ -15,17 +16,21 @@ import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.entity.MtScan;
+import eu.wohlben.qits.maintenance.error.EmptyInventoryException;
 import eu.wohlben.qits.maintenance.error.NoSuchBumpException;
 import eu.wohlben.qits.maintenance.error.NoSuchRepositoryException;
 import eu.wohlben.qits.maintenance.error.NoSuchScanException;
 import eu.wohlben.qits.maintenance.manifest.Globs;
 import eu.wohlben.qits.maintenance.model.BranchState;
+import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.PinKind;
 import eu.wohlben.qits.maintenance.pending.PendingChanges;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -160,6 +165,79 @@ public class Inventory {
     }
     return List.copyOf(listing);
   }
+
+  /**
+   * <b>THE KEEP-SET THE ARTIFACT GC READS.</b> Every internal registry artifact any catalogued
+   * repository's main branch still references, with the freshness of the inventory that says so.
+   *
+   * <p>qits-artifacts collects the registry against a handful of PIN SOURCES read once per run, and
+   * this is the third: what the running services deploy, what the images name, and — here — what the
+   * manifests pin. A version this answer carries is one a build would resolve tomorrow, so a
+   * collection that dropped it would break a repository nobody has touched. The store already holds
+   * exactly that fact, refreshed wholesale per repository on every main push and again nightly;
+   * nothing is computed here beyond the filter and the order.
+   *
+   * <p><b>An empty inventory REFUSES rather than answering an empty keep-set</b>, and that is the
+   * whole reason this method has a throw in it. The consumer is fail-closed — an unanswered or
+   * unreadable source deletes nothing that run — while a successful answer is authoritative. So a
+   * store that has never been filled must not say "nothing is referenced", because the sentence the
+   * consumer would read is "every internal library on the platform is unreferenced". See
+   * {@link EmptyInventoryException}, which also says why an UNREACHABLE repository is a different
+   * case: it keeps the pins its last good scan read, so the keep-set is stale rather than absent,
+   * and {@code lastScanAt} and {@code status} travel with the answer for the consumer to judge.
+   *
+   * <p><b>Two filters, and neither of them is a new rule.</b> The KIND is the one the scan already
+   * stored on the row — {@link PendingChanges#kindOf(MtPin)}, so INTERNAL means here exactly what it
+   * means on the repository page and in a bump's grouping. The ECOSYSTEM excludes GITLINK, which is
+   * internal by construction and is the one ecosystem whose version is a commit sha rather than a
+   * registry coordinate: a garbage collector handed one would look for an artifact of that name at
+   * that version and find nothing. An ecosystem word this build does not know is excluded for the
+   * same reason — there is no registry it names.
+   *
+   * <p><b>The rows are served as stored: no dedupe, no folding.</b> Five repositories pinning one
+   * library are five rows, each naming its repository and its manifest path, because the consumer
+   * folds and the fold it wants is its own. And the ORDER is total — ecosystem, name, version,
+   * repository, manifest — so two reads over an unchanged store answer identically and a diff
+   * between two runs is a change in the platform rather than in a query plan.
+   */
+  public PinSourceDto pins() {
+    List<MtRepository> rows = store.repositories();
+    if (rows.isEmpty()) {
+      throw new EmptyInventoryException();
+    }
+    List<PinSourceDto.RepositoryStateDto> repositories = new ArrayList<>();
+    for (MtRepository row : rows) {
+      repositories.add(
+          new PinSourceDto.RepositoryStateDto(row.name, row.status, row.lastScanAt, row.headSha));
+    }
+    // Read once, filtered here rather than in a query: the whole set is small, and the kind is the
+    // stored word this class reads through PendingChanges everywhere else.
+    List<PinSourceDto.ArtifactPinDto> pins = new ArrayList<>();
+    for (MtPin pin : store.allPins()) {
+      if (PendingChanges.kindOf(pin) != PinKind.INTERNAL) {
+        continue;
+      }
+      Optional<Ecosystem> ecosystem = Ecosystem.of(pin.ecosystem);
+      if (ecosystem.isEmpty() || ecosystem.get() == Ecosystem.GITLINK) {
+        continue;
+      }
+      pins.add(
+          // The column is already the wire name — `replaceInventory` writes `Ecosystem.wireName()`
+          // and the lookup above proved it is one this build knows — so it is served as stored.
+          new PinSourceDto.ArtifactPinDto(
+              pin.ecosystem, pin.name, pin.version, pin.repository, pin.manifestPath));
+    }
+    pins.sort(PIN_ORDER);
+    return new PinSourceDto(Instant.now(), List.copyOf(repositories), List.copyOf(pins));
+  }
+
+  /** The total order the pin source is served in. Every field is non-null on a stored row. */
+  private static final Comparator<PinSourceDto.ArtifactPinDto> PIN_ORDER =
+      Comparator.comparing(PinSourceDto.ArtifactPinDto::ecosystem)
+          .thenComparing(PinSourceDto.ArtifactPinDto::name)
+          .thenComparing(PinSourceDto.ArtifactPinDto::version)
+          .thenComparing(PinSourceDto.ArtifactPinDto::repository)
+          .thenComparing(PinSourceDto.ArtifactPinDto::manifestPath);
 
   /** The newest bumps, of one repository or of all of them. */
   public List<BumpDto> bumps(String repository, int limit) {

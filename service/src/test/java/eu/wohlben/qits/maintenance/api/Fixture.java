@@ -1,5 +1,6 @@
 package eu.wohlben.qits.maintenance.api;
 
+import eu.wohlben.qits.maintenance.manifest.GitmodulesParser;
 import eu.wohlben.qits.maintenance.peer.FakePeers;
 import eu.wohlben.qits.maintenance.peer.PeerTarget;
 import java.util.Map;
@@ -8,9 +9,9 @@ import java.util.Map;
  * One repository as the peers would describe it.
  *
  * <p>It is deliberately a WHOLE repository rather than a minimal one: a pom with a property and a
- * literal, a package.json with a lock, a Dockerfile with an internal and an external image, and a
- * grouping file. The point of the suite is the seams between those, and a fixture that carried one
- * pin would exercise none of them.
+ * literal, a package.json with a lock, a Dockerfile with an internal and an external image, a
+ * {@code .gitmodules} with the tree entry that pins it, and a grouping file. The point of the suite
+ * is the seams between those, and a fixture that carried one pin would exercise none of them.
  */
 public final class Fixture {
 
@@ -133,6 +134,22 @@ public final class Fixture {
       FROM qits/build-images/maven-base:2026.813.1
       """;
 
+  /**
+   * A submodule, because a gitlink is a pin like the others and is like none of them: it is INTERNAL
+   * by construction and its VERSION is a commit sha. The tree entry below is what pins it — the file
+   * names it and never says what is checked out — and a git host that reports no {@code sha} leaves
+   * it uninventoried, which is the other arm {@code ManifestScannerTest} holds.
+   */
+  private static final String GITMODULES =
+      """
+      [submodule "qits-ci-frontend"]
+      \tpath = webui
+      \turl = ../qits-ci-frontend.git
+      """;
+
+  /** What the gitlink is pinned at: a commit, which no registry has ever heard of. */
+  public static final String GITLINK_SHA = "c0ffee11d00d2233445566778899aabbccddeeff";
+
   private static final String MAINTENANCE_YML =
       """
       groups:
@@ -162,6 +179,12 @@ public final class Fixture {
             + "{\"name\":\"package.json\",\"type\":\"blob\"},"
             + "{\"name\":\"package-lock.json\",\"type\":\"blob\"},"
             + "{\"name\":\"Dockerfile\",\"type\":\"blob\"},"
+            + "{\"name\":\".gitmodules\",\"type\":\"blob\"},"
+            // The gitlink itself, as a git host that reports the mode and the object name answers
+            // it. Both spellings are read; this is the one qits-githost 33b0ccf serves.
+            + "{\"name\":\"webui\",\"type\":\"commit\",\"mode\":\"160000\",\"sha\":\""
+            + GITLINK_SHA
+            + "\"},"
             + "{\"name\":\"service\",\"type\":\"tree\"}]}";
     Map<String, String> sha = Map.of("Git-Commit-Sha", HEAD_SHA);
     peers.answer(PeerTarget.GITHOST, TREE + "main", FakePeers.Scripted.ok(root, sha));
@@ -175,6 +198,10 @@ public final class Fixture {
     peers.answer(
         PeerTarget.GITHOST, BLOB + "package-lock.json", FakePeers.Scripted.ok(PACKAGE_LOCK, sha));
     peers.answer(PeerTarget.GITHOST, BLOB + "Dockerfile", FakePeers.Scripted.ok(DOCKERFILE, sha));
+    peers.answer(
+        PeerTarget.GITHOST,
+        BLOB + GitmodulesParser.PATH,
+        FakePeers.Scripted.ok(GITMODULES, sha));
     peers.answer(
         PeerTarget.GITHOST,
         BLOB + ".config/qits/maintenance.yml",

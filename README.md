@@ -448,6 +448,12 @@ GET  /dependencies/dependents?ecosystem=&name=    → {ecosystem, name, latest,
                                                                   artifactVersion, repository,
                                                                   embeddedVersion, direct,
                                                                   occurredAt, sbomStatus}]}
+GET  /pins                                        → {generatedAt,
+                                                     repositories:[{name, status, lastScanAt,
+                                                                    headSha}],
+                                                     pins:[{ecosystem, name, version, repository,
+                                                            manifestPath}]}
+                                                                503 the inventory holds no row at all
 GET  /artifacts                                   → [{ecosystem, name, repository, latest, version,
                                                       occurredAt, sbomStatus, dependentCount,
                                                       behindCount}]
@@ -497,6 +503,21 @@ GET  /bumps/{id}                                  → {id, repository, group, br
   component whose subtree pulled it in — the first by name where several do, because a graph has
   many paths and a page needs one. **Empty means "we do not know"**, not "there are none": a
   repository whose releases have no stored document is the ordinary state during the rollout.
+- **`/pins` is the artifact GC's dependency-pin source and is read by a machine, not a page.**
+  qits-artifacts collects the registry against a few keep-sets read once per run — what the running
+  services deploy, what the images name, and this one: every internal maven, npm and docker version
+  a catalogued repository's main branch still references. Rows are served **as stored** — no dedupe
+  and no folding, because the consumer folds and each row names the repository and manifest that
+  make a keep decision explainable — in one total order (ecosystem, name, version, repository,
+  manifest), so two reads over an unchanged store answer the same bytes. `gitlink` is excluded: it
+  is INTERNAL by construction and its version is a commit sha, which is not an artifact anything
+  could collect. `repositories` carries the freshness the consumer judges the answer by.
+- **An inventory with no rows at all answers 503 rather than an empty keep-set.** The consumer is
+  fail-closed on a source it could not read — that run deletes nothing — and treats an answer as
+  authoritative, so "this service has never scanned" must never arrive as "nothing on the platform
+  is referenced". A scanned inventory in which some repositories are UNREACHABLE still answers 200:
+  those rows keep the pins their last good scan read, so the keep-set is stale rather than absent,
+  and `status` and `lastScanAt` say so on the row.
 - **`scope` on a pin is always `DIRECT`, and it is a constant on purpose.** The detail now serves two
   lists whose rows look alike, and a client rendering them in one table needs the distinction on the
   row rather than derived from which array it came out of.

@@ -435,6 +435,132 @@ class MaintenanceApiTest {
         .body("find { it.name == 'eu.wohlben.qits:qits-eventstream' }.pins[0].pending", equalTo(true));
   }
 
+  // --- the pin source the artifact GC reads -----------------------------------------------------
+
+  /**
+   * <b>THE KEEP-SET, AND WHAT IS DELIBERATELY NOT IN IT.</b> Every internal maven, npm and docker
+   * pin the inventory holds, each naming the repository and the manifest that wrote it — and none of
+   * the four kinds of row a garbage collector could not use: somebody else's package, this
+   * repository's own module, an expression that never became a version, and a gitlink, whose version
+   * is a commit sha that no registry has ever heard of.
+   */
+  @Test
+  void thePinSourceAnswersEveryInternalRegistryPinAndNothingTheGcCouldNotUse() {
+    scan();
+    given()
+        .when()
+        .get(BASE + "/pins")
+        .then()
+        .statusCode(200)
+        .body("generatedAt", notNullValue())
+        // The inventory's freshness travels with the answer: the consumer decides what a stale or
+        // unreadable repository is worth, and it cannot without these three fields.
+        .body("repositories.find { it.name == '" + Fixture.REPOSITORY + "' }.status", equalTo("OK"))
+        .body(
+            "repositories.find { it.name == '" + Fixture.REPOSITORY + "' }.lastScanAt",
+            notNullValue())
+        .body(
+            "repositories.find { it.name == '" + Fixture.REPOSITORY + "' }.headSha",
+            equalTo(Fixture.HEAD_SHA))
+        // maven, npm and docker, each carrying its repository and the manifest that pins it.
+        .body(
+            "pins.find { it.name == 'eu.wohlben.qits:qits-eventstream' }.ecosystem",
+            equalTo("maven"))
+        .body(
+            "pins.find { it.name == 'eu.wohlben.qits:qits-eventstream' }.version",
+            equalTo("2026.811.1"))
+        .body(
+            "pins.find { it.name == 'eu.wohlben.qits:qits-eventstream' }.repository",
+            equalTo(Fixture.REPOSITORY))
+        .body(
+            "pins.find { it.name == 'eu.wohlben.qits:qits-eventstream' }.manifestPath",
+            equalTo("pom.xml"))
+        .body("pins.find { it.name == '@qits/ui-components' }.ecosystem", equalTo("npm"))
+        // The LOCK's resolved version, because that is what an install fetches out of the registry.
+        .body("pins.find { it.name == '@qits/ui-components' }.version", equalTo("2026.8.1"))
+        .body("pins.find { it.name == '@qits/ui-components' }.manifestPath", equalTo("package.json"))
+        .body("pins.find { it.name == 'qits/build-images/maven-base' }.ecosystem", equalTo("docker"))
+        .body(
+            "pins.find { it.name == 'qits/build-images/maven-base' }.version", equalTo("2026.813.1"))
+        .body(
+            "pins.find { it.name == 'qits/build-images/maven-base' }.manifestPath",
+            equalTo("Dockerfile"))
+        // EXTERNAL: somebody else's, and not this registry's to keep.
+        .body("pins.find { it.name == 'io.quarkus.platform:quarkus-bom' }", nullValue())
+        .body("pins.find { it.name == '@angular/core' }", nullValue())
+        .body(
+            "pins.find { it.name == 'quay/quarkus/ubi9-quarkus-mandrel-builder-image' }",
+            nullValue())
+        // REACTOR and UNRESOLVED: a version that moves with a release, and one that is not a version.
+        .body("pins.find { it.name == 'eu.wohlben.qits:qits-ci-domain' }", nullValue())
+        .body("pins.find { it.name == 'g:mystery' }", nullValue())
+        // GITLINK: internal by construction, and a commit sha rather than a registry coordinate.
+        .body("pins.find { it.name == 'qits-ci-frontend' }", nullValue())
+        .body("pins.findAll { it.ecosystem == 'gitlink' }", equalTo(java.util.List.of()))
+        .body("pins.findAll { it.version == '" + Fixture.GITLINK_SHA + "' }",
+            equalTo(java.util.List.of()));
+
+    // …and the gitlink really is in the inventory, so the absence above is a filter rather than a
+    // fixture that never produced one.
+    given()
+        .when()
+        .get(BASE + "/repositories/" + Fixture.REPOSITORY)
+        .then()
+        .statusCode(200)
+        .body("pins.find { it.name == 'qits-ci-frontend' }.ecosystem", equalTo("gitlink"))
+        .body("pins.find { it.name == 'qits-ci-frontend' }.kind", equalTo("INTERNAL"))
+        .body("pins.find { it.name == 'qits-ci-frontend' }.version", equalTo(Fixture.GITLINK_SHA));
+  }
+
+  /**
+   * THE REFUSAL, AND IT IS THE POINT OF THE ROUTE HAVING ONE. The consumer is fail-closed on a
+   * source it could not read and treats an answer as authoritative — so an inventory that has never
+   * been filled must not answer "nothing is referenced", which is the sentence that would collect
+   * every internal library on the platform.
+   */
+  @Test
+  void anInventoryThatWasNeverFilledRefusesRatherThanAnsweringAnEmptyKeepSet() {
+    // No scan: the reset in @BeforeEach left the store with no repository row at all.
+    given()
+        .when()
+        .get(BASE + "/pins")
+        .then()
+        .statusCode(503)
+        .contentType(ContentType.JSON)
+        .body("message", containsString("no repository"));
+  }
+
+  /**
+   * A TOTAL ORDER, so a consumer diffing two runs sees a change in the platform rather than in a
+   * query plan. Everything but the read moment is identical between two calls over one store.
+   */
+  @Test
+  void twoReadsOfAnUnchangedStoreAnswerTheSamePinsInTheSameOrder() {
+    scan();
+    List<java.util.Map<String, Object>> first =
+        given().when().get(BASE + "/pins").then().statusCode(200).extract().path("pins");
+    List<java.util.Map<String, Object>> second =
+        given().when().get(BASE + "/pins").then().statusCode(200).extract().path("pins");
+    assertFalse(first.isEmpty(), "the scan must have left something to order");
+    assertEquals(first, second, "the pins are served in one order, element for element");
+
+    // And the order is the documented one — ecosystem, name, version, repository, manifest — rather
+    // than whatever the store happened to answer twice.
+    List<String> keys =
+        first.stream()
+            .map(
+                pin ->
+                    String.join(
+                        " ",
+                        String.valueOf(pin.get("ecosystem")),
+                        String.valueOf(pin.get("name")),
+                        String.valueOf(pin.get("version")),
+                        String.valueOf(pin.get("repository")),
+                        String.valueOf(pin.get("manifestPath"))))
+            .toList();
+    assertEquals(keys.stream().sorted().toList(), keys, "the pin source is served in a total order");
+  }
+
   @Test
   void anUnknownRepositoryIsAFourOhFourWithTheMessageEnvelope() {
     given()

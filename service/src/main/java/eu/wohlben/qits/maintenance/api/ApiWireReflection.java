@@ -7,6 +7,7 @@ import eu.wohlben.qits.maintenance.dto.DependentDto;
 import eu.wohlben.qits.maintenance.dto.DependentsDto;
 import eu.wohlben.qits.maintenance.dto.GroupDto;
 import eu.wohlben.qits.maintenance.dto.PinDto;
+import eu.wohlben.qits.maintenance.dto.PinSourceDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDependentsDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDetailDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDto;
@@ -52,6 +53,11 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       RepositoryDependentsDto.class,
       RepositoryDependentsDto.ArtifactDependentsDto.class,
       TransitiveDto.class,
+      // The GC's pin source. Nothing renders it — qits-artifacts reads it through the orchestrator
+      // — so a missing registration would be invisible until a collection ran against a 500.
+      PinSourceDto.class,
+      PinSourceDto.RepositoryStateDto.class,
+      PinSourceDto.ArtifactPinDto.class,
       // BumpDto grew `releaseRequestId` with the release door, and the bump detail page reads it.
       BumpDto.class,
       ScanDto.class,
