@@ -1,6 +1,5 @@
 package eu.wohlben.qits.maintenance.train;
 
-import eu.wohlben.qits.maintenance.entity.MtArtifact;
 import eu.wohlben.qits.maintenance.entity.MtPin;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.entity.MtTrain;
@@ -8,6 +7,7 @@ import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.RepositoryArchetype;
 import eu.wohlben.qits.maintenance.model.TrainEndKind;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
+import eu.wohlben.qits.maintenance.train.ReleaseCoordinates.Coordinate;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
@@ -17,7 +17,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import org.jboss.logging.Logger;
@@ -91,6 +90,15 @@ public class TrainService {
 
   @Inject MaintenanceStore store;
 
+  @Inject ReleaseCoordinates coordinates;
+
+  /**
+   * The evaluation, called at the end of a spawn for the ONE thing only a spawn can do: resolve the
+   * nodes elsewhere in the estate whose adoption was this very release and which could not be
+   * linked because this train did not exist yet. See {@link TrainEvaluator#arrived}.
+   */
+  @Inject TrainEvaluator evaluator;
+
   /**
    * The package one {@code SoftwareRelease} frame announced, when it names one this service can
    * join on.
@@ -152,6 +160,18 @@ public class TrainService {
           version,
           announced == null ? "unpinnable" : announced.ecosystem().wireName());
     }
+    // AND THE OTHER SIDE OF THE RACE, which is the only reason a spawn evaluates anything.
+    //
+    // The artifact rows and the train rows are written by two INDEPENDENT durable consumers of the
+    // same event and neither waits for the other, so this release's own SBOM may have been ingested
+    // BEFORE this station existed. When it was, the nodes it adopted upstream — "the frontend took
+    // the library's version" — were adopted with a null `child_train_id`, because the train the
+    // link points at is the one being opened right here. Resolving it from the ingest side alone
+    // would leave those nodes stranded on a coin flip.
+    //
+    // Cheap when there is nothing to do: two indexed reads for a repository nobody's train is
+    // waiting on, which is what keeps this inside the claim transaction honest.
+    evaluator.arrived(spawned.train());
     return spawned;
   }
 
@@ -226,9 +246,9 @@ public class TrainService {
     Map<String, String> archetypes = archetypes();
     List<MaintenanceStore.NewNode> nodes = new ArrayList<>();
 
-    Set<Coordinate> coordinates = releasedCoordinates(repository, version, announced);
+    Set<Coordinate> publishedCoordinates = releasedCoordinates(repository, version, announced);
     Set<String> consumers = new LinkedHashSet<>();
-    for (Coordinate coordinate : coordinates) {
+    for (Coordinate coordinate : publishedCoordinates) {
       for (MtPin pin : store.internalPinsOn(coordinate.ecosystem(), coordinate.name())) {
         consumers.add(pin.repository);
       }
@@ -275,52 +295,34 @@ public class TrainService {
     return List.copyOf(nodes);
   }
 
-  /** One released package, as both sides of the derivation join on it. */
-  private record Coordinate(Ecosystem ecosystem, String name) {}
-
   /**
    * What this release put into a registry, as far as anything here knows.
    *
-   * <p>The union of every {@code mt_artifact} row this repository has at this version and the
-   * coordinate the frame itself announced. The union rather than a fallback: the artifact rows are
-   * written by a DIFFERENT durable consumer, so this frame's own row may not exist yet — and a
-   * sibling frame that arrived first may have written rows this frame knows nothing about. Taking
-   * both is the only reading that is right whichever order the two consumers run in.
+   * <p>The union of {@link ReleaseCoordinates} — every {@code mt_artifact} row this repository has
+   * at this version — and the coordinate the frame itself announced. The union rather than a
+   * fallback: the artifact rows are written by a DIFFERENT durable consumer, so this frame's own row
+   * may not exist yet — and a sibling frame that arrived first may have written rows this frame
+   * knows nothing about. Taking both is the only reading that is right whichever order the two
+   * consumers run in.
+   *
+   * <p>The shared half is shared for a reason: the evaluation joins on exactly the same pairs when
+   * it decides whether a consumer's bill of materials carries this release, and a second derivation
+   * would be a second chance for the two halves of one train to disagree about what it released.
    *
    * <p>GITLINK never appears: {@code mt_artifact} holds only the three registry ecosystems (V3), and
    * the guard below says so out loud rather than relying on it.
    */
   private Set<Coordinate> releasedCoordinates(
       String repository, String version, ReleasedPackage announced) {
-    Set<Coordinate> coordinates = new LinkedHashSet<>();
-    for (MtArtifact artifact : store.artifactsOfRepository(spellings(repository))) {
-      if (!version.equals(artifact.version)) {
-        continue;
-      }
-      Ecosystem.of(artifact.ecosystem)
-          .filter(ecosystem -> ecosystem != Ecosystem.GITLINK)
-          .ifPresent(ecosystem -> coordinates.add(new Coordinate(ecosystem, artifact.name)));
-    }
+    Set<Coordinate> released = new LinkedHashSet<>(coordinates.of(repository, version));
     if (announced != null
         && announced.ecosystem() != null
         && announced.ecosystem() != Ecosystem.GITLINK
         && announced.name() != null
         && !announced.name().isBlank()) {
-      coordinates.add(new Coordinate(announced.ecosystem(), announced.name()));
+      released.add(new Coordinate(announced.ecosystem(), announced.name()));
     }
-    return coordinates;
-  }
-
-  /**
-   * Every string this repository's artifact rows may carry: its catalog name, and the catalog id
-   * rows written before the listener learned to resolve it still hold.
-   */
-  private List<String> spellings(String repository) {
-    Optional<MtRepository> row = store.repository(repository);
-    String catalogId = row.map(found -> found.catalogId).orElse(null);
-    return catalogId == null || catalogId.isBlank()
-        ? List.of(repository)
-        : List.of(repository, catalogId);
+    return released;
   }
 
   /**

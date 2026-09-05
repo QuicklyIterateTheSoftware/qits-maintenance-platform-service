@@ -1585,12 +1585,157 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
   }
 
   /**
+   * One node together with the train it belongs to.
+   *
+   * <p>The evaluation needs both at once and needs them consistently: a node says PENDING, and what
+   * decides whether that is still worth reading evidence for is its train's version, its
+   * coordinates and its status. Two separate reads would be two round trips per node and a window
+   * between them.
+   */
+  public record NodeOnTrain(MtTrain train, MtTrainNode node) {}
+
+  /**
+   * <b>EVERY NODE STILL OWED, ON EVERY TRAIN THAT IS STILL EVALUATING</b> — the evaluation's whole
+   * input, in two indexed reads.
+   *
+   * <p><b>SUPERSEDED trains are in, and that is the point of the method rather than a leniency.</b>
+   * {@code openTrains()} answers what a person is SHOWN; this answers what is still being decided.
+   * A repository that takes the version a superseded train carried has still adopted it and the row
+   * should say so — see {@code TrainStatus.SUPERSEDED}. Only COMPLETED is out, because a completed
+   * train has no node left to move.
+   *
+   * @param consumer whose owed nodes to answer, or null for every consumer's
+   */
+  @ActivateRequestContext
+  public List<NodeOnTrain> owedNodes(String consumer) {
+    return DbRetry.inNewTx(
+        "read the owed train nodes of " + (consumer == null ? "every consumer" : consumer),
+        () -> {
+          List<MtTrainNode> nodes =
+              consumer == null
+                  ? MtTrainNode.<MtTrainNode>find(
+                          "state <> ?1", Sort.by("consumer"), TrainNodeState.LANDED.name())
+                      .list()
+                  : MtTrainNode.<MtTrainNode>find(
+                          "consumer = ?1 and state <> ?2",
+                          Sort.by("consumer"),
+                          consumer,
+                          TrainNodeState.LANDED.name())
+                      .list();
+          if (nodes.isEmpty()) {
+            return List.<NodeOnTrain>of();
+          }
+          List<UUID> trainIds = nodes.stream().map(node -> node.trainId).distinct().toList();
+          Map<UUID, MtTrain> trains = new LinkedHashMap<>();
+          for (MtTrain train : MtTrain.<MtTrain>find("id in ?1", trainIds).list()) {
+            trains.put(train.id, train);
+          }
+          List<NodeOnTrain> owed = new java.util.ArrayList<>();
+          for (MtTrainNode node : nodes) {
+            MtTrain train = trains.get(node.trainId);
+            if (train != null && TrainStatus.of(train.status) != TrainStatus.COMPLETED) {
+              owed.add(new NodeOnTrain(train, node));
+            }
+          }
+          return List.copyOf(owed);
+        });
+  }
+
+  /** Every owed node of every consumer — the boot-time re-evaluation's input. */
+  @ActivateRequestContext
+  public List<NodeOnTrain> owedNodes() {
+    return owedNodes(null);
+  }
+
+  /**
+   * <b>WHO IS WAITING ON THIS TRAIN</b> — the reverse of {@code child_train_id}, and the one read
+   * the completion cascade walks.
+   *
+   * <p>An ADOPTED node pointing at a train is a repository that took the version and released it;
+   * what it is waiting for is that release of its own to arrive everywhere. When it does, this
+   * answers who lands with it.
+   *
+   * <p>ADOPTED only. A PENDING node has no link yet and a LANDED one is done, so neither is a
+   * landing this call could make.
+   */
+  @ActivateRequestContext
+  public List<MtTrainNode> nodesAwaitingChild(UUID childTrainId) {
+    if (childTrainId == null) {
+      return List.of();
+    }
+    return DbRetry.inNewTx(
+        "read the nodes waiting on train " + childTrainId,
+        () ->
+            MtTrainNode.<MtTrainNode>find(
+                    "childTrainId = ?1 and state = ?2",
+                    childTrainId,
+                    TrainNodeState.ADOPTED.name())
+                .list());
+  }
+
+  /**
+   * <b>THE LINK, AND NOTHING ELSE.</b> Points an already-ADOPTED node at the train its adoption
+   * produced, without touching the adoption itself.
+   *
+   * <p>It exists because of the race between the two consumers of one release: an SBOM ingested
+   * before the sibling {@code SoftwareRelease} frame spawned the child's train adopts the node with
+   * no link at all, and the spawn behind it is what resolves the other side. {@link #nodeAdopted}
+   * cannot do it — that method rewrites {@code adopted_version} and {@code adopted_at}, and
+   * re-stamping them from a later evaluation would move evidence backwards or forwards for no
+   * reason. See {@code train/TrainEvaluator}.
+   *
+   * <p><b>Write-once.</b> A node that already carries a child train keeps it, so a second
+   * evaluation is a read and a return.
+   *
+   * @return whether this call was the one that wrote the link
+   */
+  @ActivateRequestContext
+  public boolean linkNodeChild(UUID nodeId, UUID childTrainId) {
+    if (nodeId == null || childTrainId == null) {
+      return false;
+    }
+    return DbRetry.inNewTx(
+        "link node " + nodeId + " to train " + childTrainId,
+        () -> {
+          MtTrainNode row = MtTrainNode.findById(nodeId);
+          if (row == null || row.childTrainId != null) {
+            return false;
+          }
+          row.childTrainId = childTrainId;
+          getEntityManager().flush();
+          return true;
+        });
+  }
+
+  /**
+   * Every train that has not arrived, whichever status it wears — the completion belt's input.
+   *
+   * <p>OPEN and SUPERSEDED both, for {@link #owedNodes}'s reason: a superseded train still
+   * completes when its last node lands, and a boot that finds one all-landed-but-still-open has to
+   * close it whichever word it carries.
+   */
+  @ActivateRequestContext
+  public List<MtTrain> unfinishedTrains() {
+    return DbRetry.inNewTx(
+        "read every train that has not arrived",
+        () ->
+            MtTrain.<MtTrain>find(
+                    "status <> ?1",
+                    Sort.by("createdAt").descending(),
+                    TrainStatus.COMPLETED.name())
+                .list());
+  }
+
+  /**
    * The consumer took the version — on a branch, in a commit, in a configuration.
    *
-   * @param adoptedVersion what it actually took, which is usually and not always this train's
-   *     version: a consumer may skip a release and adopt the one after it
+   * @param adoptedVersion the CONSUMER's OWN released version that carries the adoption, never the
+   *     version of the dependency it took. It is read as half an address — {@code
+   *     release-requests/by-release/<consumer catalog id>/<adopted_version>} — and that resolver
+   *     matches the consumer's own releases. See {@code MtTrainNode.adoptedVersion}.
    * @param childTrainId the release that adoption produced, when it produced one. Null otherwise,
-   *     and null is the ordinary case at the moment of adoption — the child arrives later.
+   *     and null is the ordinary case at the moment of adoption — the child arrives later, which is
+   *     exactly why {@code adoptedVersion} cannot be something only reachable through it.
    */
   @ActivateRequestContext
   public void nodeAdopted(

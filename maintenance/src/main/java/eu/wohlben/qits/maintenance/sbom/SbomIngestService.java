@@ -4,6 +4,7 @@ import eu.wohlben.qits.maintenance.entity.MtArtifact;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.SbomStatus;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
+import eu.wohlben.qits.maintenance.train.TrainEvaluator;
 import eu.wohlben.qits.maintenance.work.WorkQueue;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -42,6 +43,9 @@ public class SbomIngestService {
   @Inject SbomClient client;
 
   @Inject WorkQueue queue;
+
+  /** What the stored graph is then read as evidence FOR — see {@link #adopted}. */
+  @Inject TrainEvaluator trains;
 
   /**
    * What an announced release leaves behind: a PENDING row, and a nudge to the queue.
@@ -134,7 +138,38 @@ public class SbomIngestService {
             direct,
             parsed.edges().size(),
             parsed.problems().isEmpty() ? "" : " — " + String.join("; ", parsed.problems()));
+        adopted(artifactId, artifact);
       }
+    }
+  }
+
+  /**
+   * <b>AND THEN THE RELEASE TRAINS, because a bill of materials is the evidence an adoption is read
+   * out of.</b>
+   *
+   * <p>A repository's own release naming a library at the version some train is carrying is that
+   * repository having ADOPTED it — see {@code train/TrainEvaluator}. The hook is here, behind the
+   * commit, for two reasons: this is the moment the graph became true, and this is already the
+   * single worker thread, so an evaluation reading the components back adds no concurrency story
+   * that the ingest did not already have.
+   *
+   * <p><b>The failure is swallowed, and it is the one place in this file where that is worth
+   * arguing.</b> The document is stored and the row is INGESTED — that work SUCCEEDED, and letting
+   * a train evaluation throw out of here would log this artifact as an ingest that could not be
+   * completed and say nothing about what actually failed. The adoption is not lost either: the
+   * boot-time re-evaluation reads the same graph and reaches the same answer, which is exactly what
+   * that step is for.
+   */
+  private void adopted(UUID artifactId, MtArtifact artifact) {
+    try {
+      trains.ingested(artifactId);
+    } catch (RuntimeException e) {
+      LOG.errorf(
+          e,
+          "The sbom of %s %s was stored, but the release trains it is evidence for could not be"
+              + " evaluated; the next boot's re-evaluation will pick it up",
+          artifact.name,
+          artifact.version);
     }
   }
 

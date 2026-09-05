@@ -59,8 +59,17 @@ public class MtTrainNode extends PanacheEntityBase {
   public String endKind;
 
   /**
-   * What the consumer actually took — usually the train's version, and not always: a consumer can
-   * skip a release and adopt the one after it, which still closes this node. Null while PENDING.
+   * <b>THE CONSUMER'S OWN RELEASE that carries the adoption</b> — not the version of the dependency
+   * it took. Null while PENDING.
+   *
+   * <p>It is read as one half of an address: {@code
+   * release-requests/by-release/<consumer catalog id>/<adopted_version>} resolves the release
+   * request the consumer opened for that release, and that resolver matches the CONSUMER's own
+   * releases by version. The dependency version would resolve to nothing there.
+   *
+   * <p>Beside {@link #childTrainId} rather than derivable from it: the link is null until the
+   * sibling consumer spawns the adopting release's station, and the address above has to compose in
+   * that window too.
    */
   @Column(name = "adopted_version", length = 255)
   public String adoptedVersion;

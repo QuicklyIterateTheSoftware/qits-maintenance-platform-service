@@ -617,11 +617,13 @@ class TrainSpawnTest {
     MtTrain train = trains.spawn(library, "1.0.0", maven(coordinate), NOON).train();
     MtTrainNode node = store.trainNodes(train.id).get(0);
 
-    store.nodeLanded(node.id, "1.1.0", null, EVENING);
+    store.nodeLanded(node.id, "4.0.0", null, EVENING);
 
     MtTrainNode landed = store.trainNode(node.id).orElseThrow();
     assertEquals(EVENING, landed.adoptedAt);
     assertEquals(
-        "1.1.0", landed.adoptedVersion, "a consumer may skip a release and adopt the one after it");
+        "4.0.0",
+        landed.adoptedVersion,
+        "the CONSUMER's own release that carries it, which is not this train's version");
   }
 }

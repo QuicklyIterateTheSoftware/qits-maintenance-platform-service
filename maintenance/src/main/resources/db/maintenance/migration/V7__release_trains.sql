@@ -160,9 +160,29 @@ create table mt_train_node (
     -- idempotent (train, consumer, end kind) key everything else here writes through.
     end_kind varchar(32) not null,
 
-    -- WHAT THE CONSUMER ACTUALLY TOOK. Usually the train's own version, and not always: a consumer
-    -- can skip a release and adopt the one after it, in which case the node that closes is this
-    -- train's and the version recorded is the newer one. Null while PENDING.
+    -- THE CONSUMER'S OWN RELEASE THAT CARRIES THE ADOPTION — its version, never the version of the
+    -- dependency it took. Null while PENDING, and the distinction is worth the paragraph because
+    -- the obvious reading is the wrong one.
+    --
+    -- The evidence for an adoption is a component in the consumer's bill of materials naming this
+    -- train's coordinate at or above this train's version. It would be natural to record THAT
+    -- version here ("what they took"), and it would make this column useless. What reads it is an
+    -- ADDRESS: the detail view composes the adopting release's request link as
+    -- `release-requests/by-release/<consumer catalog id>/<adopted_version>`, and that resolver
+    -- matches the CONSUMER's own release requests by version. A dependency version there resolves
+    -- to nothing, or worse to some unrelated release of the consumer that happens to share a
+    -- number.
+    --
+    -- IT SITS BESIDE child_train_id RATHER THAN BEING DERIVABLE FROM IT, and that is the second
+    -- reason it is a column at all. The link below is null for as long as the sibling durable
+    -- consumer has not spawned the station of the adopting release — an ordinary window, not an
+    -- error — and the address above has to compose during it. So the version is written at the
+    -- moment of adoption, off the artifact row the evidence came from, and the link is filled in
+    -- afterwards when the other side turns up.
+    --
+    -- The dependency version actually taken is not lost, just not duplicated here: it is the
+    -- mt_artifact_component row the evaluation matched, reachable from the consumer's artifact at
+    -- this version. Nothing reads it, so nothing stores it twice.
     adopted_version varchar(255),
 
     adopted_at timestamp(6) with time zone,

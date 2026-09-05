@@ -174,6 +174,10 @@ class ClaimTransactionTest {
           store.trainNodes(UUID.randomUUID());
           store.trainNode(UUID.randomUUID());
           store.nodesOwedBy(REPOSITORY);
+          store.owedNodes(REPOSITORY);
+          store.owedNodes();
+          store.nodesAwaitingChild(UUID.randomUUID());
+          store.unfinishedTrains();
 
           // AND THEN A WRITE, which is where the production failure actually surfaced: the bare
           // read enlists, and the inNewTx behind it is the one that dies.
@@ -224,6 +228,11 @@ class ClaimTransactionTest {
    * coordinate, and the SBOM dependents of each. That is five store reads, every one of them on this
    * datasource, every one of them inside somebody else's claim — and then a write. It is exactly the
    * shape that wedged the other consumer twice, with more of it.
+   *
+   * <p><b>And there are now reads BEHIND the write as well</b>, which is a shape none of the other
+   * listeners has: a spawn ends by asking whether anything in the estate was waiting for this
+   * release's train to exist ({@code TrainEvaluator.arrived}), and that read-write-read sandwich is
+   * inside the same claim. The rule is the same one and this walks it.
    */
   @Test
   void aReleaseSpawnsItsTrainWhenTheFrameArrivesInsideItsClaim() {

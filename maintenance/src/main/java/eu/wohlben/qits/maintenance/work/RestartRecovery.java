@@ -3,6 +3,7 @@ package eu.wohlben.qits.maintenance.work;
 import eu.wohlben.qits.maintenance.bump.BumpService;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
 import eu.wohlben.qits.maintenance.sbom.SbomIngestService;
+import eu.wohlben.qits.maintenance.train.TrainEvaluator;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -29,6 +30,11 @@ import org.jboss.logging.Logger;
  *       that was queued and never ran — nothing in-process was lost and nothing is running
  *       elsewhere, because the work is one idempotent read of an immutable document. So it is
  *       re-queued rather than failed or followed.
+ *   <li>And the RELEASE TRAINS are RE-DERIVED, which is a fourth shape again: nothing was in
+ *       flight at all. A train node is a conclusion drawn from rows that are all still there, so the
+ *       repair is simply to draw it again — see {@code train/TrainEvaluator.recover}. It heals the
+ *       crash between an SBOM graph committing and the hook behind it running, and it is the
+ *       backfill path the day the derivation of adoption gets better.
  * </ul>
  *
  * <p><b>It never stops the boot.</b> A store that will not answer at startup is a readiness
@@ -48,6 +54,8 @@ public class RestartRecovery {
   @Inject BumpService bumps;
 
   @Inject SbomIngestService sboms;
+
+  @Inject TrainEvaluator trains;
 
   void onStart(@Observes StartupEvent event) {
     try {
@@ -73,6 +81,14 @@ public class RestartRecovery {
       sboms.sweep();
     } catch (RuntimeException e) {
       LOG.error("The sboms a previous process had not read could not be re-queued.", e);
+    }
+    try {
+      // BEHIND THE SBOM RE-QUEUE ON PURPOSE. The queue is one thread and it is a queue, so the
+      // documents a previous process never read are fetched first and the re-evaluation runs over a
+      // graph that already includes them. Queued, not run, like everything above it.
+      trains.recover();
+    } catch (RuntimeException e) {
+      LOG.error("The release trains could not be queued for re-evaluation.", e);
     }
   }
 }
