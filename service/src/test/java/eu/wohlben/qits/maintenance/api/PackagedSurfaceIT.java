@@ -231,6 +231,9 @@ public class PackagedSurfaceIT {
     // second entry in `quarkus.quinoa.ignored-path-prefixes` — but it is a fourth top-level route
     // and the segment it claims is asserted here like the other three.
     asAdmin().when().get("/maintenance/api/artifacts").then().statusCode(200);
+    // …and the release trains are the fifth, for the same reason and with the same consequence:
+    // one prefix entry covers the whole surface, and the segment is asserted rather than assumed.
+    asAdmin().when().get("/maintenance/api/trains").then().statusCode(200);
 
     // The edge path-routes verbatim by prefix, so there is no unprefixed form to fall back to — and
     // at the root an unprefixed /api/repositories is the CLIENT's ground, which is why the check is
@@ -255,7 +258,7 @@ public class PackagedSurfaceIT {
    * why the string is asserted rather than the status alone.
    *
    * <p><b>It answers anonymously, and that is not a hole in "no anonymous surface".</b> That rule is
-   * about this service's DATA: every route in the four controllers is {@code @RolesAllowed} and the
+   * about this service's DATA: every route this API serves is {@code @RolesAllowed} and the
    * test above pins a 401 for an unauthenticated read. What is served here is a static bundle with
    * no configuration in it.
    */

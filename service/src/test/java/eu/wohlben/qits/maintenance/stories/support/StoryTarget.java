@@ -87,6 +87,16 @@ public final class StoryTarget {
   /** The bump log — what was asked of qits-ci, and what came of it. */
   public static final String BUMPS = API + "/bumps";
 
+  /** Where each release of this platform got to. Read-only: nothing here queues anything. */
+  public static final String TRAINS = API + "/trains";
+
+  /**
+   * The release cross-link, as the journey view and qits-projects' release-request page compose it.
+   * A QUERY resolver rather than a path route, so {@code /trains/{id}} stays unambiguous — which
+   * also means the two halves of the key never appear in a diagram's label.
+   */
+  public static final String TRAIN_BY_RELEASE = TRAINS + "/by-release";
+
   // --- the mount points the shipped configuration spells -----------------------------------------
 
   /** qits-artifacts' hosted maven repository, as {@code registries.maven-url} mounts it. */

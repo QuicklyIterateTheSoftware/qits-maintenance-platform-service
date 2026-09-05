@@ -12,6 +12,9 @@ import eu.wohlben.qits.maintenance.dto.RepositoryDependentsDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDetailDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDto;
 import eu.wohlben.qits.maintenance.dto.ScanDto;
+import eu.wohlben.qits.maintenance.dto.TrainDto;
+import eu.wohlben.qits.maintenance.dto.TrainNodeDto;
+import eu.wohlben.qits.maintenance.dto.TrainSummaryDto;
 import eu.wohlben.qits.maintenance.dto.TransitiveDto;
 import eu.wohlben.qits.maintenance.pending.Change;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -61,7 +64,15 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       // BumpDto grew `releaseRequestId` with the release door, and the bump detail page reads it.
       BumpDto.class,
       ScanDto.class,
-      Change.class
+      Change.class,
+      // The release trains. Nothing here rides in a Response.entity — all three routes declare
+      // their type — but the note above is exactly about that not being the test: which types the
+      // build-time analysis happens to find is an implementation detail, and the journey view is a
+      // page whose whole content is these three records.
+      TrainSummaryDto.class,
+      TrainDto.class,
+      TrainDto.PackageDto.class,
+      TrainNodeDto.class
     })
 final class ApiWireReflection {
 

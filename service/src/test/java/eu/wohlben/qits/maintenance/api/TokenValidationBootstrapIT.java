@@ -68,7 +68,7 @@ import org.junit.jupiter.api.TestMethodOrder;
  * an order. The two methods here are {@code @Order}ed for the same reason, one level down.
  *
  * <p><b>The route both stories drive is {@code GET /maintenance/api/repositories}</b>, and it is
- * chosen as the least side-effectful read this service has. Every route in the four controllers is
+ * chosen as the least side-effectful read this service has. Every route this API serves is
  * {@code @RolesAllowed({"qits:admin", "qits:system"})} — a person presses <i>Bump now</i> in a
  * browser and a machine may ask for the same thing — so the machine role reaches all of them and
  * the choice is about what the request DOES, not about what it takes:

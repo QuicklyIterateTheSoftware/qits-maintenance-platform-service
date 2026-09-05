@@ -473,6 +473,19 @@ GET  /bumps/{id}                                  → {id, repository, group, br
                                                      trigger, status, ciEventId, ciRunId, ciRunIds,
                                                      configPath, ciRunStatus, startedAt, finishedAt,
                                                      message, changes:[…]}
+GET  /trains?repository=&limit=50                 → [{id, repository, version, status, createdAt,
+                                                      completedAt, nodeCount, landedCount}]
+GET  /trains/{id}                                 → {id, repository, version, status, createdAt,
+                                                     completedAt, supersededBy,
+                                                     packages:[{ecosystem, name}],
+                                                     nodes:[{id, consumer, consumerCatalogId,
+                                                             consumerStatus, archetype, endKind,
+                                                             state, adoptedVersion, adoptedAt,
+                                                             childTrainId, landedAt}]}
+                                                                404 no such train
+GET  /trains/by-release?repository=&version=      → the train above
+                                                                400 half a key is not a lookup
+                                                                404 that release has no station
 ```
 
 - `scope` is `INTERNAL`, `EXTERNAL` or `ALL`. **Every scan re-reads every manifest whatever the
@@ -523,6 +536,29 @@ GET  /bumps/{id}                                  → {id, repository, group, br
 - **`scope` on a pin is always `DIRECT`, and it is a constant on purpose.** The detail now serves two
   lists whose rows look alike, and a client rendering them in one table needs the distinction on the
   row rather than derived from which array it came out of.
+- **The train routes answer ONE STATION each, and the journey is stitched by the client.** A node's
+  `childTrainId` names the train its adoption produced, and nothing here follows one: a merged
+  journey has no natural size — a library release reaches the whole estate two hops out — and no
+  natural root, because the same train is a child of one journey and the head of another. A view
+  that walks the links draws exactly the depth it renders and caches each station on its own.
+- **`consumerCatalogId` and `consumerStatus` are joined LIVE from `mt_repository`; everything else on
+  a node is the log.** The id is what makes a node clickable —
+  `release-requests/by-release/<consumerCatalogId>/<adoptedVersion>` is the request the adoption
+  opened, and neither half is derivable from the consumer's name, which is all the row stores. Both
+  are null for a `CONFIG_IMAGE_PIN` node, whose consumer is an APPLICATION rather than a repository,
+  and `ABSENT` beside a PENDING node says the train is waiting on something the catalog no longer
+  lists. `archetype` is the opposite case and stays the node's own frozen column: a repository
+  re-classified next month did not retroactively change the kind of adoption it was placed for.
+- **`by-release` is a query resolver rather than a path route**, so `/trains/{id}` stays unambiguous
+  and no version has to survive being a path segment. Both halves are required — answering "the
+  newest train of that repository" would be this service deciding which release was meant. Its 404
+  means *that release has no station*, which is a different thing from a train with no nodes: the
+  latter is a journey of length zero and answers 200 with an empty `nodes`.
+- **`packages` is what the release put into a registry**, read from the `mt_artifact` rows of the
+  train's own `(repository, version)` through the same `ReleaseCoordinates` the spawn derived its
+  membership from — so the label on a station and the adopters on it cannot disagree about what was
+  released. It carries no version, because every row of it is at the train's. Empty is ordinary: a
+  `docs`-only release names no coordinate, and nothing pins a daemon.
 
 The document is at `/maintenance/q/openapi`, the browsable UI at `/maintenance/q/swagger-ui`, and
 readiness at `/maintenance/q/health/ready`. The client is served at `/` — this service has a host of
