@@ -14,5 +14,15 @@ package eu.wohlben.qits.maintenance.catalog;
  *     spells its {@code repository} field this way — so it is the only thing that can turn such a
  *     wire value back into a name. Null when the listing carried none, which is a row nothing can
  *     translate rather than a row to skip.
+ * @param archetype what kind of thing the repository is, <b>verbatim as the catalog spelled it</b>
+ *     — SERVICE, DAEMON, LIBRARY, FRONTEND, CLI, IMAGE, PROJECT, SERVICE_TEMPLATE, FORK, or
+ *     whatever qits-projects adds next. A raw String rather than {@link
+ *     eu.wohlben.qits.maintenance.model.RepositoryArchetype} on purpose: the vocabulary is theirs
+ *     and this record's job is to carry what arrived, so a word this service has never heard of
+ *     reaches the store intact instead of becoming a null nobody can debug. Parsing is {@code
+ *     RepositoryArchetype.of}, and it happens where a decision is taken — the train layer — not
+ *     here. Null when the listing carried none, which is a repository worth scanning like any
+ *     other.
  */
-public record CatalogEntry(String project, String name, String mainBranch, String catalogId) {}
+public record CatalogEntry(
+    String project, String name, String mainBranch, String catalogId, String archetype) {}

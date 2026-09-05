@@ -94,6 +94,15 @@ public class InventoryIT {
         .body("name", hasItem(StoryCatalog.REPOSITORY))
         .body("find { it.name == '" + StoryCatalog.REPOSITORY + "' }.status", equalTo("OK"))
         .body("find { it.name == '" + StoryCatalog.REPOSITORY + "' }.pending", greaterThan(0))
+        // WHAT EACH REPOSITORY IS, read from the store rather than asked of qits-projects — which
+        // is the whole point of the column and is checked by the five directed negatives below. It
+        // is null for the repository the catalog did not classify, and that reads as "we were not
+        // told" rather than as a kind of its own.
+        .body(
+            "find { it.name == '" + StoryCatalog.REPOSITORY + "' }.archetype",
+            equalTo(StoryCatalog.ARCHETYPE))
+        .body(
+            "find { it.name == '" + StoryCatalog.SECOND_REPOSITORY + "' }.archetype", nullValue())
         // A group's name is also its branch, and its state is what this service last knew of it —
         // NONE until something has been pushed there.
         .body(
@@ -103,8 +112,8 @@ public class InventoryIT {
             "find { it.name == '" + StoryCatalog.REPOSITORY + "' }.groups.branch",
             hasItem(StoryCatalog.BRANCH));
     story
-        .note("the landing page: every repository, its groups, and how many upgrades wait behind"
-            + " each of them")
+        .note("the landing page: every repository, what kind of thing it is, its groups, and how"
+            + " many upgrades wait behind each of them")
         .as("repositories-listed");
 
     StoryIdentities.operator(given())
@@ -112,6 +121,7 @@ public class InventoryIT {
         .then()
         .statusCode(200)
         .body("headSha", equalTo(StoryCatalog.HEAD_SHA))
+        .body("archetype", equalTo(StoryCatalog.ARCHETYPE))
         // WHERE the version is set is the field that matters: a bump names a file and a location,
         // and a wrong location is a wrong edit in somebody else's repository.
         .body("pins.find { it.name == 'eu.wohlben.qits:qits-arch-rules' }.manifestPath",

@@ -50,6 +50,13 @@ public final class StoryCatalog {
    */
   public static final String CATALOG_ID = "r1";
 
+  /**
+   * What qits-projects classifies {@link #REPOSITORY} as. The catalog answers an archetype per row
+   * and this service caches it, so a release train can decide placement over the whole inventory
+   * without one HTTP call per repository.
+   */
+  public static final String ARCHETYPE = "SERVICE";
+
   /** A small library repository, so the second bump story has a branch of its own. */
   public static final String SECOND_REPOSITORY = "qits-eventstream";
 
@@ -323,13 +330,19 @@ public final class StoryCatalog {
     // THE CATALOG, with a row that has no name. qits-projects lists rows whose alias is unset, every
     // read this service makes is name-addressed, and a scan must skip such a row rather than fail on
     // it — so the fixture carries one.
+    //
+    // AND THE ARCHETYPE IS ON EXACTLY ONE ROW, deliberately. The key is nullable over there and an
+    // older answer carries none at all, so the fixture holds both shapes at once: the first
+    // repository is classified and the second is not, which is what makes "a repository nobody
+    // classified is still scanned, still listed and still pins things" a thing the story shows
+    // rather than a sentence in a comment.
     projects.json(
         CATALOG_PATH,
         "{\"repositories\":["
             + "{\"id\":\"" + CATALOG_ID + "\",\"projectId\":\"" + PROJECT + "\",\"name\":\"" + REPOSITORY
-            + "\",\"mainBranch\":\"main\"},"
+            + "\",\"mainBranch\":\"main\",\"archetype\":\"" + ARCHETYPE + "\"},"
             + "{\"id\":\"r2\",\"projectId\":\"" + PROJECT + "\",\"name\":\"" + SECOND_REPOSITORY
-            + "\",\"mainBranch\":\"main\"},"
+            + "\",\"mainBranch\":\"main\",\"archetype\":null},"
             + "{\"id\":\"r3\",\"projectId\":\"" + PROJECT + "\",\"name\":null,"
             + "\"mainBranch\":\"main\"}]}");
 

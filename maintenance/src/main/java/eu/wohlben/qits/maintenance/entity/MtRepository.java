@@ -50,6 +50,28 @@ public class MtRepository extends PanacheEntityBase {
   @Column(name = "catalog_id", length = 64)
   public String catalogId;
 
+  /**
+   * What kind of thing this repository is, as qits-projects classifies it — SERVICE, DAEMON,
+   * LIBRARY, FRONTEND, CLI, IMAGE, PROJECT, SERVICE_TEMPLATE, FORK. <b>Cached here so the release
+   * trains never ask per repository</b>: placement is decided over the whole inventory at once, and
+   * a remote read per row would be fifty HTTP calls on a path that already walks fifty rows.
+   *
+   * <p><b>The raw string the catalog answered, unvalidated.</b> The column has no check constraint
+   * and this field is not typed as {@link eu.wohlben.qits.maintenance.model.RepositoryArchetype},
+   * because the vocabulary belongs to qits-projects and grows when they grow: a word this service
+   * has not heard of must cost a repository its train placement, never its inventory row. {@code
+   * RepositoryArchetype.of} is the lenient parse, and it belongs where the decision is taken.
+   *
+   * <p><b>Rewritten by every scan, including back to null</b> — unlike {@link #catalogId}, which is
+   * never cleared. The two differ because they are different KINDS of fact: the id is a translation
+   * that other rows still need after the catalog stops answering it, while the archetype is a live
+   * classification whose current value is the only one worth holding. A repository re-classified
+   * from LIBRARY to SERVICE over there must not stay a LIBRARY here, and there is nothing in this
+   * database that a stale archetype would rescue.
+   */
+  @Column(columnDefinition = "text")
+  public String archetype;
+
   /** The branch a scan reads and a bump branches from — the payload's {@code baseRef}. */
   @Column(name = "main_branch", length = 255)
   public String mainBranch;

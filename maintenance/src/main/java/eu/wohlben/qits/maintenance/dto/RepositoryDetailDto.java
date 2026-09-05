@@ -22,6 +22,7 @@ import java.util.List;
 public record RepositoryDetailDto(
     String name,
     String project,
+    String archetype,
     Instant lastScanAt,
     String headSha,
     String status,

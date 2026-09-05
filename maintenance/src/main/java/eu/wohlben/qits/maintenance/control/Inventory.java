@@ -69,6 +69,10 @@ public class Inventory {
           new RepositoryDto(
               row.name,
               row.project,
+              // Verbatim, unparsed. See MtRepository.archetype: the vocabulary is qits-projects'
+              // and a word this service has not heard of is still the honest answer to "what is
+              // this".
+              row.archetype,
               row.lastScanAt,
               row.headSha,
               row.status,
@@ -101,6 +105,7 @@ public class Inventory {
     return new RepositoryDetailDto(
         row.name,
         row.project,
+        row.archetype,
         row.lastScanAt,
         row.headSha,
         row.status,

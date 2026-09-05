@@ -90,12 +90,16 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
    *     configuration and this class is storage
    * @param catalogId the catalog row's own id, kept so another context's spelling of this
    *     repository can be read back as a name. See {@link #repositoryName(String)}.
+   * @param archetype what the catalog says this repository IS, verbatim and unvalidated —
+   *     <b>written exactly as given, null included</b>. See the note at the assignment for why this
+   *     one field does not follow {@code catalogId}'s never-null-an-existing-value rule.
    */
   @ActivateRequestContext
   public void replaceInventory(
       String name,
       String project,
       String catalogId,
+      String archetype,
       String mainBranch,
       RepositoryStatus status,
       String headSha,
@@ -124,6 +128,13 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
           if (catalogId != null && !catalogId.isBlank()) {
             row.catalogId = catalogId;
           }
+          // AND THIS ONE IS WRITTEN UNCONDITIONALLY, null included — deliberately the opposite of
+          // the line above. The catalog is authoritative about what a repository IS on every scan:
+          // a repository re-classified over there, or one whose archetype was cleared, must read
+          // that way here on the next pass. Nothing in this database survives on a stale archetype
+          // the way the graph's rows survive on a stale catalog_id, so there is nothing for a
+          // never-null guard to protect and a re-classification it would silently ignore.
+          row.archetype = archetype;
           row.mainBranch = mainBranch;
           row.status = status.name();
           row.headSha = headSha;
@@ -179,6 +190,7 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
       String name,
       String project,
       String catalogId,
+      String archetype,
       RepositoryStatus status,
       String message,
       Instant now) {
@@ -197,6 +209,12 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
           if (catalogId != null && !catalogId.isBlank()) {
             row.catalogId = catalogId;
           }
+          // Unconditionally, null included, and for the same reason {@link #replaceInventory}
+          // gives: the caller of this method reached it holding a CatalogEntry, so the archetype
+          // it passes is what the catalog answered this scan — including the catalog answering
+          // nothing. A repository the git host would not talk about is still a repository
+          // qits-projects has an opinion about.
+          row.archetype = archetype;
           row.status = status.name();
           row.message = message;
           row.lastScanAt = now;

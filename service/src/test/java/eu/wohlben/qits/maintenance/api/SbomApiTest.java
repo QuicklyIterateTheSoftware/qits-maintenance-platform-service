@@ -419,7 +419,8 @@ class SbomApiTest {
   void anArtifactRowStillHoldingTheFramesRowIdIsFoundAndNamedByTheRepositoryItBelongsTo() {
     String rowId = "daf73ae4-1c9a-4f8e-9a51-0b0d0e0f1234";
     store.markRepository(
-        "qits-eventstream-javalib", Fixture.PROJECT, rowId, RepositoryStatus.OK, null, Instant.now());
+        "qits-eventstream-javalib", Fixture.PROJECT, rowId, null, RepositoryStatus.OK, null,
+        Instant.now());
 
     // The row a release wrote before the fix: the uuid where a name is read.
     released(

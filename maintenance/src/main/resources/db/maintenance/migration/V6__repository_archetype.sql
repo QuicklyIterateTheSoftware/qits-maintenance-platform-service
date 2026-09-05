@@ -1,0 +1,30 @@
+-- WHAT KIND OF THING THE REPOSITORY IS, CACHED HERE SO THE TRAIN LOGIC NEVER ASKS PER REPOSITORY.
+--
+-- qits-projects records an archetype on every repository row — SERVICE, DAEMON, LIBRARY, FRONTEND,
+-- CLI, IMAGE, PROJECT, SERVICE_TEMPLATE, FORK — and its listing has answered it as a nullable
+-- `archetype` key since 2026-09-05. A release train has to know it: what a repository IS decides
+-- whether it can be placed on a train at all and, where it can, which carriage it rides in. That
+-- decision is taken over the WHOLE inventory at once, so reading it per repository would be one
+-- HTTP call per row on a path that already walks fifty of them — the same reason `catalog_id`
+-- (V5), `project` and `main_branch` are columns here rather than lookups.
+--
+-- A CACHE OF SOMEBODY ELSE'S FACT, like every other column on this table. qits-projects owns the
+-- value; this row holds the last thing a scan was told, and a rename or a re-classification over
+-- there corrects itself on the next scan. Nothing here is authoritative and nothing here is a
+-- second opinion.
+--
+-- NO CHECK CONSTRAINT, DELIBERATELY, and this is the one decision in the file worth arguing with.
+-- The vocabulary is FOREIGN: it is qits-projects' enum, it grows when that service grows, and a
+-- constraint here would turn their next value into a scan that fails to write a row it read
+-- perfectly well. `text` and a lenient parse instead — `model/RepositoryArchetype.of` answers empty
+-- for a spelling it does not know, and the column keeps the string either way, so an unknown
+-- archetype costs a repository its train placement rather than its inventory row. Store what
+-- arrives; filtering is the train layer's business.
+--
+-- NULLABLE, permanently. A catalog row without an archetype is a repository worth scanning, and
+-- every row written before this deploy has none until its next scan. Null reads as "we were not
+-- told", never as "none of the above".
+--
+-- NOT INDEXED. The only reads are a full-inventory walk and one row by name, both of which already
+-- have their path; an index on a nine-value column over fifty rows would be a page nobody visits.
+alter table mt_repository add column archetype text;

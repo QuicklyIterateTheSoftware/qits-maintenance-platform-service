@@ -177,6 +177,7 @@ public class ScanService {
           entry.name(),
           entry.project(),
           entry.catalogId(),
+          entry.archetype(),
           RepositoryStatus.UNREACHABLE,
           message(e),
           now);
@@ -187,13 +188,20 @@ public class ScanService {
     ManifestScanner.Read read = manifests.read(entry);
     if (read.status() == RepositoryStatus.UNREACHABLE) {
       store.markRepository(
-          entry.name(), entry.project(), entry.catalogId(), read.status(), read.message(), now);
+          entry.name(),
+          entry.project(),
+          entry.catalogId(),
+          entry.archetype(),
+          read.status(),
+          read.message(),
+          now);
       return;
     }
     store.replaceInventory(
         entry.name(),
         entry.project(),
         entry.catalogId(),
+        entry.archetype(),
         entry.mainBranch(),
         read.status(),
         read.headSha(),

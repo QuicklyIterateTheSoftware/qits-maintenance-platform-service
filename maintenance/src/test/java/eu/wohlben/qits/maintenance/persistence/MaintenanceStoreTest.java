@@ -58,6 +58,7 @@ class MaintenanceStoreTest {
         repository,
         "qits",
         null,
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -73,6 +74,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         null,
         "main",
         RepositoryStatus.OK,
@@ -97,6 +99,7 @@ class MaintenanceStoreTest {
         repository,
         "qits",
         null,
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -110,6 +113,7 @@ class MaintenanceStoreTest {
     store.markRepository(
         repository,
         "qits",
+        null,
         null,
         RepositoryStatus.UNREACHABLE,
         "the git host said nothing",
@@ -135,6 +139,7 @@ class MaintenanceStoreTest {
         repository,
         "qits",
         catalogId,
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -166,6 +171,7 @@ class MaintenanceStoreTest {
         repository,
         "qits",
         catalogId,
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -179,6 +185,7 @@ class MaintenanceStoreTest {
         repository,
         "qits",
         null,
+        null,
         "main",
         RepositoryStatus.OK,
         "sha2",
@@ -189,11 +196,75 @@ class MaintenanceStoreTest {
         candidate -> PinKind.INTERNAL,
         Instant.now());
     store.markRepository(
-        repository, "qits", null, RepositoryStatus.UNREACHABLE, "nothing answered", Instant.now());
+        repository, "qits", null, null, RepositoryStatus.UNREACHABLE, "nothing answered",
+        Instant.now());
 
     MtRepository row = store.repository(repository).orElseThrow();
     assertEquals(catalogId, row.catalogId);
     assertEquals("sha2", row.headSha);
+  }
+
+  /**
+   * <b>V6's column, and the one place it deliberately does NOT follow {@code catalog_id}.</b>
+   *
+   * <p>What a repository IS is a live classification qits-projects owns, so every scan writes what
+   * the catalog said — <b>including writing null over a value, which the id above never does</b>.
+   * The two are different kinds of fact: an id is a translation that {@code mt_artifact} rows still
+   * need after the catalog stops answering it, while a stale archetype rescues nothing and hides a
+   * re-classification. A LIBRARY promoted to a SERVICE over there must read as a SERVICE here on
+   * the next pass, and a repository whose archetype was cleared must read as unclassified rather
+   * than as whatever it used to be.
+   *
+   * <p>The string is stored VERBATIM and never validated, which is the other half of the design:
+   * the vocabulary is foreign, the column has no check constraint, and a word this platform has not
+   * heard of costs a repository its train placement rather than its inventory row.
+   */
+  @Test
+  void anArchetypeIsRewrittenByEveryScan_includingBackToNothing() {
+    String repository = "archetype-" + UUID.randomUUID();
+    String catalogId = UUID.randomUUID().toString();
+
+    scannedAs(repository, catalogId, "LIBRARY");
+    assertEquals("LIBRARY", store.repository(repository).orElseThrow().archetype);
+
+    // Re-classified over there. The inventory follows on the next scan.
+    scannedAs(repository, catalogId, "SERVICE");
+    assertEquals("SERVICE", store.repository(repository).orElseThrow().archetype);
+
+    // A spelling this service has never heard of reaches the column intact — see the note above.
+    scannedAs(repository, catalogId, "QUANTUM_MESH");
+    assertEquals("QUANTUM_MESH", store.repository(repository).orElseThrow().archetype);
+
+    // …and the catalog answering none CLEARS it, where the same listing leaves catalog_id standing.
+    scannedAs(repository, null, null);
+    MtRepository cleared = store.repository(repository).orElseThrow();
+    assertNull(cleared.archetype, "the catalog is authoritative about what a repository is");
+    assertEquals(catalogId, cleared.catalogId, "and it is still not authoritative about the id");
+
+    // The unreachable path carries it too: the git host said nothing, the catalog still had an
+    // opinion, and the row records the opinion it was given.
+    store.markRepository(
+        repository, "qits", null, "DAEMON", RepositoryStatus.UNREACHABLE, "no answer",
+        Instant.now());
+    assertEquals("DAEMON", store.repository(repository).orElseThrow().archetype);
+  }
+
+  /** One scan of a repository the catalog classifies as {@code archetype}. */
+  private void scannedAs(String repository, String catalogId, String archetype) {
+    store.replaceInventory(
+        repository,
+        "qits",
+        catalogId,
+        archetype,
+        "main",
+        RepositoryStatus.OK,
+        "sha1",
+        null,
+        List.of(),
+        List.of(),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
   }
 
   /**
@@ -283,6 +354,7 @@ class MaintenanceStoreTest {
         repository,
         "qits",
         catalogId,
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -308,6 +380,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         null,
         "main",
         RepositoryStatus.OK,
@@ -335,6 +408,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         null,
         "main",
         RepositoryStatus.OK,
@@ -375,6 +449,7 @@ class MaintenanceStoreTest {
         repository,
         "qits",
         null,
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -389,6 +464,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         null,
         "main",
         RepositoryStatus.OK,
@@ -426,6 +502,7 @@ class MaintenanceStoreTest {
         repository,
         "qits",
         null,
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",
@@ -443,6 +520,7 @@ class MaintenanceStoreTest {
     store.replaceInventory(
         repository,
         "qits",
+        null,
         null,
         "main",
         RepositoryStatus.OK,

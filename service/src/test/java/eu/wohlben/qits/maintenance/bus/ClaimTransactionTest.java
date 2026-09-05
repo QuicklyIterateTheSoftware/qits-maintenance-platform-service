@@ -86,6 +86,7 @@ class ClaimTransactionTest {
         REPOSITORY,
         "qits",
         UUID.randomUUID().toString(),
+        null,
         "main",
         RepositoryStatus.OK,
         "sha1",

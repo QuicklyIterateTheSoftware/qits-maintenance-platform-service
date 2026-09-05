@@ -146,6 +146,7 @@ class BumpScheduleTest {
         Fixture.REPOSITORY,
         Fixture.PROJECT,
         null,
+        null,
         RepositoryStatus.UNREACHABLE,
         "the git host said nothing",
         Instant.now());

@@ -19,7 +19,7 @@ The contract — routes, model, config keys, schedules and the bump payload — 
 
 | Fact | Peer | How |
 |---|---|---|
-| the catalog | qits-projects | `GET /projects/api/repositories`; a row with no `name` has no address and is skipped. The row's `id` is kept as `mt_repository.catalog_id` — never an address here, and the only way another context's spelling of a repository is read back as a name. **The listing is authoritative in both directions**: what it stops naming goes ABSENT — see below |
+| the catalog | qits-projects | `GET /projects/api/repositories`; a row with no `name` has no address and is skipped. The row's `id` is kept as `mt_repository.catalog_id` — never an address here, and the only way another context's spelling of a repository is read back as a name. Its nullable `archetype` (SERVICE, DAEMON, LIBRARY, FRONTEND, CLI, IMAGE, PROJECT, SERVICE_TEMPLATE, FORK) is kept beside it as `mt_repository.archetype` (V6) and served on both repository DTOs, so what a repository IS is a column rather than a read per row; the vocabulary is qits-projects' own, so it is stored **verbatim, unvalidated and with no check constraint**, and an unrecognised word costs a repository its release-train placement rather than its inventory row. **The listing is authoritative in both directions**: what it stops naming goes ABSENT — see below |
 | manifests at `main` | qits-githost | `GET /git/<project>/<repo>/tree/<rev>[/<path>]` and `…/blob/<rev>/<path>` |
 | internal latest | qits-artifacts | maven `maven-metadata.xml`, npm packument, OCI `/<name>/tags/list` |
 | external latest | qits-platform-mirror | `central` maven-metadata, `npmjs` packument |

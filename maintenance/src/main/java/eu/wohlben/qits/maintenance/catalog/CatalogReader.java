@@ -65,7 +65,7 @@ public class CatalogReader {
     return new Result(List.copyOf(entries), null);
   }
 
-  private static Optional<CatalogEntry> entry(JsonNode row) {
+  static Optional<CatalogEntry> entry(JsonNode row) {
     String name = text(row, "name");
     String project = text(row, "projectId");
     if (name == null || project == null) {
@@ -76,8 +76,16 @@ public class CatalogReader {
     // contexts spell a repository with — see CatalogEntry.catalogId — and a listing that carried
     // none is still a repository worth scanning, so it is read and never required.
     String catalogId = text(row, "id");
+    // WHAT KIND OF THING IT IS, READ VERBATIM AND NEVER VALIDATED HERE. The key is nullable over
+    // there and may be absent from an older answer entirely; both read as null, and neither is a
+    // reason to skip a row — a repository whose archetype nobody recorded still pins things. Nor
+    // is an UNKNOWN spelling: qits-projects' vocabulary grows without asking this service, so the
+    // string is carried through to the store as it arrived and only the train layer decides
+    // whether it means anything. See CatalogEntry.archetype and model/RepositoryArchetype.
+    String archetype = text(row, "archetype");
     return Optional.of(
-        new CatalogEntry(project, name, mainBranch == null ? "main" : mainBranch, catalogId));
+        new CatalogEntry(
+            project, name, mainBranch == null ? "main" : mainBranch, catalogId, archetype));
   }
 
   private static String text(JsonNode row, String field) {
