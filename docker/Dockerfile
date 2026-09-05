@@ -86,6 +86,7 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 # nowhere else — not a layer, not the image history. That is why they are not build args: this image
 # is pullable, and a build arg is recorded where anyone who pulls it can read it.
 # `.qits-maven-settings.xml` reads the two variables as the `qits-maven-network` server.
+# The `RUN` reads the two mounted files itself: docker 26's BuildKit has no `env=` mount option.
 #
 # -Dnative flips quarkus.native.enabled (service/pom.xml carries its own `native` profile). Cap
 # native-image RAM so the build is deterministic on small machines.
@@ -134,8 +135,10 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 #
 # One `cp` re-materialises it in the layer that is about to move it. It has to be in THIS `RUN` and
 # not a tidier one of its own — a layer boundary is exactly what it is undoing.
-RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
-    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+RUN --mount=type=secret,id=qits-client-id \
+    --mount=type=secret,id=qits-client-secret \
+    export QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)"; \
+    export QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)"; \
     d=service/src/main/webui/dist/qits-platform-spa-maintenance/browser; \
     test -f "$d/index.html" || { \
       echo "No built client SPA at $d." >&2; \
