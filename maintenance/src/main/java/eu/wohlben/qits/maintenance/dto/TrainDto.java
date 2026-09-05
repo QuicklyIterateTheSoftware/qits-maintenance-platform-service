@@ -16,6 +16,10 @@ import java.util.UUID;
  *
  * @param id the train
  * @param repository the releasing repository, by CATALOG NAME
+ * @param repositoryCatalogId qits-projects' id for the releasing repository, or null when the
+ *     inventory does not know the name. It is the same join every node carries for its consumer,
+ *     and it exists for the same reason: the release-request routes on the qits-projects side are
+ *     addressed by catalog id, so a client labelling the STATION with a link needs it too
  * @param version the released version
  * @param status OPEN, COMPLETED or SUPERSEDED. There is no FAILED — a journey that stalls is one
  *     nobody finished, not one that failed
@@ -31,6 +35,7 @@ import java.util.UUID;
 public record TrainDto(
     UUID id,
     String repository,
+    String repositoryCatalogId,
     String version,
     String status,
     Instant createdAt,

@@ -140,9 +140,11 @@ public class Trains {
       packages.add(
           new TrainDto.PackageDto(coordinate.ecosystem().wireName(), coordinate.name()));
     }
+    MtRepository station = names.row(train.repository);
     return new TrainDto(
         train.id,
         train.repository,
+        station == null ? null : station.catalogId,
         train.version,
         train.status,
         train.createdAt,
