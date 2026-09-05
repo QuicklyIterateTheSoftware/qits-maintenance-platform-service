@@ -86,6 +86,11 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 # nowhere else — not a layer, not the image history. That is why they are not build args: this image
 # is pullable, and a build arg is recorded where anyone who pulls it can read it.
 # `.qits-maven-settings.xml` reads the two variables as the `qits-maven-network` server.
+# FILE form (`/run/secrets/<id>`, read into the command's own environment), not the `env=` mount
+# form: env= needs a dockerfile frontend the builder chooses, while the bare file mount is served
+# identically by every frontend version — and under the platform builder the frontend is the
+# builder's, not this file's, to pick. Absent secrets leave both variables empty (`|| true` is every
+# hand build's state), which the settings read exactly as they read unset.
 #
 # -Dnative flips quarkus.native.enabled (service/pom.xml carries its own `native` profile). Cap
 # native-image RAM so the build is deterministic on small machines.
@@ -107,6 +112,12 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 # build reaches the public internet — Maven Central, npmjs.org, nodejs.org — and reaches the platform
 # registry by NO address: not the qits-net alias, not registry.dev.localhost:8080, not
 # host.docker.internal. So the install cannot happen here.
+#
+# THE FIRST HALF OF THAT IS NO LONGER STRICTLY TRUE UNDER THE PLATFORM BUILDER — a RUN executes on
+# qits-net there, where the registry's alias does resolve — and the arrangement still does not move.
+# The SPA's committed .npmrc and its lockfile both name edge vhosts, and the origin swap that
+# corrects them is the CI step's business, not this stage's; and this stage has to keep building on a
+# developer's host, where nothing platform-side resolves at all.
 #
 # It does not merely fail, it fails unreadably. The SPA commits an .npmrc pointing at the edge's
 # registry vhosts (right for a developer on the deployment host), npm ranks a project .npmrc above
@@ -134,8 +145,10 @@ ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
 #
 # One `cp` re-materialises it in the layer that is about to move it. It has to be in THIS `RUN` and
 # not a tidier one of its own — a layer boundary is exactly what it is undoing.
-RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
-    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+RUN --mount=type=secret,id=qits-client-id \
+    --mount=type=secret,id=qits-client-secret \
+    export QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)"; \
+    export QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)"; \
     d=service/src/main/webui/dist/qits-platform-spa-maintenance/browser; \
     test -f "$d/index.html" || { \
       echo "No built client SPA at $d." >&2; \
@@ -170,7 +183,7 @@ RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
 # The service module's CycloneDX document, exported so the release step can PUT it to the platform's
 # SBOM store. A stage rather than a layer of the runtime image, and BEFORE the runtime stage on
 # purpose: the last stage is what a plain `docker build` builds, and that must stay the image.
-# `.config/qits/ci-event-release.yml` reaches this one with `--target sbom --output type=local`
+# `.config/qits/ci-event-release.yml` reaches this one with `--opt target=sbom --output type=local`
 # using the SAME args and secrets as the image build, so every layer above is a cache hit and the
 # export costs seconds rather than a second native compile.
 FROM scratch AS sbom
