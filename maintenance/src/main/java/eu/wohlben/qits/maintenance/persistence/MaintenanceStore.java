@@ -12,6 +12,8 @@ import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.entity.MtScan;
+import eu.wohlben.qits.maintenance.entity.MtTrain;
+import eu.wohlben.qits.maintenance.entity.MtTrainNode;
 import eu.wohlben.qits.maintenance.error.BumpAlreadyActiveException;
 import eu.wohlben.qits.maintenance.latest.LatestLookup;
 import eu.wohlben.qits.maintenance.latest.VersionOrder;
@@ -27,6 +29,9 @@ import eu.wohlben.qits.maintenance.model.RepositoryStatus;
 import eu.wohlben.qits.maintenance.model.SbomStatus;
 import eu.wohlben.qits.maintenance.model.ScanScope;
 import eu.wohlben.qits.maintenance.model.ScanStatus;
+import eu.wohlben.qits.maintenance.model.TrainEndKind;
+import eu.wohlben.qits.maintenance.model.TrainNodeState;
+import eu.wohlben.qits.maintenance.model.TrainStatus;
 import eu.wohlben.qits.maintenance.sbom.ParsedSbom;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
 import io.quarkus.panache.common.Sort;
@@ -456,6 +461,42 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
     return DbRetry.inNewTx(
         "read every pin",
         () -> MtPin.findAll(Sort.by("repository").and("manifestPath").and("name")).list());
+  }
+
+  /**
+   * <b>WHO HOLDS A LINE FOR THIS COORDINATE, and could therefore move it.</b> Every INTERNAL pin on
+   * one {@code (ecosystem, name)}, across every repository and every manifest.
+   *
+   * <p>The DECLARED side of a release train's expected adopters — {@link #dependents} is the
+   * EVIDENCE side, and the two answer different questions about the same coordinate. A pin says a
+   * repository wrote the dependency down and can edit the line; an SBOM component says a released
+   * artifact ships a copy of it, transitives included. A train wants both: a repository that pins it
+   * is owed the bump, and one that only ships it transitively is still carrying an old copy about.
+   *
+   * <p><b>INTERNAL only, and the kind filter is the point rather than an optimisation.</b> EXTERNAL
+   * is somebody else's package and no release of ours spawns a train for it; REACTOR and UNRESOLVED
+   * have no line to edit at all ({@code PinKind.actionable}). And the ecosystem argument is what
+   * keeps GITLINK out by construction — a gitlink pin is named by a repository, is bumped by the
+   * wrapper's own banking, and is never a train's concern.
+   *
+   * <p>One indexed read on {@code idx_mt_pin_name}, because the caller is the bus listener and it
+   * runs inside somebody else's claim transaction.
+   */
+  @ActivateRequestContext
+  public List<MtPin> internalPinsOn(Ecosystem ecosystem, String name) {
+    if (ecosystem == null || name == null || name.isBlank()) {
+      return List.of();
+    }
+    return DbRetry.inNewTx(
+        "read the internal pins on " + name,
+        () ->
+            MtPin.find(
+                    "ecosystem = ?1 and name = ?2 and kind = ?3",
+                    Sort.by("repository").and("manifestPath"),
+                    ecosystem.wireName(),
+                    name,
+                    PinKind.INTERNAL.name())
+                .list());
   }
 
   /**
@@ -1215,6 +1256,415 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
     return DbRetry.inNewTx(
         "read the edges of one artifact",
         () -> MtArtifactEdge.find("artifactId = ?1", artifactId).list());
+  }
+
+  // --- release trains -------------------------------------------------------------------------
+
+  /**
+   * One expected adopter a caller asks to be placed on a train.
+   *
+   * @param consumer who adopts — a repository name for {@code LINKED} and {@code DAEMON_PIN}, an
+   *     application name for {@code CONFIG_IMAGE_PIN}
+   * @param archetype what the consumer is, as the catalog classified it AT SPAWN, verbatim and
+   *     unvalidated. Copied onto the row rather than looked up at read time, because the train is a
+   *     log of what was true when it left.
+   * @param endKind how this consumer takes the version, which is half of the node's identity
+   */
+  public record NewNode(String consumer, String archetype, TrainEndKind endKind) {}
+
+  /**
+   * What a spawn found or made.
+   *
+   * @param train the station, whether this call opened it or settled onto one already there
+   * @param created whether this call is the one that opened it — the only thing worth an INFO line
+   * @param nodes how many expected adopters the train carries after this call
+   */
+  public record TrainSpawn(MtTrain train, boolean created, int nodes) {}
+
+  /**
+   * <b>THE STATION FOR ONE RELEASED {@code (repository, version)}, opened or settled onto, with its
+   * expected adopters and its supersession, in ONE transaction.</b>
+   *
+   * <p><b>Idempotent by construction, which it has to be three times over.</b> A release publishes
+   * one frame per declared artifact — four for a repository that ships a jar, a package, an image
+   * and its api-docs — and every one of them is the same release aiming at this key. On top of that
+   * the bus is at-least-once, and a catch-up sweep re-offers whatever was in flight. So:
+   *
+   * <ul>
+   *   <li>a train that already carries nodes is <b>returned untouched</b>. Its node states are
+   *       evidence somebody else's evaluation wrote, and a sibling frame is not new information
+   *       about any of them;
+   *   <li>a train that exists and is <b>EMPTY</b> is topped up from {@code nodes}. That is not the
+   *       same case: an empty train has no state to protect, and it is the ordinary outcome of the
+   *       {@code docs} frame of a release winning the race to this key — the docs package names no
+   *       ecosystem, so the derivation behind the first call had nothing to look up, and the maven
+   *       frame arriving a moment later is the one that knows who adopts. Without this a whole
+   *       release's train would read as "nobody was expected to adopt it" on a coin flip;
+   *   <li>a fresh key creates, places and supersedes.
+   * </ul>
+   *
+   * <p><b>SUPERSESSION RUNS IN BOTH DIRECTIONS AND IS KEYED ON {@code created_at}</b>, never on
+   * arrival order — see {@code MtTrain.createdAt}. A spawn marks every OLDER train of the same
+   * repository that is still OPEN as SUPERSEDED, and a spawn that finds a NEWER train already there
+   * is born SUPERSEDED itself. Both point at the newest train of the repository, so a catch-up that
+   * replays four releases out of order converges on the same answer whichever way it arrives.
+   * Trains created at the exact same instant supersede neither way; the comparison is strict.
+   *
+   * <p><b>A train with no expected adopters is COMPLETED at creation</b>, with {@code completed_at =
+   * created_at}, because that is the honest moment — it arrived the instant it left. That wins over
+   * being born superseded: there is no journey left for a newer release to make irrelevant.
+   *
+   * @param createdAt the FRAME's moment, never {@code Instant.now()}
+   */
+  @ActivateRequestContext
+  public TrainSpawn spawnTrain(
+      String repository, String version, Instant createdAt, List<NewNode> nodes) {
+    List<NewNode> wanted = nodes == null ? List.of() : List.copyOf(nodes);
+    return DbRetry.inNewTx(
+        "spawn the release train of " + repository + " " + version,
+        () -> {
+          MtTrain existing = trainRow(repository, version);
+          if (existing != null) {
+            long placed = MtTrainNode.count("trainId", existing.id);
+            if (placed > 0) {
+              return new TrainSpawn(existing, false, (int) placed);
+            }
+            // The empty-train case above: a station opened by a frame whose package named no
+            // coordinate, topped up by the sibling that does.
+            int added = placeNodes(existing.id, wanted);
+            if (added > 0) {
+              reopen(existing);
+            }
+            getEntityManager().flush();
+            return new TrainSpawn(existing, false, added);
+          }
+
+          MtTrain train = new MtTrain();
+          // EVERY FIELD BEFORE THE PERSIST — placeNodes below runs queries, Hibernate flushes ahead
+          // of one, and a row with its not-null columns unset fails the flush rather than the
+          // insert. The same rock replaceInventory names.
+          train.id = UUID.randomUUID();
+          train.repository = repository;
+          train.version = version;
+          train.status = TrainStatus.OPEN.name();
+          train.createdAt = createdAt;
+          train.persist();
+
+          int placed = placeNodes(train.id, wanted);
+          supersede(train);
+          if (placed == 0) {
+            // And this overrides the line above on purpose: a train with nowhere to go has arrived,
+            // and a newer release cannot make an arrival irrelevant.
+            train.status = TrainStatus.COMPLETED.name();
+            train.completedAt = train.createdAt;
+            train.supersededBy = null;
+          }
+          getEntityManager().flush();
+          return new TrainSpawn(train, true, placed);
+        });
+  }
+
+  /**
+   * <b>THE SEAM THE CONFIG-PIN SWEEP WRITES THROUGH.</b> Places nodes on a train that already
+   * exists, idempotently against {@code (train, consumer, end kind)}.
+   *
+   * <p>It exists because a spawn cannot place every node it knows is owed. The {@code
+   * CONFIG_IMAGE_PIN} ends of an IMAGE repository's release live in qits-configuration's ImagePins
+   * map and are read over HTTP — and a spawn runs inside the bus's claim transaction, where an
+   * outbound call turns a slow peer into an event redelivered for ever (V3 refused the same shape
+   * for SBOM documents). So the train of an IMAGE repository is spawned with its LINKED nodes and
+   * nothing for the config side, and the sweep fills that in on its first pass afterwards.
+   *
+   * <p><b>A COMPLETED train that gains a node is OPEN again</b>, and that is right rather than
+   * untidy: it had arrived because it had nowhere to go, and now it has somewhere. A train that was
+   * SUPERSEDED stays superseded — its nodes keep evaluating, and a newer release is still the one
+   * the estate should be adopting.
+   *
+   * @return how many rows this call actually placed; a second sweep over the same train places none
+   */
+  @ActivateRequestContext
+  public int addTrainNodes(UUID trainId, List<NewNode> nodes) {
+    List<NewNode> wanted = nodes == null ? List.of() : List.copyOf(nodes);
+    if (trainId == null || wanted.isEmpty()) {
+      return 0;
+    }
+    return DbRetry.inNewTx(
+        "place " + wanted.size() + " node(s) on train " + trainId,
+        () -> {
+          MtTrain train = MtTrain.findById(trainId);
+          if (train == null) {
+            return 0;
+          }
+          int placed = placeNodes(trainId, wanted);
+          if (placed > 0) {
+            reopen(train);
+          }
+          getEntityManager().flush();
+          return placed;
+        });
+  }
+
+  /**
+   * Writes the nodes that are not there yet, and answers how many that was.
+   *
+   * <p>Inside the caller's transaction: every writer of this table is idempotent against the unique
+   * key, and doing the check as a read-then-insert in the same transaction is what makes the
+   * constraint a belt rather than the only brace.
+   */
+  private static int placeNodes(UUID trainId, List<NewNode> nodes) {
+    int placed = 0;
+    for (NewNode node : nodes) {
+      if (node == null || node.consumer() == null || node.consumer().isBlank()) {
+        continue;
+      }
+      TrainEndKind endKind = node.endKind() == null ? TrainEndKind.LINKED : node.endKind();
+      MtTrainNode already =
+          MtTrainNode.find(
+                  "trainId = ?1 and consumer = ?2 and endKind = ?3",
+                  trainId,
+                  node.consumer(),
+                  endKind.name())
+              .firstResult();
+      if (already != null) {
+        continue;
+      }
+      MtTrainNode row = new MtTrainNode();
+      row.id = UUID.randomUUID();
+      row.trainId = trainId;
+      row.consumer = node.consumer();
+      row.archetype = node.archetype();
+      row.state = TrainNodeState.PENDING.name();
+      row.endKind = endKind.name();
+      row.persist();
+      placed++;
+    }
+    return placed;
+  }
+
+  /** A train that had arrived because it had nowhere to go, given somewhere to go. */
+  private static void reopen(MtTrain train) {
+    train.completedAt = null;
+    if (train.supersededBy == null) {
+      train.status = TrainStatus.OPEN.name();
+    }
+  }
+
+  /**
+   * Both directions of supersession for a train just created, inside its transaction.
+   *
+   * <p>The older OPEN trains are pointed at the NEWEST train of the repository rather than at this
+   * one, which is what makes an out-of-order catch-up converge: replaying releases 1, 4, 2, 3 leaves
+   * every one of the first three superseded by the fourth, whichever order they arrived in.
+   */
+  private static void supersede(MtTrain train) {
+    MtTrain newer =
+        MtTrain.<MtTrain>find(
+                "repository = ?1 and createdAt > ?2",
+                Sort.by("createdAt", Sort.Direction.Descending),
+                train.repository,
+                train.createdAt)
+            .firstResult();
+    if (newer != null) {
+      train.status = TrainStatus.SUPERSEDED.name();
+      train.supersededBy = newer.id;
+    }
+    UUID newest = newer == null ? train.id : newer.id;
+    List<MtTrain> older =
+        MtTrain.<MtTrain>find(
+                "repository = ?1 and status = ?2 and createdAt < ?3",
+                train.repository,
+                TrainStatus.OPEN.name(),
+                train.createdAt)
+            .list();
+    for (MtTrain overtaken : older) {
+      if (overtaken.id.equals(train.id)) {
+        continue;
+      }
+      overtaken.status = TrainStatus.SUPERSEDED.name();
+      overtaken.supersededBy = newest;
+    }
+  }
+
+  @ActivateRequestContext
+  public Optional<MtTrain> train(UUID id) {
+    return DbRetry.inNewTx("read one train row", () -> Optional.ofNullable(MtTrain.findById(id)));
+  }
+
+  /** The station for one released {@code (repository, version)}, if it was ever opened. */
+  @ActivateRequestContext
+  public Optional<MtTrain> train(String repository, String version) {
+    return DbRetry.inNewTx(
+        "read the train of " + repository + " " + version,
+        () -> Optional.ofNullable(trainRow(repository, version)));
+  }
+
+  private static MtTrain trainRow(String repository, String version) {
+    return MtTrain.find("repository = ?1 and version = ?2", repository, version).firstResult();
+  }
+
+  /** The newest trains, of one repository or of all of them. */
+  @ActivateRequestContext
+  public List<MtTrain> trains(String repository, int limit) {
+    return DbRetry.inNewTx(
+        "read the newest trains",
+        () -> {
+          Sort newestFirst = Sort.by("createdAt").descending();
+          if (repository == null || repository.isBlank()) {
+            return MtTrain.<MtTrain>findAll(newestFirst).page(0, limit).list();
+          }
+          return MtTrain.<MtTrain>find("repository = ?1", newestFirst, repository)
+              .page(0, limit)
+              .list();
+        });
+  }
+
+  /**
+   * Every train still owed something, newest first — the sweep's listing and the UI's.
+   *
+   * <p>Bounded by the estate rather than by a limit: a repository has at most one OPEN train at a
+   * time, because the next release of it supersedes the last.
+   */
+  @ActivateRequestContext
+  public List<MtTrain> openTrains() {
+    return DbRetry.inNewTx(
+        "read every open train",
+        () ->
+            MtTrain.<MtTrain>find(
+                    "status = ?1",
+                    Sort.by("createdAt").descending(),
+                    TrainStatus.OPEN.name())
+                .list());
+  }
+
+  /** The open trains of one repository. At most one, unless a catch-up is mid-flight. */
+  @ActivateRequestContext
+  public List<MtTrain> openTrains(String repository) {
+    return DbRetry.inNewTx(
+        "read the open trains of " + repository,
+        () ->
+            MtTrain.<MtTrain>find(
+                    "repository = ?1 and status = ?2",
+                    Sort.by("createdAt").descending(),
+                    repository,
+                    TrainStatus.OPEN.name())
+                .list());
+  }
+
+  @ActivateRequestContext
+  public List<MtTrainNode> trainNodes(UUID trainId) {
+    return DbRetry.inNewTx(
+        "read the nodes of one train",
+        () ->
+            MtTrainNode.<MtTrainNode>find(
+                    "trainId = ?1", Sort.by("consumer").and("endKind"), trainId)
+                .list());
+  }
+
+  @ActivateRequestContext
+  public Optional<MtTrainNode> trainNode(UUID id) {
+    return DbRetry.inNewTx(
+        "read one train node", () -> Optional.ofNullable(MtTrainNode.findById(id)));
+  }
+
+  /**
+   * <b>WHAT ONE REPOSITORY IS HOLDING UP</b>, across every train of every other repository — the
+   * reverse read {@code idx_mt_train_node_consumer} exists for.
+   *
+   * <p>It is the question a person actually asks ("what do I owe the estate") and the one the
+   * adoption evaluation asks when a repository's pins move: everything that repository has not
+   * LANDED yet.
+   */
+  @ActivateRequestContext
+  public List<MtTrainNode> nodesOwedBy(String consumer) {
+    return DbRetry.inNewTx(
+        "read what " + consumer + " still owes",
+        () ->
+            MtTrainNode.<MtTrainNode>find(
+                    "consumer = ?1 and state <> ?2", consumer, TrainNodeState.LANDED.name())
+                .list());
+  }
+
+  /**
+   * The consumer took the version — on a branch, in a commit, in a configuration.
+   *
+   * @param adoptedVersion what it actually took, which is usually and not always this train's
+   *     version: a consumer may skip a release and adopt the one after it
+   * @param childTrainId the release that adoption produced, when it produced one. Null otherwise,
+   *     and null is the ordinary case at the moment of adoption — the child arrives later.
+   */
+  @ActivateRequestContext
+  public void nodeAdopted(
+      UUID nodeId, String adoptedVersion, UUID childTrainId, Instant adoptedAt) {
+    DbRetry.runInNewTx(
+        "record the adoption on node " + nodeId,
+        () -> {
+          MtTrainNode row = MtTrainNode.findById(nodeId);
+          if (row == null) {
+            return;
+          }
+          row.state = TrainNodeState.ADOPTED.name();
+          row.adoptedVersion = adoptedVersion;
+          row.adoptedAt = adoptedAt;
+          if (childTrainId != null) {
+            row.childTrainId = childTrainId;
+          }
+          getEntityManager().flush();
+        });
+  }
+
+  /**
+   * The adoption is released and integrated. This node owes the train nothing more.
+   *
+   * <p>A node landed without ever having been seen ADOPTED is the ordinary case rather than a
+   * mistake: nothing polls a consumer's working tree, so a repository that bumps and releases
+   * between two evaluations is first seen carrying the version in a release. The adoption stamp is
+   * filled in with the landing when it is still empty, because it certainly happened.
+   */
+  @ActivateRequestContext
+  public void nodeLanded(UUID nodeId, String adoptedVersion, UUID childTrainId, Instant landedAt) {
+    DbRetry.runInNewTx(
+        "record the landing on node " + nodeId,
+        () -> {
+          MtTrainNode row = MtTrainNode.findById(nodeId);
+          if (row == null) {
+            return;
+          }
+          row.state = TrainNodeState.LANDED.name();
+          if (adoptedVersion != null) {
+            row.adoptedVersion = adoptedVersion;
+          }
+          if (childTrainId != null) {
+            row.childTrainId = childTrainId;
+          }
+          if (row.adoptedAt == null) {
+            row.adoptedAt = landedAt;
+          }
+          row.landedAt = landedAt;
+          getEntityManager().flush();
+        });
+  }
+
+  /**
+   * The train arrived.
+   *
+   * <p><b>A SUPERSEDED train can still complete</b>, and the status it ends on is COMPLETED: every
+   * consumer took the version, which is the journey finishing, and the fact that a newer release
+   * came out in the meantime does not un-finish it. What supersession decides is what a person is
+   * shown while the journey is unfinished.
+   */
+  @ActivateRequestContext
+  public void completeTrain(UUID trainId, Instant completedAt) {
+    DbRetry.runInNewTx(
+        "complete train " + trainId,
+        () -> {
+          MtTrain row = MtTrain.findById(trainId);
+          if (row == null) {
+            return;
+          }
+          row.status = TrainStatus.COMPLETED.name();
+          row.completedAt = completedAt;
+          getEntityManager().flush();
+        });
   }
 
   // --- json ---------------------------------------------------------------------------------

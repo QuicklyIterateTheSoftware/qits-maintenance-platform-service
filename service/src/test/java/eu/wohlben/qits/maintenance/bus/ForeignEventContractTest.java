@@ -2,6 +2,7 @@ package eu.wohlben.qits.maintenance.bus;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -215,6 +216,7 @@ class ForeignEventContractTest {
   @Test
   void theEventNamesTheListenersSubscribeToAreTheOnesTheseEventsRideUnder() {
     assertEquals(SoftwareRelease.class.getSimpleName(), SoftwareReleaseListener.SIGNATURE);
+    assertEquals(SoftwareRelease.class.getSimpleName(), ReleaseTrainListener.SIGNATURE);
     assertEquals(SCMRelease.class.getSimpleName(), ScmEventListener.RELEASE_SIGNATURE);
     assertEquals(SCMDeleteBranch.class.getSimpleName(), ScmEventListener.DELETE_SIGNATURE);
     assertEquals(SCMPublishCommit.class.getSimpleName(), ScmEventListener.PUSH_SIGNATURE);
@@ -229,6 +231,43 @@ class ForeignEventContractTest {
   void theConsumerIdsAreStorageKeysAndAreSpelledOut() {
     assertEquals("maintenance-internal-latest", SoftwareReleaseListener.CONSUMER_ID);
     assertEquals("maintenance-branch-tracking", ScmEventListener.CONSUMER_ID);
+    assertEquals("maintenance-release-trains", ReleaseTrainListener.CONSUMER_ID);
+  }
+
+  /**
+   * <b>TWO CONSUMERS, ONE EVENT, AND THE POINT IS THAT THE IDS DIFFER.</b>
+   *
+   * <p>{@code SoftwareRelease} is read twice: once to move {@code mt_latest} and open the SBOM
+   * outbox, once to spawn a release train. A durable consumer is a WATERMARK, and two ids are two
+   * watermarks — a train spawn that throws rolls back its own claim and leaves the inventory write
+   * committed under the other. One id shared between the two pieces of work would make the newest
+   * feature on the platform able to stop the oldest from recording releases at all.
+   */
+  @Test
+  void theTwoReadersOfOneReleaseAreTwoWatermarksRatherThanOne() {
+    assertEquals(SoftwareReleaseListener.SIGNATURE, ReleaseTrainListener.SIGNATURE);
+    assertNotEquals(
+        SoftwareReleaseListener.CONSUMER_ID,
+        ReleaseTrainListener.CONSUMER_ID,
+        "two pieces of work behind one watermark cannot fail independently");
+  }
+
+  /**
+   * And they share the TRANSCRIPTION, which is the other half of that arrangement: one wire shape,
+   * one record, one place to edit when qits-ci renames a field. A second copy would be a second
+   * thing to keep in step, and missing it is silent — the copy binds nulls and its listener stops
+   * acting with nothing in any log.
+   */
+  @Test
+  void bothReadersBindTheOneTranscriptionOfTheOneWireShape() {
+    String payload =
+        softwareReleasePayload("maven", "eu.wohlben.qits:qits-eventstream", "2026.901.1");
+
+    SoftwareReleaseListener.SoftwareReleasePayload read =
+        CanonicalJson.payloadTo(payload, SoftwareReleaseListener.SoftwareReleasePayload.class);
+
+    assertEquals("qits-eventstream-javalib", read.repository());
+    assertEquals("2026.901.1", read.version());
   }
 
   // --- the field lists ----------------------------------------------------------------------------

@@ -2,9 +2,11 @@ package eu.wohlben.qits.maintenance.bus;
 
 import static eu.wohlben.qits.maintenance.bus.ForeignEventContractTest.frame;
 import static eu.wohlben.qits.maintenance.bus.ForeignEventContractTest.scmReleasePayload;
+import static eu.wohlben.qits.maintenance.bus.ForeignEventContractTest.softwareReleasePayload;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import eu.wohlben.qits.maintenance.api.InventoryReset;
+import eu.wohlben.qits.maintenance.entity.MtTrain;
 import eu.wohlben.qits.maintenance.manifest.GroupConfig;
 import eu.wohlben.qits.maintenance.manifest.ParsedPin;
 import eu.wohlben.qits.maintenance.model.BranchState;
@@ -13,6 +15,7 @@ import eu.wohlben.qits.maintenance.model.GroupSource;
 import eu.wohlben.qits.maintenance.model.PinKind;
 import eu.wohlben.qits.maintenance.model.RepositoryStatus;
 import eu.wohlben.qits.maintenance.model.ScanScope;
+import eu.wohlben.qits.maintenance.model.TrainStatus;
 import eu.wohlben.qits.maintenance.peer.FakePeers;
 import eu.wohlben.qits.maintenance.peer.PeerTarget;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
@@ -71,6 +74,9 @@ class ClaimTransactionTest {
   @Inject FakePeers peers;
 
   @Inject ScmEventListener scm;
+
+  /** The newest consumer of {@code SoftwareRelease}, under its own watermark. */
+  @Inject ReleaseTrainListener releaseTrains;
 
   @Inject InventoryReset reset;
 
@@ -158,6 +164,16 @@ class ClaimTransactionTest {
           store.artifactsOfRepository(List.of(REPOSITORY));
           store.components(artifactId);
           store.edges(artifactId);
+          store.internalPinsOn(Ecosystem.MAVEN, "g:a");
+          store.train(UUID.randomUUID());
+          store.train(REPOSITORY, "0.0.0");
+          store.trains(REPOSITORY, 20);
+          store.trains(null, 20);
+          store.openTrains();
+          store.openTrains(REPOSITORY);
+          store.trainNodes(UUID.randomUUID());
+          store.trainNode(UUID.randomUUID());
+          store.nodesOwedBy(REPOSITORY);
 
           // AND THEN A WRITE, which is where the production failure actually surfaced: the bare
           // read enlists, and the inNewTx behind it is the one that dies.
@@ -197,6 +213,62 @@ class ClaimTransactionTest {
         version,
         store.latest(Ecosystem.GITLINK, REPOSITORY).orElseThrow().latest,
         "the gitlink latest is what must survive a frame handled inside a claim");
+  }
+
+  /**
+   * <b>The same sandwich for the newest consumer, and it is the one with the most reads in front of
+   * its write.</b>
+   *
+   * <p>A train spawn derives its membership before it writes a row: the whole catalog (for
+   * archetypes), the releasing repository's artifact rows, the internal pins on each released
+   * coordinate, and the SBOM dependents of each. That is five store reads, every one of them on this
+   * datasource, every one of them inside somebody else's claim — and then a write. It is exactly the
+   * shape that wedged the other consumer twice, with more of it.
+   */
+  @Test
+  void aReleaseSpawnsItsTrainWhenTheFrameArrivesInsideItsClaim() {
+    // A consumer that pins what the release publishes, so the derivation has something to find and
+    // the transaction has a node to write as well as a station.
+    String consumer = "qits-claim-tx-consumer";
+    store.replaceInventory(
+        consumer,
+        "qits",
+        null,
+        "SERVICE",
+        "main",
+        RepositoryStatus.OK,
+        "sha1",
+        null,
+        List.of(
+            ParsedPin.of(
+                Ecosystem.MAVEN,
+                "pom.xml",
+                "eu.wohlben.qits:qits-eventstream",
+                "1.0.0",
+                null,
+                "property:qits.eventstream.version")),
+        List.of(),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+
+    insideAClaim(
+        () ->
+            releaseTrains.onFrame(
+                frame(
+                    "SoftwareRelease",
+                    softwareReleasePayload(
+                        REPOSITORY, "maven", "eu.wohlben.qits:qits-eventstream", "2026.905.1"))));
+
+    MtTrain train =
+        store
+            .train(REPOSITORY, "2026.905.1")
+            .orElseThrow(() -> new AssertionError("the station was never opened"));
+    assertEquals(TrainStatus.OPEN.name(), train.status);
+    assertEquals(
+        List.of(consumer),
+        store.trainNodes(train.id).stream().map(node -> node.consumer).toList(),
+        "the node behind the reads must have committed");
   }
 
   @Test

@@ -10,6 +10,8 @@ import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.entity.MtScan;
+import eu.wohlben.qits.maintenance.entity.MtTrain;
+import eu.wohlben.qits.maintenance.entity.MtTrainNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.transaction.Transactional;
 
@@ -34,6 +36,10 @@ public class InventoryReset {
     MtArtifactEdge.deleteAll();
     MtArtifactComponent.deleteAll();
     MtArtifact.deleteAll();
+    // And the trains, nodes first: mt_train_node is the other real foreign key in this schema. A
+    // train left standing would make the next test's spawn settle onto it instead of opening one.
+    MtTrainNode.deleteAll();
+    MtTrain.deleteAll();
     MtBump.deleteAll();
     MtBranch.deleteAll();
     MtScan.deleteAll();
