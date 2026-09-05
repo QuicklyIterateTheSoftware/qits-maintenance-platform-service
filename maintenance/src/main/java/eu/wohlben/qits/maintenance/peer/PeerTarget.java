@@ -3,7 +3,7 @@ package eu.wohlben.qits.maintenance.peer;
 /**
  * Every address this service reads or writes, and the credential each one takes.
  *
- * <p><b>Nine targets, five credentials.</b> A target is an ADDRESS — a configured base url a path
+ * <p><b>Ten targets, six credentials.</b> A target is an ADDRESS — a configured base url a path
  * is appended to — while a credential is an oidc client, and a token is cut for one SERVICE. The
  * three registry targets on qits-artifacts share one client because they are one service behind
  * three path prefixes; splitting them would be three tokens for one audience.
@@ -54,15 +54,27 @@ public enum PeerTarget {
   MAVEN_MIRROR("qits.maintenance.mirror.maven-url", Credential.MIRROR),
 
   /** qits-platform-mirror's npmjs pull-through. */
-  NPM_MIRROR("qits.maintenance.mirror.npm-url", Credential.MIRROR);
+  NPM_MIRROR("qits.maintenance.mirror.npm-url", Credential.MIRROR),
 
-  /** The five oidc client names — one per SERVICE, because a token is cut for one service. */
+  /**
+   * qits-configuration — <b>who runs which image version</b>, at {@code /configuration/api/pins}.
+   *
+   * <p>The tenth address and the only one that exists for a RELEASE TRAIN rather than for a scan or
+   * a bump. An IMAGE repository's release ends in a deployment configuration, which no repository
+   * this service scans holds a line of: the pin lives in qits-configuration's ImagePins map and
+   * nothing announces it on the bus. So it is polled — see {@code train/ConfigPinsClient} and
+   * {@code train/TrainSweep} — and this is the address it is polled at.
+   */
+  CONFIGURATION("qits.maintenance.targets.configuration-url", Credential.CONFIGURATION);
+
+  /** The six oidc client names — one per SERVICE, because a token is cut for one service. */
   public static final class Credential {
     public static final String PROJECTS = "projects";
     public static final String GITHOST = "githost";
     public static final String CI = "ci";
     public static final String ARTIFACTS = "artifacts";
     public static final String MIRROR = "mirror";
+    public static final String CONFIGURATION = "configuration";
 
     private Credential() {}
   }

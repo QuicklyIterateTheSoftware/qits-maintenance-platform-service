@@ -14,7 +14,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
- * The five peers, faked at the one seam this service talks through.
+ * The six peers, faked at the one seam this service talks through.
  *
  * <p><b>An {@code @Alternative} subclass rather than a stub server</b>: the whole of what this
  * repository does over the wire is {@link PeerClient#get} and {@link PeerClient#post}, so replacing

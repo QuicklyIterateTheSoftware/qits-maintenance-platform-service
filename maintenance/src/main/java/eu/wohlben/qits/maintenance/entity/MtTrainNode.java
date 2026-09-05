@@ -70,6 +70,14 @@ public class MtTrainNode extends PanacheEntityBase {
    * <p>Beside {@link #childTrainId} rather than derivable from it: the link is null until the
    * sibling consumer spawns the adopting release's station, and the address above has to compose in
    * that window too.
+   *
+   * <p><b>THE TWO POLLED ENDS ARE THE EXCEPTION, and they have to be.</b> For {@code
+   * CONFIG_IMAGE_PIN} and {@code DAEMON_PIN} this column holds the version that was OBSERVED —
+   * what the deployment configuration pins, what qits-ci hands out — because there is no consumer
+   * release for it to hold instead: an application does not release, and a service handing out a
+   * daemon build did not publish anything by doing so. So no address composes from these rows, and
+   * a reader must branch on {@link #endKind} before treating this as one. See {@code
+   * train/TrainSweep}.
    */
   @Column(name = "adopted_version", length = 255)
   public String adoptedVersion;

@@ -215,24 +215,62 @@ public class TrainService {
   /**
    * <b>THE TRAINS THE CONFIG-PIN SWEEP HAS TO ASK ABOUT</b>, derived rather than flagged on the row.
    *
-   * <p>An open train whose releasing repository is an IMAGE is one whose config-pin side may be
-   * owed; nothing else can be. No column records the need, deliberately: it is entirely a function
-   * of the archetype and of which nodes are already there, and a stored flag would be a third copy
-   * of that with its own staleness — the same argument V1 makes for pending not being a table.
+   * <p>A train whose releasing repository is an IMAGE is one whose config-pin side may be owed;
+   * nothing else can be. No column records the need, deliberately: it is entirely a function of the
+   * archetype and of which nodes are already there, and a stored flag would be a third copy of that
+   * with its own staleness — the same argument V1 makes for pending not being a table.
    *
    * <p>A train that already carries {@code CONFIG_IMAGE_PIN} nodes is still answered. The sweep is
    * idempotent and a consuming application may have been added to a deployment config since the last
    * pass; filtering them out here would freeze the first answer.
+   *
+   * <h2>WHY IT IS NOT SIMPLY {@code openTrains()}, WHICH IS THE WHOLE OF THE ORDINARY CASE</h2>
+   *
+   * <p>An IMAGE repository's release usually has <b>nothing to place at spawn at all</b>: no
+   * Dockerfile in the estate says {@code FROM qits/workspace}, so the derivation finds no consumer,
+   * and {@code spawnTrain} closes a station with no nodes as COMPLETED at creation — it arrived the
+   * instant it left. Asking only the OPEN trains would therefore skip exactly the trains this sweep
+   * exists for, every time, and the feature would be dead in the one shape it was built for.
+   *
+   * <p>So an EMPTY train counts too, and {@code MaintenanceStore.addTrainNodes} already says what
+   * happens then: "a COMPLETED train that gains a node is OPEN again … it had arrived because it had
+   * nowhere to go, and now it has somewhere."
+   *
+   * <p><b>Bounded to the NEWEST train of each IMAGE repository</b>, and that bound is the point. An
+   * empty station is never superseded — supersession only overtakes OPEN trains — so without it
+   * every image release this platform ever made would be re-materialised on every sweep, and a
+   * six-month-old version would gain a node that the current pin lands immediately. What a
+   * deployment configuration can still be moved to is the latest release; anything older was never
+   * going to be deployed now.
    */
   public List<MtTrain> configPinCandidates() {
     Map<String, String> archetypes = archetypes();
-    return store.openTrains().stream()
-        .filter(
-            train ->
-                RepositoryArchetype.of(archetypes.get(train.repository))
-                    .filter(archetype -> archetype == RepositoryArchetype.IMAGE)
-                    .isPresent())
-        .toList();
+    Map<UUID, MtTrain> candidates = new LinkedHashMap<>();
+    for (MtTrain train : store.openTrains()) {
+      if (image(archetypes, train.repository)) {
+        candidates.put(train.id, train);
+      }
+    }
+    for (Map.Entry<String, String> entry : archetypes.entrySet()) {
+      if (!image(archetypes, entry.getKey())) {
+        continue;
+      }
+      // One row per IMAGE repository, and there are a handful of them in the whole catalog.
+      MtTrain newest = store.trains(entry.getKey(), 1).stream().findFirst().orElse(null);
+      if (newest == null || candidates.containsKey(newest.id)) {
+        continue;
+      }
+      if (store.trainNodes(newest.id).isEmpty()) {
+        candidates.put(newest.id, newest);
+      }
+    }
+    return List.copyOf(candidates.values());
+  }
+
+  private static boolean image(Map<String, String> archetypes, String repository) {
+    return RepositoryArchetype.of(archetypes.get(repository))
+        .filter(archetype -> archetype == RepositoryArchetype.IMAGE)
+        .isPresent();
   }
 
   // --- the derivation -----------------------------------------------------------------------

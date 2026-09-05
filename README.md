@@ -28,6 +28,8 @@ The contract — routes, model, config keys, schedules and the bump payload — 
 | an internal release | qits-events | `SoftwareRelease` off the durable bus — see **The event bus** |
 | a branch's life | qits-events | `SCMRelease`, `SCMDeleteBranch`, `SCMPublishCommit` |
 | what a release CONTAINS | qits-artifacts | `GET /artifacts/sboms/<type>/<name>/-/<version>` — one CycloneDX document per released artifact; see **The dependency graph** |
+| who runs which image version | qits-configuration | `GET /configuration/api/pins` — `{generatedAt, pins:[{image, version, application, key}]}`, image names unqualified. **Polled, because nothing announces it**: an IMAGE release is adopted when a deployment configuration names the new version, and that is a release train's end no event covers. Every ten minutes, and only when a train is actually owed one |
+| which daemon build is handed out | qits-ci | `GET /ci/api/daemon` — `{daemonName, daemonVersion, previousDaemonVersion, source}`, `source` ∈ `adopted`/`configured`/`none`. The other polled train end: nothing pins a daemon in a manifest, so adoption is qits-ci's ladder moving. All three sources count — a node lands on the version, not on how it got there |
 
 **The head sha is resolved once per repository and every manifest is read at it.** The git host
 stamps `Git-Commit-Sha` on every tree and blob answer, so one read of the root tree at `main` both
@@ -538,6 +540,7 @@ environment without a rebuild.
 | `qits.maintenance.targets.githost-url` | `http://qits-githost:8080` | where the manifests are |
 | `qits.maintenance.targets.ci-url` | `http://qits-ci:8080` | which CI applies a bump |
 | `qits.maintenance.targets.artifacts-url` | `http://qits-artifacts:8080` | where the SBOM documents are — a bare host, because the route's whole path belongs to the caller |
+| `qits.maintenance.targets.configuration-url` | `http://qits-configuration:8080` | who runs which image version, read by the config-pin sweep at `/configuration/api/pins`. A bare host for the same reason |
 | `qits.maintenance.registries.maven-url` | `http://qits-artifacts:8080/artifacts/maven/maven` | internal maven |
 | `qits.maintenance.registries.npm-url` | `http://qits-artifacts:8080/artifacts/npm/npm` | internal npm |
 | `qits.maintenance.registries.oci-url` | `http://qits-artifacts:8080/v2` | internal images |
@@ -551,6 +554,7 @@ environment without a rebuild.
 | `qits.maintenance.scan.internal.cron` | `0 30 0 * * ?` | the internal scan, 00:30 daily — the reconciliation belt behind the bus |
 | `qits.maintenance.scan.external.cron` | `0 0 1 * * ?` | the external scan, 01:00 daily |
 | `qits.maintenance.sbom.sweep-cron` | `0 5 * * * ?` | re-queue artifact rows still PENDING, hourly. It never retries MISSING or FAILED |
+| `qits.maintenance.train.sweep-cron` | `0 10 * * * ?` | the config-pin sweep, every ten minutes — the two release-train ends nothing announces. No HTTP at all when nothing is owed |
 | `qits.maintenance.time-zone` | `UTC` | the zone both crons are read in |
 | `qits.maintenance.bump.enabled` | `true` | whether a branch may be pushed at all |
 | `qits.maintenance.bump.internal.cron` | `0 0 2 * * ?` | the nightly INTERNAL bump, 02:00 — after both scans, so the inventory it reads is today's |
@@ -579,9 +583,9 @@ broken. Remove it from the deployment's extras at the next edit of that file.
 service is platform tier, so a live platform injects the qualified name. Known debt, the same one
 qits-configuration and qits-platform-orchestrator carry.
 
-**Outbound credentials** are five named oidc clients — `projects`, `githost`, `ci`, `artifacts`,
-`mirror` — all `client-id=qits-platform-maintenance`, all shipped
-`client-enabled=false`. A token is cut for one service, which is why there are five; only the audience
+**Outbound credentials** are six named oidc clients — `projects`, `githost`, `ci`, `artifacts`,
+`mirror`, `configuration` — all `client-id=qits-platform-maintenance`, all shipped
+`client-enabled=false`. A token is cut for one service, which is why there are six; only the audience
 differs, and it is the one value not defaulted, because it can be environment-qualified. A deployment
 turns one on with
 
@@ -625,6 +629,7 @@ claim is not optional — it is a route this service cannot use without it.
 | claim `project` = `*` | qits-ci's trigger calls `machineAuth.requireProject("*")`, which passes only for a token literally granted every project. The bump names one repository but the trigger route demands them all. Today the only such grant is qits-platform-artifacts'; this service needs its own. |
 | audiences `<env>-qits-ci`, `qits-projects`, `qits-githost` | a token is cut for one service. qits-githost ships `qits.auth.machine.required=true`, so its content reads need a real bearer addressed to it. |
 | audiences `qits-platform-artifacts`, `qits-platform-mirror` | **not needed today** — the registry routes and the mirror's proxies are unguarded on qits-net. The two clients ship disabled for the day the edge's rule reaches the inside. |
+| the two polled train ends | **nothing new.** `GET /configuration/api/pins` admits `qits:admin` and `qits:system`, and `GET /ci/api/daemon` admits `qits:system` — both are opened by the forward-auth pair every call already carries, so the `configuration` client ships disabled like the two above and no role grant is added. Only the **address** is new: `QITS_MAINTENANCE_TARGETS_CONFIGURATION_URL` if the deployment does not resolve `qits-configuration`. |
 
 In `qits-configuration` / `.qits-bootstrap.env` terms that is a client with
 `_ROLES` carrying `qits:system,qits-platform:system` (unchanged), `_CLAIMS_PROJECT: "*"`, and

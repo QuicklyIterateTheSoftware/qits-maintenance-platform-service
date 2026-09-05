@@ -15,11 +15,15 @@ import eu.wohlben.qits.maintenance.model.GroupSource;
 import eu.wohlben.qits.maintenance.model.PinKind;
 import eu.wohlben.qits.maintenance.model.RepositoryArchetype;
 import eu.wohlben.qits.maintenance.model.RepositoryStatus;
+import eu.wohlben.qits.maintenance.model.TrainEndKind;
 import eu.wohlben.qits.maintenance.model.TrainNodeState;
 import eu.wohlben.qits.maintenance.model.TrainStatus;
 import eu.wohlben.qits.maintenance.peer.FakePeers;
 import eu.wohlben.qits.maintenance.peer.PeerTarget;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
+import eu.wohlben.qits.maintenance.train.ConfigPinsClient;
+import eu.wohlben.qits.maintenance.train.DaemonPinClient;
+import eu.wohlben.qits.maintenance.train.TrainSweep;
 import eu.wohlben.qits.maintenance.work.WorkQueue;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -48,6 +52,14 @@ import org.junit.jupiter.api.Timeout;
  * first) than for the service (station first) — both orders happen on the bus, and the estate has to
  * converge either way.
  *
+ * <p><b>And the two journeys that END SOMEWHERE NO EVENT REACHES</b> are here too, at the bottom: a
+ * daemon release that finishes on qits-ci's adoption ladder, and an image release that finishes as
+ * the runtime pin in qits-configuration. Neither of those last steps is announced by anything, so
+ * both are driven the way a deployment drives them — the frames through the listeners, and then
+ * {@code TrainSweep} asking. They belong beside the SBOM journey rather than in a suite of their own
+ * because they are the same journey with a different last mile, and the whole value of a journey test
+ * is that the mile is not tested in isolation.
+ *
  * <p><b>It is a {@code @QuarkusTest} rather than a story IT, and that is worth saying out loud.</b>
  * The {@code stories/} suite launches the packaged artifact and drives it over HTTP; a bus frame is
  * not something anything can post to this service from outside, and the trains have no route yet —
@@ -73,6 +85,17 @@ class AdoptionJourneyTest {
   private static final String SERVICE_PACKAGE = "eu.wohlben.qits:qits-ci";
   private static final String SERVICE_VERSION = "2026.905.3";
 
+  /** The daemon, and the service that hands it out — {@code TrainService.DAEMON_ADOPTERS}. */
+  private static final String DAEMON = "qits-ci-daemon";
+  private static final String DAEMON_ADOPTER = "qits-ci";
+  private static final String DAEMON_VERSION = "2026.905.4";
+
+  /** The image repository, its image, and the application whose deployment config deploys it. */
+  private static final String IMAGE_REPOSITORY = "qits-workspace-oci";
+  private static final String IMAGE = "qits/workspace";
+  private static final String IMAGE_APPLICATION = "qits-workspaces";
+  private static final String IMAGE_VERSION = "2026.905.5";
+
   @Inject SoftwareReleaseListener releases;
 
   @Inject ReleaseTrainListener trains;
@@ -84,6 +107,9 @@ class AdoptionJourneyTest {
   @Inject WorkQueue queue;
 
   @Inject InventoryReset reset;
+
+  /** The polled half of the journey — see the two tests at the bottom of this class. */
+  @Inject TrainSweep sweep;
 
   @BeforeEach
   void anEstateOfThreeRepositories() {
@@ -295,5 +321,119 @@ class AdoptionJourneyTest {
     assertEquals(landed.adoptedAt, again.adoptedAt);
     assertEquals(landed.landedAt, again.landedAt);
     assertEquals(completedAt, store.train(library.id).orElseThrow().completedAt);
+  }
+
+  // --- the two journeys no event can finish ---------------------------------------------------
+
+  /**
+   * <b>A DAEMON RELEASE, END TO END: qits-ci-daemon publishes, and the journey ends on qits-ci's
+   * adoption ladder.</b>
+   *
+   * <p>Nothing pins a daemon in a manifest and nothing announces that a service started handing out
+   * a new build, so this is the one journey where the last step is a QUESTION rather than an event —
+   * the frames open the station, and {@code TrainSweep} is what closes it. Both halves are driven
+   * here for the same reason the three-release journey above drives both listeners: the seam between
+   * them is where a feature like this actually breaks.
+   */
+  @Test
+  @Timeout(180)
+  void aDaemonReleaseEndsAtTheLadderOfTheServiceThatHandsItOut() {
+    scanned(DAEMON, RepositoryArchetype.DAEMON);
+
+    // 1. THE RELEASE. `daemon` is a package type this service's inventory does not hold — no
+    //    coordinate, no artifact row — and the station is opened anyway, because a train is not an
+    //    inventory row.
+    released(true, DAEMON, "daemon", DAEMON, DAEMON_VERSION);
+
+    MtTrain train = train(DAEMON, DAEMON_VERSION);
+    assertEquals(TrainStatus.OPEN.name(), train.status);
+    MtTrainNode owed = node(train, DAEMON_ADOPTER);
+    assertEquals(TrainEndKind.DAEMON_PIN.name(), owed.endKind);
+    assertEquals(TrainNodeState.PENDING.name(), owed.state);
+
+    // 2. THE LADDER IS STILL ON YESTERDAY'S BUILD. A sweep asks and writes nothing at all.
+    ladder("2026.905.1", "adopted");
+    assertEquals(0, sweep.sweep().landed());
+    assertEquals(TrainNodeState.PENDING.name(), node(train, DAEMON_ADOPTER).state);
+
+    // 3. THE RUNG IS PROVEN. qits-ci hands out the new build, and the only way this service can
+    //    learn that is the question the sweep asks.
+    ladder(DAEMON_VERSION, "adopted");
+    assertEquals(1, sweep.sweep().landed());
+
+    assertEquals(TrainNodeState.LANDED.name(), node(train, DAEMON_ADOPTER).state);
+    assertEquals(DAEMON_VERSION, node(train, DAEMON_ADOPTER).adoptedVersion);
+    MtTrain arrived = store.train(train.id).orElseThrow();
+    assertEquals(TrainStatus.COMPLETED.name(), arrived.status, "the daemon reached the estate");
+    assertNotNull(arrived.completedAt);
+  }
+
+  /**
+   * <b>AN IMAGE RELEASE, END TO END: qits/workspace publishes, and the journey ends at the runtime
+   * pin in qits-configuration.</b>
+   *
+   * <p>This is the journey whose FIRST step is missing as well as its last. Nothing in the estate
+   * says {@code FROM qits/workspace}, so the spawn has nobody to place and closes the station as a
+   * journey of length zero — and the sweep both materialises the node the release is really owed and
+   * closes it, from the one answer qits-configuration gives.
+   */
+  @Test
+  @Timeout(180)
+  void anImageReleaseEndsAtTheConfigurationThatDeploysIt() {
+    scanned(IMAGE_REPOSITORY, RepositoryArchetype.IMAGE);
+
+    // 1. THE RELEASE. A docker frame, so this half of it IS an inventory row — that row is where the
+    //    image name the pins are joined on comes from.
+    released(true, IMAGE_REPOSITORY, "docker", IMAGE, IMAGE_VERSION);
+
+    MtTrain train = train(IMAGE_REPOSITORY, IMAGE_VERSION);
+    assertEquals(
+        TrainStatus.COMPLETED.name(),
+        train.status,
+        "no Dockerfile in the estate pins the image, so the spawn had nowhere to send it");
+    assertTrue(store.trainNodes(train.id).isEmpty());
+
+    // 2. THE CONFIGURATION IS STILL DEPLOYING LAST WEEK'S IMAGE. The sweep places the node the
+    //    spawn could not — and the station, which had arrived because it had nowhere to go, is open
+    //    again now that it has somewhere.
+    imagePins("2026.904.1");
+    assertEquals(1, sweep.sweep().placed());
+
+    MtTrainNode owed = node(train, IMAGE_APPLICATION);
+    assertEquals(TrainEndKind.CONFIG_IMAGE_PIN.name(), owed.endKind);
+    assertEquals(TrainNodeState.PENDING.name(), owed.state);
+    assertEquals(TrainStatus.OPEN.name(), store.train(train.id).orElseThrow().status);
+
+    // 3. THE DEPLOYMENT MOVES. Nobody announces it; the next sweep is what finds out.
+    imagePins(IMAGE_VERSION);
+    assertEquals(1, sweep.sweep().landed());
+
+    MtTrainNode landed = node(train, IMAGE_APPLICATION);
+    assertEquals(TrainNodeState.LANDED.name(), landed.state);
+    assertEquals(IMAGE_VERSION, landed.adoptedVersion, "the version OBSERVED, for a polled end");
+    MtTrain arrived = store.train(train.id).orElseThrow();
+    assertEquals(TrainStatus.COMPLETED.name(), arrived.status);
+    assertNotNull(arrived.completedAt);
+  }
+
+  /** What qits-ci says it hands out. */
+  private void ladder(String version, String source) {
+    peers.answer(
+        PeerTarget.CI,
+        DaemonPinClient.PATH,
+        FakePeers.Scripted.ok(
+            "{\"daemonName\":\"" + DAEMON + "\",\"daemonVersion\":\"" + version
+                + "\",\"previousDaemonVersion\":\"\",\"source\":\"" + source + "\"}"));
+  }
+
+  /** What qits-configuration says the estate deploys. */
+  private void imagePins(String version) {
+    peers.answer(
+        PeerTarget.CONFIGURATION,
+        ConfigPinsClient.PATH,
+        FakePeers.Scripted.ok(
+            "{\"generatedAt\":\"2026-09-05T10:00:00Z\",\"pins\":[{\"image\":\"" + IMAGE
+                + "\",\"version\":\"" + version + "\",\"application\":\"" + IMAGE_APPLICATION
+                + "\",\"key\":\"env.QITS_WORKSPACE_IMAGE_VERSION\"}]}"));
   }
 }

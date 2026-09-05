@@ -85,6 +85,9 @@ import org.jboss.logging.Logger;
  *   <li>{@link #arrived} — a train was spawned. The evidence is that release's own documents, and
  *       what it is really for is the OTHER SIDE OF A RACE (below).
  *   <li>{@link #recover} — a boot. Every owed node against the whole current graph.
+ *   <li>{@link #observed} — <b>a POLLED end</b>. Not an evaluation at all: the caller has already
+ *       read the evidence over HTTP and decided, and what it needs from here is the landing and the
+ *       cascade behind it. See {@link TrainSweep}.
  * </ul>
  *
  * <h2>THE RACE, AND WHY THE SPAWN HAS TO EVALUATE TOO</h2>
@@ -201,6 +204,50 @@ public class TrainEvaluator {
     }
     apply(train.repository, evidenceOf(train.repository, train.version), owed);
     cascadeIfArrived(train);
+  }
+
+  /**
+   * <b>THE POLLED END'S LANDING.</b> One node whose evidence lives on another service, observed to
+   * be carrying the version — landed, and the completion cascaded from here like any other.
+   *
+   * <p><b>Why the sweep does not simply call the store.</b> A landing is never only a landing: it may
+   * be the last node its train was waiting for, which completes that train, which lands ITS referrers
+   * — and that arithmetic is this class's, kept in one place so a polled end closes a journey exactly
+   * as a released one does. {@code TrainSweep} decides WHETHER a pin has arrived; what happens next
+   * is the same cascade the SBOM ingest feeds.
+   *
+   * <p><b>There is no ADOPTED step for these ends and that is not a shortcut.</b> ADOPTED means "the
+   * consumer's tree carries it and has not shipped it" — a state that exists because a moved pin can
+   * still be reverted. A deployment configuration and a distributed daemon build have no such
+   * in-between: the version observed here IS what is being handed out, so the node is done.
+   *
+   * <p><b>Monotonic like everything else.</b> A LANDED node is read and returned, so a sweep every
+   * ten minutes over the same answer writes nothing at all after the first pass.
+   *
+   * @param observedVersion what the peer said the consumer carries. Written to {@code
+   *     adopted_version}, and it is the ONE END where that column is not the consumer's own release
+   *     — an application does not release, and the pinned version is the whole of what was taken.
+   *     See {@code MtTrainNode.adoptedVersion}
+   * @param observedAt when the peer said so — its own {@code generatedAt} where it offers one,
+   *     never a stamp invented here
+   * @return whether this call is the one that landed it
+   */
+  public boolean observed(UUID nodeId, String observedVersion, Instant observedAt) {
+    if (nodeId == null || observedAt == null) {
+      return false;
+    }
+    MtTrainNode node = store.trainNode(nodeId).orElse(null);
+    if (node == null || TrainNodeState.of(node.state) == TrainNodeState.LANDED) {
+      return false;
+    }
+    store.nodeLanded(nodeId, observedVersion, null, observedAt);
+    LOG.infof(
+        "%s is observed carrying %s, which lands its node on train %s",
+        node.consumer, observedVersion, node.trainId);
+    if (completeIfArrived(node.trainId)) {
+      cascade(node.trainId);
+    }
+    return true;
   }
 
   /**

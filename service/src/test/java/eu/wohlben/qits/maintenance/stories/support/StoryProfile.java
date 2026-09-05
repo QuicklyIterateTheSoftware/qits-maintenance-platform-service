@@ -38,7 +38,9 @@ import java.util.Map;
  *       other wrote — {@code mt_repository} counts, an active bump's lock. Its url travels through a
  *       system property rather than a static field, because a test profile is instantiated in more
  *       than one classloader and a field written by one copy is not the field another reads.
- *   <li><b>All eight peer urls</b>, and this is the inversion of what the parent does. Over there
+ *   <li><b>The eight peer urls a story can reach</b>, and this is the inversion of what the parent
+ *       does. (The ninth, qits-configuration, is reached by the config-pin sweep alone, and that
+ *       timer is removed below — so it keeps its shipped address and nothing dials it.) Over there
  *       every target is a port nothing listens on, which is the right fixture for "a failure reaches
  *       a readable row with none of the suite's fakes involved". Here they are {@link StoryPeers}
  *       stand-ins that RECORD, because the outgoing half is where a scan's evidence is: what a
@@ -153,6 +155,10 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
     // an ingest, and a sweep firing on the hour mid-catalogue would draw an artifacts arrow into
     // whichever story happened to be draining.
     overrides.put("qits.maintenance.sbom.sweep-cron", "off");
+    // And the config-pin sweep is the fourth. No story spawns a train, and this is the one timer
+    // that would dial a peer these stories have no stand-in for at all — qits-configuration — so it
+    // is removed rather than merely quietened.
+    overrides.put("qits.maintenance.train.sweep-cron", "off");
     overrides.put("qits.maintenance.bump.poll-interval", "1s");
 
     overrides.put("qits.auth.machine.required", "true");
