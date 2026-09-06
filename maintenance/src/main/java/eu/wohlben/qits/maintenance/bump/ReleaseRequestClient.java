@@ -145,6 +145,12 @@ public class ReleaseRequestClient {
     ObjectNode body = JSON.createObjectNode();
     body.put("branch", branch);
     body.put("summary", cap(summary));
+    // `priority` is LOWEST on every bump, unconditionally and by decision: a dependency bump is the
+    // one release that is never what anybody is waiting for, so it yields the build queue to every
+    // release a person asked for. There is no key to turn it up — a bump that needed to go first
+    // would be a person's release request, not this one. An older qits-projects that does not know
+    // the field ignores the unknown key, so the ask is safe to send before that side ships it.
+    body.put("priority", "LOWEST");
     // `requester` is deliberately not sent. It states WHOM a machine peer acts for, and a bump has
     // no such person: a nightly one was asked for by a clock and a manual one records no operator.
     // Omitted, qits-projects attributes the request to this service's own identity, which is the
