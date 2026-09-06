@@ -293,15 +293,21 @@ public class BumpIT {
     assertTrue(
         ask.contains("\"summary\":\"bump(" + StoryCatalog.DEFAULT_GROUP + "): "),
         "the summary is the shape the bump's own commits carry: " + ask);
+    // AND IT ASKS FOR THE BACK OF THE QUEUE. Every bump is LOWEST, unconditionally — nobody is
+    // waiting on a dependency bump, so it yields to every release a person asked for.
+    assertTrue(
+        ask.contains("\"priority\":\"LOWEST\""),
+        "a bump's release request is always the lowest priority one: " + ask);
     // AND THE REPOSITORY IS IN THE PATH, not the body: qits-projects addresses a repository by its
     // own catalog row id, which is the one thing that route resolves.
     assertTrue(
         StoryCatalog.RELEASE_REQUESTS_PATH.contains(StoryCatalog.CATALOG_ID),
         "the ask is addressed by the catalog id");
     story
-        .note("and then this service opens a release request for that branch in qits-projects —"
-            + " which is where its part ends: the gates settle the request and Auto Release tags"
-            + " it, and nothing here waits for either")
+        .note("and then this service opens a release request for that branch in qits-projects — at"
+            + " the LOWEST priority, always, because nobody waits on a dependency bump — which is"
+            + " where its part ends: the gates settle the request and Auto Release tags it, and"
+            + " nothing here waits for either")
         .as("the-branch-is-handed-on");
 
     StoryIdentities.operator(given())
