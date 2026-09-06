@@ -733,3 +733,5 @@ against that.
 
 The image is `docker/Dockerfile`, built from the repo root with the client bundle already in the
 context — see `AGENTS.md`.
+
+Release requests opened by this service always ask at the LOWEST priority — a dependency bump is never what anybody is waiting for.
