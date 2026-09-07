@@ -223,8 +223,8 @@ bump row instead of in a step log somebody has to go and read.
 **SUCCEEDED asks for the release; the other three endings do not.** `ReleaseRequestClient` posts to
 qits-projects' `POST /projects/api/repositories/<repoId>/release-requests` with the branch and the
 commit-subject summary. Nothing merges and nothing is released at that call: a release REQUEST is
-OPENED, the quality gates settle the fold it makes, and Auto Release tags it. **The train's job ends
-there** — nothing here polls the request or waits for a version. NOTHING_TO_DO pushed nothing; STALE
+OPENED, the quality gates settle the fold it makes, and Auto Release tags it. **This service's job
+ends there** — nothing here polls the request or waits for a version. NOTHING_TO_DO pushed nothing; STALE
 is somebody's hand-written commit and releasing it on their behalf is the one thing this must never
 do.
 
@@ -378,6 +378,16 @@ subscribes and publishes nothing.**
   the log, silently skipping everything in between; the old watermark is orphaned. Reuse one and a
   listener inherits another's watermark, believing it has handled events it was never offered. Both
   are pinned as literals in `bus/ForeignEventContractTest` for that reason.
+- **THERE IS A THIRD ID AND IT IS ABANDONED: `maintenance-release-trains`.** It was a second durable
+  consumer of `SoftwareRelease`, opening the station of the release train that release belonged to.
+  The trains were retired (`V8__retire_release_trains.sql`) and the listener went with them — but its
+  `consumed_event` rows and its `consumer_watermark` are in the eventstream database and are
+  deliberately **left alone**, which is the abandoned-consumer rule: a consumer id is storage, and
+  deleting a watermark and deleting a consumer are not the same operation. **Never reuse the
+  string.** A future listener adopting it would inherit a watermark saying it had already handled
+  every release up to the day the trains were removed — it would start deaf, with nothing in any log.
+  It is pinned as a literal in `bus/ForeignEventContractTest` beside the two that are live, with the
+  assertion that no live listener claims it.
 - **`mt_latest` has two writers now and they are deliberately different methods.**
   `MaintenanceStore.recordLatest` is the POLL's and replaces the column whatever it says;
   `recordLatestIfNewer` is the BUS's and only ever moves it forward. A poll asks a registry what the
@@ -671,7 +681,7 @@ Each is a decision, not an omission:
 - **Workspace creation.** Pushing the branch is the whole "merge request"; it is released through a
   qits-projects release request like any other branch — this service opens that request itself.
 - **Polling the release request.** qits-projects answers an id and this service stores it and stops.
-  The train's job ends at "request opened": the gates settle it, Auto Release tags it, and two
+  This service's job ends at "request opened": the gates settle it, Auto Release tags it, and two
   mechanisms watching one fact would be two ways to disagree about it. A request that is REJECTED,
   CONFLICTED or FAILED is therefore visible only in qits-projects today — the one thing a person
   loses by this service not polling, and the price of the single writer.

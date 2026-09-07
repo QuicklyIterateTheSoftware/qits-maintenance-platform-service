@@ -1,4 +1,4 @@
-package eu.wohlben.qits.maintenance.train;
+package eu.wohlben.qits.maintenance.adoption;
 
 import eu.wohlben.qits.maintenance.entity.MtArtifact;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
@@ -12,24 +12,27 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * <b>WHAT ONE RELEASE PUT INTO A REGISTRY</b> — the coordinates both sides of a train join on.
+ * <b>WHAT ONE RELEASE PUT INTO A REGISTRY</b> — the coordinates both halves of an adoption question
+ * join on.
  *
- * <p>A train is a released {@code (repository, version)}, and everything a train has to decide is
- * decided against the {@code (ecosystem, name)} pairs that release published: the spawn asks who
- * PINS one of them ({@link TrainService}), and the evaluation asks whose bill of materials CONTAINS
- * one of them ({@link TrainEvaluator}). Both need the same answer out of the same table, so it is
- * read in one place rather than derived twice with two chances of disagreeing.
+ * <p>A release is a {@code (repository, version)}, and everything asked about one is asked against
+ * the {@code (ecosystem, name)} pairs it published: the closure asks who PINS one of them ({@link
+ * DownstreamResolver}), and the journey asks whose bill of materials CONTAINS one of them ({@link
+ * AdoptionEvaluator}). Both need the same answer out of the same table, so it is read in one place
+ * rather than derived twice with two chances of disagreeing.
  *
- * <p><b>GITLINK never appears.</b> {@code mt_artifact} holds the three registry ecosystems only
- * (V3), and the filter below says so out loud rather than relying on it — a gitlink is pinned by
- * the wrapper, banked in bulk by the wrapper's own release, and is never a train's concern.
+ * <p><b>GITLINK never appears here.</b> {@code mt_artifact} holds the three registry ecosystems only
+ * (V3), and the filter below says so out loud rather than relying on it. The gitlink edge — a
+ * frontend that is a service's {@code webui} submodule — is not a released coordinate at all: it is
+ * a PIN, and {@link DownstreamResolver} unions it in on the pin side under the repository's own
+ * name. Evidence for that edge still rides a registry coordinate; see {@link AdoptionEvaluator}.
  */
 @ApplicationScoped
 public class ReleaseCoordinates {
 
   @Inject MaintenanceStore store;
 
-  /** One released package, as both the pin side and the SBOM side of a train name it. */
+  /** One released package, as both the pin side and the SBOM side name it. */
   public record Coordinate(Ecosystem ecosystem, String name) {}
 
   /**
@@ -37,9 +40,10 @@ public class ReleaseCoordinates {
    * knows.
    *
    * <p>Empty is an ordinary answer rather than a gap: a {@code docs}-only release names no
-   * coordinate at all, and a release whose {@code mt_artifact} rows have not been written yet is
-   * one whose sibling consumer has simply not run — see {@link TrainService#spawn}, which unions
-   * the frame's own coordinate in on top of this.
+   * coordinate at all, a {@code daemon} release names nothing any manifest pins, and a release whose
+   * {@code mt_artifact} rows have not been written yet is one whose sibling consumer has simply not
+   * run. Every caller here treats an empty set as "nothing to match on", which is PENDING rather
+   * than a refusal.
    */
   public Set<Coordinate> of(String repository, String version) {
     Set<Coordinate> coordinates = new LinkedHashSet<>();

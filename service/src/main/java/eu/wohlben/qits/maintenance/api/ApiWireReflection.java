@@ -1,8 +1,10 @@
 package eu.wohlben.qits.maintenance.api;
 
+import eu.wohlben.qits.maintenance.dto.AdoptionJourneyDto;
 import eu.wohlben.qits.maintenance.dto.ArtifactDto;
 import eu.wohlben.qits.maintenance.dto.BumpDto;
 import eu.wohlben.qits.maintenance.dto.DependencyDto;
+import eu.wohlben.qits.maintenance.dto.DownstreamDto;
 import eu.wohlben.qits.maintenance.dto.DependentDto;
 import eu.wohlben.qits.maintenance.dto.DependentsDto;
 import eu.wohlben.qits.maintenance.dto.GroupDto;
@@ -12,9 +14,6 @@ import eu.wohlben.qits.maintenance.dto.RepositoryDependentsDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDetailDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDto;
 import eu.wohlben.qits.maintenance.dto.ScanDto;
-import eu.wohlben.qits.maintenance.dto.TrainDto;
-import eu.wohlben.qits.maintenance.dto.TrainNodeDto;
-import eu.wohlben.qits.maintenance.dto.TrainSummaryDto;
 import eu.wohlben.qits.maintenance.dto.TransitiveDto;
 import eu.wohlben.qits.maintenance.pending.Change;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -65,14 +64,15 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       BumpDto.class,
       ScanDto.class,
       Change.class,
-      // The release trains. Nothing here rides in a Response.entity — all three routes declare
-      // their type — but the note above is exactly about that not being the test: which types the
-      // build-time analysis happens to find is an implementation detail, and the journey view is a
-      // page whose whole content is these three records.
-      TrainSummaryDto.class,
-      TrainDto.class,
-      TrainDto.PackageDto.class,
-      TrainNodeDto.class
+      // The ad-hoc downstream closure and the adoption journey, which replaced the release trains'
+      // four records. `DownstreamDto` is the one that would hurt most: it is a wire contract
+      // qits-projects reads on its announce path, so a missing registration would be a 500 in the
+      // binary that degrades another service's event enrichment with nothing failing here.
+      DownstreamDto.class,
+      DownstreamDto.EntryDto.class,
+      AdoptionJourneyDto.class,
+      AdoptionJourneyDto.PackageDto.class,
+      AdoptionJourneyDto.AdopterDto.class
     })
 final class ApiWireReflection {
 

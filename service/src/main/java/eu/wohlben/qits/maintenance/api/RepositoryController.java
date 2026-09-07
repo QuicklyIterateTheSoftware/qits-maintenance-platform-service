@@ -1,8 +1,10 @@
 package eu.wohlben.qits.maintenance.api;
 
 import eu.wohlben.qits.maintenance.bump.BumpService;
+import eu.wohlben.qits.maintenance.control.Adoption;
 import eu.wohlben.qits.maintenance.control.ArtifactGraph;
 import eu.wohlben.qits.maintenance.control.Inventory;
+import eu.wohlben.qits.maintenance.dto.DownstreamDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDependentsDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDetailDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDto;
@@ -46,6 +48,9 @@ public class RepositoryController {
 
   /** What this repository's RELEASES contain, and who contains them. See {@link ArtifactGraph}. */
   @Inject ArtifactGraph graph;
+
+  /** Who is downstream of it, traced to the end. See {@link Adoption}. */
+  @Inject Adoption adoption;
 
   /** What a 202 answers with — the id to poll. */
   public record AcceptedResponse(UUID id) {}
@@ -95,6 +100,38 @@ public class RepositoryController {
   @RolesAllowed({"qits:admin", "qits:system"})
   public RepositoryDependentsDto dependents(@PathParam("name") String name) {
     return graph.repositoryDependents(name);
+  }
+
+  /**
+   * <b>Everything downstream of this repository, traced to the end</b> — the closure a build order
+   * is derived from.
+   *
+   * <p>The transitive sibling of {@code /{name}/dependents}: that one answers who embeds what this
+   * repository publishes, one hop, out of bills of materials alone. This one unions the DECLARED
+   * side in — every INTERNAL {@code mt_pin} on a coordinate it publishes, <b>including the GITLINK
+   * pin on its own name</b>, which is how a frontend reaches the service it is the {@code webui}
+   * submodule of — and then keeps walking. The old release train could not: its membership was
+   * derived once, one hop deep, so a library's journey stopped at the frontend and never named the
+   * service behind it.
+   *
+   * <p><b>This is a wire contract</b> — qits-projects reads it on its release-request announce path
+   * and qits-ci orders its build queue by what comes out. See {@link DownstreamDto}, and
+   * {@code qits-maintenance-plan.md} in the qits-qits wrapper, where the shape is pinned.
+   *
+   * <p><b>{name} takes either spelling</b>, the catalog name or qits-projects' repository row id
+   * (this inventory's {@code catalog_id}), because the caller addressing it is holding the latter.
+   *
+   * <p><b>No 404, and here that is load-bearing rather than tidy.</b> The caller is an announce
+   * path: a repository this service has never scanned must cost that announce an empty list, never
+   * a refusal it has to classify.
+   */
+  @GET
+  @jakarta.ws.rs.Path("/{name}/downstream")
+  @Operation(summary = "Everything downstream of this repository, ordered upstream first")
+  @APIResponse(responseCode = "200", description = "The closure, depth ascending then name")
+  @RolesAllowed({"qits:admin", "qits:system"})
+  public DownstreamDto downstream(@PathParam("name") String name) {
+    return adoption.downstream(name);
   }
 
   /**

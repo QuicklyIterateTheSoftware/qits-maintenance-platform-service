@@ -37,7 +37,7 @@ import org.junit.jupiter.api.Test;
  * {@code qits-ci-events} and {@code qits-githost-events} are published and could be taken; they are
  * not, because this repository's rule is that what crosses from another context is a wire contract
  * and not a type, and taking three jars for four field lists would put three other repositories'
- * release trains in front of this one's build.
+ * releases in front of this one's build.
  *
  * <h2>So the TRANSCRIPTIONS below are the contract, and this file is where they are kept</h2>
  *
@@ -216,7 +216,6 @@ class ForeignEventContractTest {
   @Test
   void theEventNamesTheListenersSubscribeToAreTheOnesTheseEventsRideUnder() {
     assertEquals(SoftwareRelease.class.getSimpleName(), SoftwareReleaseListener.SIGNATURE);
-    assertEquals(SoftwareRelease.class.getSimpleName(), ReleaseTrainListener.SIGNATURE);
     assertEquals(SCMRelease.class.getSimpleName(), ScmEventListener.RELEASE_SIGNATURE);
     assertEquals(SCMDeleteBranch.class.getSimpleName(), ScmEventListener.DELETE_SIGNATURE);
     assertEquals(SCMPublishCommit.class.getSimpleName(), ScmEventListener.PUSH_SIGNATURE);
@@ -231,43 +230,28 @@ class ForeignEventContractTest {
   void theConsumerIdsAreStorageKeysAndAreSpelledOut() {
     assertEquals("maintenance-internal-latest", SoftwareReleaseListener.CONSUMER_ID);
     assertEquals("maintenance-branch-tracking", ScmEventListener.CONSUMER_ID);
-    assertEquals("maintenance-release-trains", ReleaseTrainListener.CONSUMER_ID);
   }
 
   /**
-   * <b>TWO CONSUMERS, ONE EVENT, AND THE POINT IS THAT THE IDS DIFFER.</b>
+   * <b>THE ABANDONED ID, pinned so it is never reused.</b>
    *
-   * <p>{@code SoftwareRelease} is read twice: once to move {@code mt_latest} and open the SBOM
-   * outbox, once to spawn a release train. A durable consumer is a WATERMARK, and two ids are two
-   * watermarks — a train spawn that throws rolls back its own claim and leaves the inventory write
-   * committed under the other. One id shared between the two pieces of work would make the newest
-   * feature on the platform able to stop the oldest from recording releases at all.
+   * <p>{@code maintenance-release-trains} was a third durable consumer of {@code SoftwareRelease}.
+   * The release trains were retired (V8) and the listener went with them — but its {@code
+   * consumed_event} rows and its {@code consumer_watermark} are still in the eventstream database
+   * and are deliberately left alone, which is the abandoned-consumer rule: a consumer id is STORAGE,
+   * and deleting a watermark and deleting a consumer are not the same operation.
+   *
+   * <p><b>Which makes reuse the hazard, and it is a silent one.</b> A future listener adopting this
+   * string would inherit a watermark saying it had already handled every release up to the day the
+   * trains were removed — it would start deaf, with nothing in any log. So the string is pinned here
+   * as a literal, beside the two that are live, and the assertion is that no live listener claims
+   * it.
    */
   @Test
-  void theTwoReadersOfOneReleaseAreTwoWatermarksRatherThanOne() {
-    assertEquals(SoftwareReleaseListener.SIGNATURE, ReleaseTrainListener.SIGNATURE);
-    assertNotEquals(
-        SoftwareReleaseListener.CONSUMER_ID,
-        ReleaseTrainListener.CONSUMER_ID,
-        "two pieces of work behind one watermark cannot fail independently");
-  }
-
-  /**
-   * And they share the TRANSCRIPTION, which is the other half of that arrangement: one wire shape,
-   * one record, one place to edit when qits-ci renames a field. A second copy would be a second
-   * thing to keep in step, and missing it is silent — the copy binds nulls and its listener stops
-   * acting with nothing in any log.
-   */
-  @Test
-  void bothReadersBindTheOneTranscriptionOfTheOneWireShape() {
-    String payload =
-        softwareReleasePayload("maven", "eu.wohlben.qits:qits-eventstream", "2026.901.1");
-
-    SoftwareReleaseListener.SoftwareReleasePayload read =
-        CanonicalJson.payloadTo(payload, SoftwareReleaseListener.SoftwareReleasePayload.class);
-
-    assertEquals("qits-eventstream-javalib", read.repository());
-    assertEquals("2026.901.1", read.version());
+  void theAbandonedConsumerIdIsClaimedByNoLiveListener() {
+    String abandoned = "maintenance-release-trains";
+    assertNotEquals(abandoned, SoftwareReleaseListener.CONSUMER_ID);
+    assertNotEquals(abandoned, ScmEventListener.CONSUMER_ID);
   }
 
   // --- the field lists ----------------------------------------------------------------------------

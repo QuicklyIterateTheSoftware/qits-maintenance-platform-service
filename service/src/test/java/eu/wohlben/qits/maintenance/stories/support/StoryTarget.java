@@ -87,15 +87,12 @@ public final class StoryTarget {
   /** The bump log — what was asked of qits-ci, and what came of it. */
   public static final String BUMPS = API + "/bumps";
 
-  /** Where each release of this platform got to. Read-only: nothing here queues anything. */
-  public static final String TRAINS = API + "/trains";
-
-  /**
-   * The release cross-link, as the journey view and qits-projects' release-request page compose it.
-   * A QUERY resolver rather than a path route, so {@code /trains/{id}} stays unambiguous — which
-   * also means the two halves of the key never appear in a diagram's label.
-   */
-  public static final String TRAIN_BY_RELEASE = TRAINS + "/by-release";
+  // WHERE THE ADOPTION ROUTES WOULD GO, and there is deliberately no constant for them. `/trains`
+  // and `/trains/by-release` were here for the journey story, which went with the release
+  // trains; the two routes that replaced them are derived on every read out of this
+  // service's own tables and dial no peer at all, so a story of one would draw a diagram with a
+  // single declared edge on it. Covering them is `api/AdoptionApiTest` and
+  // `bus/AdoptionJourneyTest`, and a story is a decision to make deliberately if it is ever wanted.
 
   // --- the mount points the shipped configuration spells -----------------------------------------
 

@@ -10,8 +10,6 @@ import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.entity.MtScan;
-import eu.wohlben.qits.maintenance.entity.MtTrain;
-import eu.wohlben.qits.maintenance.entity.MtTrainNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.transaction.Transactional;
 
@@ -32,14 +30,11 @@ public class InventoryReset {
   @Transactional
   public void clear() {
     // The graph first: mt_artifact_component and mt_artifact_edge are the only rows in this schema
-    // with a real foreign key, and it points at mt_artifact.
+    // with a real foreign key, and it points at mt_artifact. (The release trains' node table held
+    // the other one; V8 dropped both of their tables when the feature was retired.)
     MtArtifactEdge.deleteAll();
     MtArtifactComponent.deleteAll();
     MtArtifact.deleteAll();
-    // And the trains, nodes first: mt_train_node is the other real foreign key in this schema. A
-    // train left standing would make the next test's spawn settle onto it instead of opening one.
-    MtTrainNode.deleteAll();
-    MtTrain.deleteAll();
     MtBump.deleteAll();
     MtBranch.deleteAll();
     MtScan.deleteAll();

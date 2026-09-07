@@ -1,0 +1,46 @@
+-- THE RELEASE TRAINS ARE RETIRED. Both tables go, and the question they were built for is answered
+-- ad hoc instead.
+--
+-- WHY THE MODEL WAS WRONG, which is the part worth writing down. V7 froze a train's membership AT
+-- THE RELEASE, deliberately and with an argument: the expected adopters are who pinned the released
+-- coordinate at that moment, and a repository that dropped the dependency the following week was
+-- still owed the adoption and still never made it. That argument is sound about a LOG and it was the
+-- wrong thing to be building. The membership was derived by a single ONE-HOP pass — who pins this
+-- coordinate, right now — so a library's train named the frontend that pins it and could never name
+-- the service that consumes that frontend. Every journey on this platform cut off at the frontend,
+-- and no amount of evaluation afterwards could add a hop the membership had never had. A second hop
+-- would have needed the frontend's own release to have happened first, which is exactly the thing
+-- the train was supposed to be telling somebody about.
+--
+-- WHY DROPPING IS SAFE. These rows are DECLARED data rather than audit data: nothing was decided on
+-- them, no other service read them, no bump and no release consulted one. Every input they were
+-- derived from is still here and is refreshed by mechanisms that already run — `mt_pin` by the scan
+-- and the push listener, `mt_artifact` / `mt_artifact_component` / `mt_artifact_edge` by the release
+-- listener and the SBOM ingest. So the same questions are re-derivable at any moment, and the
+-- re-derivation is better than what was stored: it traces to the very END rather than one hop, and
+-- it unions the GITLINK pin in, which is what makes the frontend→service hop exist at all.
+--
+-- WHAT REPLACES THEM. Two routes, computed on every read and stored nowhere:
+--
+--     GET /maintenance/api/repositories/{name}/downstream   everything downstream, upstream-first
+--     GET /maintenance/api/adoption/by-release?repository=&version=   how far one release got
+--
+-- See `adoption/DownstreamResolver` and `adoption/AdoptionEvaluator`. The first is a wire contract:
+-- qits-projects reads it on its release-request announce path and qits-ci orders its build queue by
+-- what comes out.
+--
+-- THE DECISION WAS THE PLATFORM OWNER'S, 2026-09-07, with the loss of history stated and accepted:
+-- the journeys recorded since V7 landed are gone and there is no export. Two ENDS go with the
+-- tables and are not re-derived anywhere — the CONFIG_IMAGE_PIN end (qits-configuration's image
+-- pins) and the DAEMON_PIN end (qits-ci's adoption ladder). Both were POLLED over HTTP inside a
+-- sweep, both are the owning service's own fact one click away, and neither is worth two peer calls
+-- inside a human GET.
+--
+-- THE eventstream ROWS ARE NOT TOUCHED HERE, and that is a different rule in a different database.
+-- `maintenance-release-trains` becomes an ABANDONED CONSUMER ID: its `consumed_event` rows and its
+-- watermark stay where they are, and the id is never reused. Reusing it would hand a future listener
+-- a watermark saying it had already handled everything up to today.
+--
+-- NODES FIRST: mt_train_node.train_id is a real foreign key at mt_train (id), the only one V7 made.
+drop table if exists mt_train_node;
+drop table if exists mt_train;
