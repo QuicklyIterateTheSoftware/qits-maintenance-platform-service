@@ -231,9 +231,19 @@ public class PackagedSurfaceIT {
     // second entry in `quarkus.quinoa.ignored-path-prefixes` — but it is a fourth top-level route
     // and the segment it claims is asserted here like the other three.
     asAdmin().when().get("/maintenance/api/artifacts").then().statusCode(200);
-    // …and the release trains are the fifth, for the same reason and with the same consequence:
+    // …and the adoption journey is the fifth, for the same reason and with the same consequence:
     // one prefix entry covers the whole surface, and the segment is asserted rather than assumed.
-    asAdmin().when().get("/maintenance/api/trains").then().statusCode(200);
+    // It answers 400 rather than 200 because a by-release lookup names both halves of its key — and
+    // 400 is this SERVICE answering, which is exactly what the assertion is about. The segment
+    // reaching the client's index.html instead would be a 200 carrying html.
+    asAdmin().when().get("/maintenance/api/adoption/by-release").then().statusCode(400);
+    // The closure sits under /repositories rather than claiming a segment of its own, so it needs
+    // no prefix entry at all — but it is the one qits-projects reads, so it is asserted here too.
+    asAdmin()
+        .when()
+        .get("/maintenance/api/repositories/qits-nothing-here/downstream")
+        .then()
+        .statusCode(200);
 
     // The edge path-routes verbatim by prefix, so there is no unprefixed form to fall back to — and
     // at the root an unprefixed /api/repositories is the CLIENT's ground, which is why the check is

@@ -20,7 +20,6 @@ import eu.wohlben.qits.maintenance.peer.PeerClient;
 import eu.wohlben.qits.maintenance.peer.PeerExchange;
 import eu.wohlben.qits.maintenance.peer.PeerTarget;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
-import eu.wohlben.qits.maintenance.train.TrainEvaluator;
 import eu.wohlben.qits.maintenance.work.WorkQueue;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -130,13 +129,6 @@ class SbomIngestServiceTest {
 
   @Inject WorkQueue queue;
 
-  /**
-   * The real one. A stored graph is evidence a release train reads, and the hook runs behind every
-   * successful ingest — so it is wired here rather than left null, which would only prove that a
-   * swallowed NullPointerException is swallowed.
-   */
-  @Inject TrainEvaluator trains;
-
   private StubArtifacts artifacts;
   private SbomIngestService ingest;
   private String name;
@@ -151,7 +143,6 @@ class SbomIngestServiceTest {
     ingest.store = store;
     ingest.client = client;
     ingest.queue = queue;
-    ingest.trains = trains;
     name = "eu.wohlben.qits:qits-sbom-" + UUID.randomUUID();
     path = "/artifacts/sboms/maven/" + name + "/-/" + VERSION;
   }

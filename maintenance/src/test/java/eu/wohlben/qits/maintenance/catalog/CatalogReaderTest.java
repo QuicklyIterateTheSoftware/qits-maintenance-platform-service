@@ -63,9 +63,9 @@ class CatalogReaderTest {
 
   /**
    * <b>AND AN UNKNOWN SPELLING IS CARRIED TOO.</b> The vocabulary is qits-projects' and it grows
-   * without asking this service: a value added over there must cost a repository its train
-   * placement — which is the train layer's business, decided on {@code RepositoryArchetype.of}
-   * answering empty — and never its inventory row. So the string survives the read intact.
+   * without asking this service: a value added over there must cost a repository whatever a reader
+   * of the archetype would have done with it — decided on {@code RepositoryArchetype.of} answering
+   * empty — and never its inventory row. So the string survives the read intact.
    */
   @Test
   void anArchetypeThisServiceHasNeverHeardOfIsCarriedRatherThanDropped() {
@@ -80,9 +80,13 @@ class CatalogReaderTest {
         "the parse is where the word is judged, and it judges by answering nothing");
   }
 
-  /** The three foreign values that exist and that no train would place. All of them are read. */
+  /**
+   * The three foreign values that name something other than a deployable. {@code PROJECT} is the
+   * one this service acts on — the downstream closure excludes the wrapper by it — and all three
+   * are read like any other word.
+   */
   @Test
-  void theArchetypesNoTrainWouldPlaceAreReadLikeAnyOther() {
+  void theArchetypesThatNameNoDeployableAreReadLikeAnyOther() {
     for (String spelling : new String[] {"PROJECT", "FORK", "SERVICE_TEMPLATE"}) {
       CatalogEntry entry =
           parse(

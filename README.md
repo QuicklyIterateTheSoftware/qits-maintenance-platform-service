@@ -19,7 +19,7 @@ The contract — routes, model, config keys, schedules and the bump payload — 
 
 | Fact | Peer | How |
 |---|---|---|
-| the catalog | qits-projects | `GET /projects/api/repositories`; a row with no `name` has no address and is skipped. The row's `id` is kept as `mt_repository.catalog_id` — never an address here, and the only way another context's spelling of a repository is read back as a name. Its nullable `archetype` (SERVICE, DAEMON, LIBRARY, FRONTEND, CLI, IMAGE, PROJECT, SERVICE_TEMPLATE, FORK) is kept beside it as `mt_repository.archetype` (V6) and served on both repository DTOs, so what a repository IS is a column rather than a read per row; the vocabulary is qits-projects' own, so it is stored **verbatim, unvalidated and with no check constraint**, and an unrecognised word costs a repository its release-train placement rather than its inventory row. **The listing is authoritative in both directions**: what it stops naming goes ABSENT — see below |
+| the catalog | qits-projects | `GET /projects/api/repositories`; a row with no `name` has no address and is skipped. The row's `id` is kept as `mt_repository.catalog_id` — never an address here, and the only way another context's spelling of a repository is read back as a name. Its nullable `archetype` (SERVICE, DAEMON, LIBRARY, FRONTEND, CLI, IMAGE, PROJECT, SERVICE_TEMPLATE, FORK) is kept beside it as `mt_repository.archetype` (V6) and served on both repository DTOs, so what a repository IS is a column rather than a read per row; the vocabulary is qits-projects' own, so it is stored **verbatim, unvalidated and with no check constraint**, and an unrecognised word costs a repository nothing but a typed reading — the one archetype anything acts on is `PROJECT`, which the downstream closure excludes. **The listing is authoritative in both directions**: what it stops naming goes ABSENT — see below |
 | manifests at `main` | qits-githost | `GET /git/<project>/<repo>/tree/<rev>[/<path>]` and `…/blob/<rev>/<path>` |
 | internal latest | qits-artifacts | maven `maven-metadata.xml`, npm packument, OCI `/<name>/tags/list` |
 | external latest | qits-platform-mirror | `central` maven-metadata, `npmjs` packument |
@@ -28,8 +28,6 @@ The contract — routes, model, config keys, schedules and the bump payload — 
 | an internal release | qits-events | `SoftwareRelease` off the durable bus — see **The event bus** |
 | a branch's life | qits-events | `SCMRelease`, `SCMDeleteBranch`, `SCMPublishCommit` |
 | what a release CONTAINS | qits-artifacts | `GET /artifacts/sboms/<type>/<name>/-/<version>` — one CycloneDX document per released artifact; see **The dependency graph** |
-| who runs which image version | qits-configuration | `GET /configuration/api/pins` — `{generatedAt, pins:[{image, version, application, key}]}`, image names unqualified. **Polled, because nothing announces it**: an IMAGE release is adopted when a deployment configuration names the new version, and that is a release train's end no event covers. Every ten minutes, and only when a train is actually owed one |
-| which daemon build is handed out | qits-ci | `GET /ci/api/daemon` — `{daemonName, daemonVersion, previousDaemonVersion, source}`, `source` ∈ `adopted`/`configured`/`none`. The other polled train end: nothing pins a daemon in a manifest, so adoption is qits-ci's ladder moving. All three sources count — a node lands on the version, not on how it got there |
 
 **The head sha is resolved once per repository and every manifest is read at it.** The git host
 stamps `Git-Commit-Sha` on every tree and blob answer, so one read of the root tree at `main` both
@@ -81,7 +79,7 @@ recorded for MaintenanceBump`, every one of them a pre-rename ghost (`qits-spa-a
 | `kind` | meaning |
 |---|---|
 | `INTERNAL` / `EXTERNAL` | a real version, comparable and bumpable; the name rule decides which registry answers |
-| `REACTOR` | **this repository's own artifact** — its version comes from maven's coordinates (`${project.version}`), or its `groupId:artifactId` is a module of this same reactor. It moves with this repository's release train and no line anywhere holds it. |
+| `REACTOR` | **this repository's own artifact** — its version comes from maven's coordinates (`${project.version}`), or its `groupId:artifactId` is a module of this same reactor. It moves with this repository's own release and no line anywhere holds it. |
 | `UNRESOLVED` | an expression this service could not resolve. Recorded so a person sees what the repository wrote. |
 
 `REACTOR` and `UNRESOLVED` pins are shown, and are never looked up, never pending and never in a
@@ -269,7 +267,7 @@ POST {projects-url}/projects/api/repositories/<repoId>/release-requests
 and gets back `{"request": {id, state, backingBranch, mergedSha, …}}`. **Nothing merges and nothing
 is released at that call** — a release REQUEST is OPENED, qits-projects folds `main`, this branch and
 the repository's released tags still in flight onto `release/<id>`, the quality gates settle that
-fold, and Auto Release tags it once they pass. **The train's job ends here**: this service does not
+fold, and Auto Release tags it once they pass. **This service's job ends here**: it does not
 poll the request, wait for a version, or record a release.
 
 - **The repository is addressed by its CATALOG ID** — `mt_repository.catalog_id`, the `id`
@@ -473,19 +471,17 @@ GET  /bumps/{id}                                  → {id, repository, group, br
                                                      trigger, status, ciEventId, ciRunId, ciRunIds,
                                                      configPath, ciRunStatus, startedAt, finishedAt,
                                                      message, changes:[…]}
-GET  /trains?repository=&limit=50                 → [{id, repository, version, status, createdAt,
-                                                      completedAt, nodeCount, landedCount}]
-GET  /trains/{id}                                 → {id, repository, version, status, createdAt,
-                                                     completedAt, supersededBy,
+GET  /repositories/{name}/downstream              → {repository, catalogId,
+                                                     downstream:[{repository, catalogId,
+                                                                  archetype, depth, via:[…]}]}
+GET  /adoption/by-release?repository=&version=    → {repository, catalogId, version,
                                                      packages:[{ecosystem, name}],
-                                                     nodes:[{id, consumer, consumerCatalogId,
-                                                             consumerStatus, archetype, endKind,
-                                                             state, adoptedVersion, adoptedAt,
-                                                             childTrainId, landedAt}]}
-                                                                404 no such train
-GET  /trains/by-release?repository=&version=      → the train above
+                                                     adopters:[{repository, catalogId,
+                                                                repositoryStatus, archetype,
+                                                                depth, via:[…],
+                                                                state: ADOPTED|PENDING,
+                                                                adoptedVersion, adoptedAt}]}
                                                                 400 half a key is not a lookup
-                                                                404 that release has no station
 ```
 
 - `scope` is `INTERNAL`, `EXTERNAL` or `ALL`. **Every scan re-reads every manifest whatever the
@@ -536,29 +532,49 @@ GET  /trains/by-release?repository=&version=      → the train above
 - **`scope` on a pin is always `DIRECT`, and it is a constant on purpose.** The detail now serves two
   lists whose rows look alike, and a client rendering them in one table needs the distinction on the
   row rather than derived from which array it came out of.
-- **The train routes answer ONE STATION each, and the journey is stitched by the client.** A node's
-  `childTrainId` names the train its adoption produced, and nothing here follows one: a merged
-  journey has no natural size — a library release reaches the whole estate two hops out — and no
-  natural root, because the same train is a child of one journey and the head of another. A view
-  that walks the links draws exactly the depth it renders and caches each station on its own.
-- **`consumerCatalogId` and `consumerStatus` are joined LIVE from `mt_repository`; everything else on
-  a node is the log.** The id is what makes a node clickable —
-  `release-requests/by-release/<consumerCatalogId>/<adoptedVersion>` is the request the adoption
-  opened, and neither half is derivable from the consumer's name, which is all the row stores. Both
-  are null for a `CONFIG_IMAGE_PIN` node, whose consumer is an APPLICATION rather than a repository,
-  and `ABSENT` beside a PENDING node says the train is waiting on something the catalog no longer
-  lists. `archetype` is the opposite case and stays the node's own frozen column: a repository
-  re-classified next month did not retroactively change the kind of adoption it was placed for.
-- **`by-release` is a query resolver rather than a path route**, so `/trains/{id}` stays unambiguous
-  and no version has to survive being a path segment. Both halves are required — answering "the
-  newest train of that repository" would be this service deciding which release was meant. Its 404
-  means *that release has no station*, which is a different thing from a train with no nodes: the
-  latter is a journey of length zero and answers 200 with an empty `nodes`.
-- **`packages` is what the release put into a registry**, read from the `mt_artifact` rows of the
-  train's own `(repository, version)` through the same `ReleaseCoordinates` the spawn derived its
-  membership from — so the label on a station and the adopters on it cannot disagree about what was
-  released. It carries no version, because every row of it is at the train's. Empty is ordinary: a
-  `docs`-only release names no coordinate, and nothing pins a daemon.
+- **`/repositories/{name}/downstream` IS A WIRE CONTRACT**, not merely a page's shape: qits-projects
+  reads it on its release-request announce path and folds the names into
+  `ReleaseRequestChanged.downstreamTechnicalComponents`, which qits-ci orders its build queue by.
+  The shape is pinned in `qits-maintenance-plan.md` in the qits-qits wrapper, and **the ORDER is the
+  information** — depth ascending then name, so reading it top to bottom reads "upstream first".
+- **The closure is TRACED TO THE END, and it is a query rather than a table.** It replaced the
+  persisted release trains, whose membership was written down ONCE at the release by a single
+  one-hop pass — so a library release named the frontend that pins it and could never name the
+  service behind that frontend. Two sides are unioned: every INTERNAL `mt_pin` on a coordinate the
+  repository publishes (the DECLARED side) and every artifact whose bill of materials names one (the
+  EVIDENCE side). Cycles terminate on a visited set, and two bounds truncate rather than throw —
+  depth 10 and 500 repositories.
+- **A repository's own NAME is a coordinate, in the `gitlink` ecosystem, and that is the second
+  hop.** A frontend is a service's `service/src/main/webui` submodule; `GitmodulesParser` records the
+  submodule's repository name as the pin's `name`, so "who submodules this repository" is already an
+  indexed answer. **The wrapper is excluded by its `PROJECT` archetype** rather than by pretending
+  gitlinks do not exist — it pins every submodule on the platform, so including it would put it on
+  every answer and then expand it into the whole estate.
+- **Both routes take a catalog NAME or a catalog id**, because the caller usually holds the latter:
+  qits-projects addresses repositories by its own row id, which IS this inventory's `catalog_id`.
+  The answer is always spelled as the catalog names it.
+- **Neither route 404s.** An unknown repository is an empty closure — the caller is an announce path
+  and must not have to classify a refusal — and an unknown release is empty `packages` with a real,
+  wholly PENDING closure. The retired `/trains/by-release` answered 404 for a release that had opened
+  no station, which was a fact about the log rather than about the release.
+- **`state` is `ADOPTED` or `PENDING` and there is no third.** ADOPTED means the repository's own
+  release contains the coordinate at or above the required version, compared inclusively in that
+  ecosystem's own order — a consumer that skipped straight past the version has adopted it too.
+  `adoptedVersion` is **the adopter's OWN released version**, never the dependency version it took:
+  it is half of the address `release-requests/by-release/<catalogId>/<adoptedVersion>`, and a
+  dependency version there resolves to nothing. The EARLIEST matching release wins, by `occurredAt`.
+- **A PENDING hop leaves everything behind it PENDING**, because there is no version of it to
+  require yet — a service cannot be shipping a library through a frontend that has not shipped the
+  library. And a hop reached only across a gitlink edge stays PENDING unless the embedder's own SBOM
+  names the submodule's published package: the edge is a submodule, the evidence is still a registry
+  coordinate. That is a gap in what is published rather than a defect here.
+- **`repositoryStatus` is joined LIVE from `mt_repository`**; `ABSENT` beside a PENDING row says the
+  journey is waiting on something the catalog no longer lists.
+- **`packages` is what the release put into a registry**, read from its `mt_artifact` rows through
+  the same `ReleaseCoordinates` the closure derives coordinates from — so the label and the adopters
+  cannot disagree about what was released. It carries no version, because every row of it is at the
+  release's. Empty is ordinary: a `docs`-only release names no coordinate, and nothing pins a
+  daemon.
 
 The document is at `/maintenance/q/openapi`, the browsable UI at `/maintenance/q/swagger-ui`, and
 readiness at `/maintenance/q/health/ready`. The client is served at `/` — this service has a host of
@@ -576,7 +592,6 @@ environment without a rebuild.
 | `qits.maintenance.targets.githost-url` | `http://qits-githost:8080` | where the manifests are |
 | `qits.maintenance.targets.ci-url` | `http://qits-ci:8080` | which CI applies a bump |
 | `qits.maintenance.targets.artifacts-url` | `http://qits-artifacts:8080` | where the SBOM documents are — a bare host, because the route's whole path belongs to the caller |
-| `qits.maintenance.targets.configuration-url` | `http://qits-configuration:8080` | who runs which image version, read by the config-pin sweep at `/configuration/api/pins`. A bare host for the same reason |
 | `qits.maintenance.registries.maven-url` | `http://qits-artifacts:8080/artifacts/maven/maven` | internal maven |
 | `qits.maintenance.registries.npm-url` | `http://qits-artifacts:8080/artifacts/npm/npm` | internal npm |
 | `qits.maintenance.registries.oci-url` | `http://qits-artifacts:8080/v2` | internal images |
@@ -590,7 +605,6 @@ environment without a rebuild.
 | `qits.maintenance.scan.internal.cron` | `0 30 0 * * ?` | the internal scan, 00:30 daily — the reconciliation belt behind the bus |
 | `qits.maintenance.scan.external.cron` | `0 0 1 * * ?` | the external scan, 01:00 daily |
 | `qits.maintenance.sbom.sweep-cron` | `0 5 * * * ?` | re-queue artifact rows still PENDING, hourly. It never retries MISSING or FAILED |
-| `qits.maintenance.train.sweep-cron` | `0 10 * * * ?` | the config-pin sweep, every ten minutes — the two release-train ends nothing announces. No HTTP at all when nothing is owed |
 | `qits.maintenance.time-zone` | `UTC` | the zone both crons are read in |
 | `qits.maintenance.bump.enabled` | `true` | whether a branch may be pushed at all |
 | `qits.maintenance.bump.internal.cron` | `0 0 2 * * ?` | the nightly INTERNAL bump, 02:00 — after both scans, so the inventory it reads is today's |
@@ -619,11 +633,10 @@ broken. Remove it from the deployment's extras at the next edit of that file.
 service is platform tier, so a live platform injects the qualified name. Known debt, the same one
 qits-configuration and qits-platform-orchestrator carry.
 
-**Outbound credentials** are six named oidc clients — `projects`, `githost`, `ci`, `artifacts`,
-`mirror`, `configuration` — all `client-id=qits-platform-maintenance`, all shipped
-`client-enabled=false`. A token is cut for one service, which is why there are six; only the audience
-differs, and it is the one value not defaulted, because it can be environment-qualified. A deployment
-turns one on with
+**Outbound credentials** are five named oidc clients — `projects`, `githost`, `ci`, `artifacts`,
+`mirror` — all `client-id=qits-platform-maintenance`, all shipped `client-enabled=false`. A token is
+cut for one service, which is why there are five; only the audience differs, and it is the one value
+not defaulted, because it can be environment-qualified. A deployment turns one on with
 
 ```
 QUARKUS_OIDC_CLIENT_CI_CLIENT_ENABLED=true
@@ -634,11 +647,21 @@ QUARKUS_OIDC_CLIENT_CI_GRANT_OPTIONS_CLIENT_AUDIENCE=dev-qits-ci
 Off, calls go out with the forward-auth pair alone (`X-Qits-User: qits-platform-maintenance`,
 `X-Qits-Roles: qits:system`), which every call carries regardless.
 
+**There was a sixth, `configuration`, and it went with the release trains** — as did
+`qits.maintenance.targets.configuration-url` and `qits.maintenance.train.sweep-cron`. Nothing here
+polls qits-configuration any more: the two release-train ends that were polled (an image becoming a
+runtime pin, a daemon climbing qits-ci's ladder) were each the owning service's fact one click away,
+and re-reading two peers on a timer bought failure modes for them. A deployment still setting
+`QITS_MAINTENANCE_TARGETS_CONFIGURATION_URL`, `QITS_MAINTENANCE_TRAIN_SWEEP_CRON` or
+`QUARKUS_OIDC_CLIENT_CONFIGURATION_*` is setting keys nothing reads; remove them at the next edit of
+that file.
+
 **The release ask needs no client of its own.** It is a qits-projects route, so it rides the
 `projects` credential every catalog read already mints; the route admits `qits:admin` and
-`qits:system`, and `qits:system` is what every call here carries. There was a sixth client once —
-audience `qits-workspaces`, for the release door — and it went with the door. A deployment still
-setting `QUARKUS_OIDC_CLIENT_WORKSPACES_*` is setting keys nothing reads.
+`qits:system`, and `qits:system` is what every call here carries. There was a client for it once —
+audience `qits-workspaces`, for the release door — and it went with the door, the same way the
+`configuration` one went with the trains. A deployment still setting
+`QUARKUS_OIDC_CLIENT_WORKSPACES_*` is setting keys nothing reads.
 
 **The store** is its own PostgreSQL database, `qits_platform_maintenance`, declared by
 `resources: postgresql:db` in `.config/qits/deployments.yml`. Ten tables in three families:
@@ -665,7 +688,6 @@ claim is not optional — it is a route this service cannot use without it.
 | claim `project` = `*` | qits-ci's trigger calls `machineAuth.requireProject("*")`, which passes only for a token literally granted every project. The bump names one repository but the trigger route demands them all. Today the only such grant is qits-platform-artifacts'; this service needs its own. |
 | audiences `<env>-qits-ci`, `qits-projects`, `qits-githost` | a token is cut for one service. qits-githost ships `qits.auth.machine.required=true`, so its content reads need a real bearer addressed to it. |
 | audiences `qits-platform-artifacts`, `qits-platform-mirror` | **not needed today** — the registry routes and the mirror's proxies are unguarded on qits-net. The two clients ship disabled for the day the edge's rule reaches the inside. |
-| the two polled train ends | **nothing new.** `GET /configuration/api/pins` admits `qits:admin` and `qits:system`, and `GET /ci/api/daemon` admits `qits:system` — both are opened by the forward-auth pair every call already carries, so the `configuration` client ships disabled like the two above and no role grant is added. Only the **address** is new: `QITS_MAINTENANCE_TARGETS_CONFIGURATION_URL` if the deployment does not resolve `qits-configuration`. |
 
 In `qits-configuration` / `.qits-bootstrap.env` terms that is a client with
 `_ROLES` carrying `qits:system,qits-platform:system` (unchanged), `_CLAIMS_PROJECT: "*"`, and
