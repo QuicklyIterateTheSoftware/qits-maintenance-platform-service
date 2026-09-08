@@ -10,6 +10,8 @@ import eu.wohlben.qits.maintenance.entity.MtBump;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
+import eu.wohlben.qits.maintenance.entity.MtRelease;
+import eu.wohlben.qits.maintenance.entity.MtReleasePin;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.entity.MtScan;
 import eu.wohlben.qits.maintenance.error.BumpAlreadyActiveException;
@@ -40,7 +42,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * The only writer of the seven tables, and the reader the API uses.
+ * The only writer of every table in this schema, and the reader the API uses.
  *
  * <p><b>Every method activates a request context</b>, because the caller is usually the worker
  * thread and a Hibernate session is bound to that context. A route's call already has one and
@@ -485,6 +487,21 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
   @ActivateRequestContext
   public List<MtLatest> allLatest() {
     return DbRetry.inNewTx("read every latest row", () -> MtLatest.listAll());
+  }
+
+  /**
+   * Every latest row of one ecosystem.
+   *
+   * <p>One reader: {@code work/ReleaseLedgerBackfill}, whose whole input is the GITLINK rows — the
+   * only place on this platform where "this repository released this version, at this commit" is
+   * written down for releases that predate the release ledger. Filtering {@link #allLatest()} in
+   * java would answer the same question by reading every dependency the platform pins.
+   */
+  @ActivateRequestContext
+  public List<MtLatest> latestOf(Ecosystem ecosystem) {
+    return DbRetry.inNewTx(
+        "read every latest row of one ecosystem",
+        () -> MtLatest.find("ecosystem = ?1", Sort.by("name"), ecosystem.wireName()).list());
   }
 
   @ActivateRequestContext
@@ -1225,6 +1242,159 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
     return DbRetry.inNewTx(
         "read the edges of one artifact",
         () -> MtArtifactEdge.find("artifactId = ?1", artifactId).list());
+  }
+
+  // --- the release ledger -----------------------------------------------------------------------
+
+  /**
+   * One dependency a released tree declared, on its way into {@code mt_release_pin}.
+   *
+   * @param version a version for the three registry ecosystems, and a COMMIT SHA for a gitlink
+   */
+  public record ReleasePin(Ecosystem ecosystem, String name, String version) {}
+
+  /**
+   * One release and one thing its tree declared — the release-pin half of an adoption's evidence.
+   *
+   * @param release the consumer's own release, which is what an adoption is REPORTED as
+   * @param pin what that release's tree pinned the coordinate at, which is what PROVES it
+   */
+  public record ReleaseCarrier(MtRelease release, MtReleasePin pin) {}
+
+  /**
+   * <b>ONE RELEASE AND EVERYTHING ITS TREE DECLARED, replaced in ONE transaction.</b>
+   *
+   * <p><b>Wholesale, for {@link #replaceGraph}'s reason and then one more.</b> A tag is immutable,
+   * so a second reading of one is a correction of the first and never a second fact; merging would
+   * leave pins from a parse this build has since changed. And a transaction that committed the
+   * delete and failed the insert would leave a release that declared nothing, which reads exactly
+   * like a repository that pins nothing.
+   *
+   * <p><b>Idempotent by construction, which is what both writers need.</b> The bus redelivers a
+   * frame whenever a claim rolls back and the backfill re-runs on every boot; the row is found by
+   * {@code (repository, version)} and rewritten in place, so N attempts converge on one answer.
+   * {@code sha} and {@code occurred_at} are replaced too — a re-record is a better reading, not an
+   * older one.
+   *
+   * @return the row's id, whether it was created here or was already there
+   */
+  @ActivateRequestContext
+  public UUID recordRelease(
+      String repository,
+      String version,
+      String sha,
+      Instant occurredAt,
+      List<ReleasePin> pins) {
+    return DbRetry.inNewTx(
+        "record the release " + repository + " " + version,
+        () -> {
+          MtRelease row =
+              MtRelease.find("repository = ?1 and version = ?2", repository, version).firstResult();
+          boolean fresh = row == null;
+          if (fresh) {
+            row = new MtRelease();
+            row.id = UUID.randomUUID();
+            row.repository = repository;
+            row.version = version;
+          }
+          // EVERY FIELD BEFORE THE PERSIST — the rock replaceInventory names: the delete below
+          // makes Hibernate flush, and a row whose not-null columns are still unset fails the flush
+          // rather than the insert, naming a column nobody was writing at the time.
+          row.sha = sha;
+          row.occurredAt = occurredAt;
+          if (fresh) {
+            row.persist();
+          }
+          MtReleasePin.delete("releaseId", row.id);
+          for (ReleasePin pin : pins) {
+            if (pin.ecosystem() == null || pin.name() == null || pin.name().isBlank()) {
+              continue;
+            }
+            MtReleasePin stored = new MtReleasePin();
+            stored.id = UUID.randomUUID();
+            stored.releaseId = row.id;
+            stored.ecosystem = pin.ecosystem().wireName();
+            stored.name = pin.name();
+            stored.version = pin.version();
+            stored.persist();
+          }
+          getEntityManager().flush();
+          return row.id;
+        });
+  }
+
+  /** Whether the ledger already holds this exact release. The backfill's "is there work here". */
+  @ActivateRequestContext
+  public boolean releaseRecorded(String repository, String version) {
+    if (repository == null || version == null) {
+      return false;
+    }
+    return DbRetry.inNewTx(
+        "check whether one release is in the ledger",
+        () -> MtRelease.count("repository = ?1 and version = ?2", repository, version) > 0);
+  }
+
+  /**
+   * Every release of one repository, oldest first.
+   *
+   * <p>The read that resolves a GITLINK pin: an embedder pins a submodule at a COMMIT, so "which
+   * release of the frontend is this service carrying" is this listing matched on {@code sha}
+   * through {@code latest/GitlinkSha.same}. One indexed read per gitlink hop.
+   */
+  @ActivateRequestContext
+  public List<MtRelease> releasesOf(String repository) {
+    if (repository == null || repository.isBlank()) {
+      return List.of();
+    }
+    return DbRetry.inNewTx(
+        "read the releases of one repository",
+        () -> MtRelease.find("repository = ?1", Sort.by("occurredAt"), repository).list());
+  }
+
+  /**
+   * <b>WHICH RELEASES DECLARED THIS COORDINATE</b> — the release-pin evidence, beside {@link
+   * #dependents} SBOM one.
+   *
+   * <p><b>Read in two steps rather than as one join, and the parallel with {@code dependents} is
+   * exact.</b> {@code mt_release_pin.release_id} is a plain uuid rather than a mapped association —
+   * the flat shape this schema takes everywhere outside V3's graph — so a join would have to be
+   * native SQL. The {@code (ecosystem, name)} index answers the first read and the releases by id
+   * answer the second, both inside the one transaction because the second is keyed by what the
+   * first said.
+   *
+   * <p><b>Every release, never a newest-per-repository fold.</b> {@code dependents} offers that
+   * choice because its default view is a page's; here the question is always "when did they FIRST
+   * declare it", and a fold to the newest buries precisely that.
+   */
+  @ActivateRequestContext
+  public List<ReleaseCarrier> releasePinCarriers(Ecosystem ecosystem, String name) {
+    if (ecosystem == null || name == null || name.isBlank()) {
+      return List.of();
+    }
+    return DbRetry.inNewTx(
+        "read the releases declaring " + name,
+        () -> {
+          List<MtReleasePin> pins =
+              MtReleasePin.<MtReleasePin>find(
+                      "ecosystem = ?1 and name = ?2", ecosystem.wireName(), name)
+                  .list();
+          if (pins.isEmpty()) {
+            return List.<ReleaseCarrier>of();
+          }
+          List<UUID> releaseIds = pins.stream().map(pin -> pin.releaseId).distinct().toList();
+          Map<UUID, MtRelease> releases = new LinkedHashMap<>();
+          for (MtRelease row : MtRelease.<MtRelease>find("id in ?1", releaseIds).list()) {
+            releases.put(row.id, row);
+          }
+          List<ReleaseCarrier> found = new java.util.ArrayList<>();
+          for (MtReleasePin pin : pins) {
+            MtRelease release = releases.get(pin.releaseId);
+            if (release != null) {
+              found.add(new ReleaseCarrier(release, pin));
+            }
+          }
+          return List.copyOf(found);
+        });
   }
 
   // --- json ---------------------------------------------------------------------------------

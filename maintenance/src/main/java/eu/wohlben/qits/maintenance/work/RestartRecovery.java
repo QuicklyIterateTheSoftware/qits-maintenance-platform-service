@@ -38,6 +38,13 @@ import org.jboss.logging.Logger;
  * adoption/AdoptionEvaluator} derives the whole chain on every read, so there is no stale conclusion
  * for a boot to heal and no backfill path to keep. The three steps below are what remains.
  *
+ * <p><b>{@link ReleaseLedgerBackfill} is a fourth thing that happens at boot and it is deliberately
+ * not a step here</b>, because it is not RECOVERY. Nothing was in flight and nothing was left open:
+ * it fills in releases that happened before the ledger table existed, which is an SBOM-shaped piece
+ * of work — one idempotent read of an immutable tag — rather than a scan or a bump whose row a dead
+ * process abandoned. It is a class of its own so that "what a restart does to work in flight" stays
+ * the whole subject of this one.
+ *
  * <p><b>It never stops the boot.</b> A store that will not answer at startup is a readiness
  * question the deployer already health-gates; refusing to start would turn one slow postgres into a
  * service that is not there at all.

@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.maintenance.adoption.ReleaseLedger;
 import eu.wohlben.qits.maintenance.entity.MtBranch;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtLatest;
@@ -183,6 +184,30 @@ class ScmEventListenerTest {
     }
   }
 
+  /**
+   * A release ledger that records the ask instead of reading a released tree.
+   *
+   * <p>What a tag read produces is {@code ReleaseLedgerTest}'s subject; what is this listener's is
+   * that the ask is made at all, with the values it has already resolved.
+   */
+  private static final class RecordingLedger extends ReleaseLedger {
+
+    record Recorded(String project, String repository, String version, String sha) {}
+
+    final List<Recorded> recorded = new ArrayList<>();
+    RuntimeException failWith;
+
+    @Override
+    public boolean record(
+        String project, String repository, String version, String sha, Instant occurredAt) {
+      if (failWith != null) {
+        throw failWith;
+      }
+      recorded.add(new Recorded(project, repository, version, sha));
+      return true;
+    }
+  }
+
   /** A scan service that records the request instead of opening a row and queueing work. */
   private static final class RecordingScans extends ScanService {
 
@@ -201,16 +226,19 @@ class ScmEventListenerTest {
   private RecordingStore store;
   private RecordingScans scans;
   private RecordingGitHost gitHost;
+  private RecordingLedger ledger;
 
   @BeforeEach
   void setUp() {
     store = new RecordingStore();
     scans = new RecordingScans();
     gitHost = new RecordingGitHost();
+    ledger = new RecordingLedger();
     listener = new ScmEventListener();
     listener.store = store;
     listener.scans = scans;
     listener.gitHost = gitHost;
+    listener.ledger = ledger;
     store.repository(REPOSITORY, MAIN, GROUP, "external");
   }
 
@@ -378,6 +406,69 @@ class ScmEventListenerTest {
 
     assertEquals(List.of("qits/" + FRONTEND + " refs/tags/" + VERSION), gitHost.asked);
     assertEquals(VERSION, store.latestRow(Ecosystem.GITLINK, FRONTEND).latest);
+  }
+
+  // --- the release ledger -----------------------------------------------------------------------
+
+  /**
+   * <b>A release writes TWO rows, and they are two different facts about one tag.</b> The gitlink
+   * latest says where a submodule pinned at this repository can move to; the ledger says what the
+   * released tree was itself carrying, which is how an adoption of somebody ELSE's release is later
+   * proved. The tag sha is already resolved above, so the ledger is handed it rather than resolving
+   * it again.
+   */
+  @Test
+  void aReleaseRecordsTheLedgerBesideTheGitlinkLatest() {
+    gitHost.holds(REPOSITORY, "refs/tags/" + VERSION, RELEASE_SHA);
+
+    released(REPOSITORY, MAIN, VERSION);
+
+    assertEquals(
+        List.of(new RecordingLedger.Recorded("qits", REPOSITORY, VERSION, RELEASE_SHA)),
+        ledger.recorded);
+    assertEquals(VERSION, store.latestRow(Ecosystem.GITLINK, REPOSITORY).latest);
+  }
+
+  /**
+   * <b>WHETHER OR NOT THE COLUMN MOVED.</b> {@code mt_latest} is forward-only because it answers
+   * "where can a pin move to", which a catch-up frame must not rewind. A ledger row answers "what
+   * did THIS release declare" — a fact about a version rather than about the newest one — so a
+   * late-announced older release deserves its row exactly as much as this morning's does.
+   */
+  @Test
+  void anOlderReleaseArrivingLateStillGetsItsLedgerRow() {
+    gitHost.holds(FRONTEND, "refs/tags/2026.902.1", RELEASE_SHA);
+    gitHost.holds(FRONTEND, "refs/tags/2026.801.1", "cccccccccccccccccccccccccccccccccccccccc");
+
+    released(FRONTEND, MAIN, "2026.902.1");
+    released(FRONTEND, MAIN, "2026.801.1");
+
+    assertEquals("2026.902.1", store.latestRow(Ecosystem.GITLINK, FRONTEND).latest);
+    assertEquals(
+        List.of("2026.902.1", "2026.801.1"),
+        ledger.recorded.stream().map(RecordingLedger.Recorded::version).toList(),
+        "both releases happened, and both declared something");
+  }
+
+  /** A tag the git host does not hold is settled before either write is reached. */
+  @Test
+  void aReleaseWhoseTagIsNotThereRecordsNoLedgerRowEither() {
+    released(FRONTEND, MAIN, VERSION);
+
+    assertTrue(ledger.recorded.isEmpty());
+  }
+
+  /**
+   * The ledger's own retryable failure is the listener's: a git host that cannot be asked for the
+   * released TREE is the same outage as one that cannot be asked for the tag, and the frame stays
+   * owed either way.
+   */
+  @Test
+  void aLedgerThatCannotReadTheReleasedTreeIsLeftToThrow() {
+    gitHost.holds(FRONTEND, "refs/tags/" + VERSION, RELEASE_SHA);
+    ledger.failWith = new IllegalStateException("the git host could not be asked");
+
+    assertThrows(IllegalStateException.class, () -> released(FRONTEND, MAIN, VERSION));
   }
 
   // --- the push ---------------------------------------------------------------------------------

@@ -8,6 +8,8 @@ import eu.wohlben.qits.maintenance.entity.MtBump;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
+import eu.wohlben.qits.maintenance.entity.MtRelease;
+import eu.wohlben.qits.maintenance.entity.MtReleasePin;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.entity.MtScan;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -38,6 +40,11 @@ public class InventoryReset {
     MtBump.deleteAll();
     MtBranch.deleteAll();
     MtScan.deleteAll();
+    // The ledger, pins first: mt_release_pin.release_id is a plain uuid rather than a foreign key
+    // (see V9), so nothing enforces the order — but writing it the other way round would leave the
+    // pair looking like two unrelated tables to whoever reads this next.
+    MtReleasePin.deleteAll();
+    MtRelease.deleteAll();
     MtPin.deleteAll();
     MtGroup.deleteAll();
     MtLatest.deleteAll();

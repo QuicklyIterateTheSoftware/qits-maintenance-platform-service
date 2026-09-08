@@ -333,7 +333,60 @@ is the archaeology. Both are computed on every read, for the reason pending is.
 **`mt_artifact_component` and `mt_artifact_edge` carry the only FOREIGN KEYS in this schema.** Every
 other relation here is a string another context owns. These two are allowed because both ends are
 this context's own tables in this context's own database, and a component has no meaning at all
-apart from the artifact it was read out of.
+apart from the artifact it was read out of. **`mt_release_pin.release_id` is deliberately NOT a
+third one** — the same part-of shape, but those rows are rewritten by a delete keyed on that column
+inside the transaction that replaces the release row, so the constraint would buy nothing the writer
+does not already guarantee, and the sentence above stays true.
+
+## The release ledger
+
+**There is a THIRD fact beside those two, and it is what the adoption view runs on.** An SBOM says
+what a release CONTAINS; `mt_pin` says what a bump EDITS; `mt_release` / `mt_release_pin` (V9) say
+what a release DECLARED — the INTERNAL pins in the tree at `refs/tags/<version>`. They join the
+other two on `(ecosystem, name)` and merge with neither.
+
+**The measurement is the whole argument.** 2026-09-08: the journey of `qits-ui-components-jslib
+2026.906.164412` named 15 frontends and 15 services and called every one PENDING while every one had
+adopted it. `dependents(npm, @qits/ui-components)` was EMPTY — a frontend publishes no registry
+artifact, its release is a tag — and `qits-ci-service`'s newest document held 239 maven components
+and 0 npm ones, because a compiled Angular dist carries no npm metadata. Neither hop had a document
+that could ever have named the coordinate. One evidence kind was structurally blind to half the
+estate.
+
+**A PIN AT A TAG IS NOT A PIN AT `main`, and that distinction is the licence for this whole
+feature.** The objection `AdoptionEvaluator` was built on is not "a pin is weak evidence": it is
+that a pin read at `main` is a fact about a WORKING TREE — unpolled, revertible, moving. A tag is
+immutable and is tied to the consumer's own released version, which is the value the answer reports.
+Anything that starts reading pins at a branch for this has thrown the argument away.
+
+**GITLINK is the half that pays, and its version is a COMMIT.** `kindOf` hardcodes GITLINK→INTERNAL,
+so a submodule survives the kind filter with no special case; its recorded `version` is the embedded
+sha, and a reader RESOLVES it through the submodule repository's own `mt_release` rows (`GitlinkSha.same`,
+abbreviation-tolerant) before comparing. A sha the ledger cannot place is no match — honest, not
+defensive. No SBOM component is ever a gitlink, so `AdoptionEvaluator` skips the `dependents` read
+for that coordinate outright.
+
+**`mt_release.repository` is the CATALOG NAME under both writers and must stay that way.** The
+listener writes `SCMRelease.repositoryName` and the backfill writes a gitlink `mt_latest.name`, which
+is a repository name by construction — which is why the evaluator compares it directly, with none of
+the id↔name translation `mt_artifact.repository` needs (V5). Writing another context's spelling into
+it would be silent.
+
+**The tree is read through `ManifestScanner.pinsAt`, not through a copy of the discovery.** Same head
+resolution, same four parsers, same per-line dedupe as `read(CatalogEntry)`; what a scan wraps around
+it — a status, a grouping, a sentence for the row — has no meaning about a tag nobody can push to. A
+second copy would be a second answer to "what does this repository declare".
+
+**The write is IDEMPOTENT and both writers need it to be.** `recordRelease` finds the row by
+`(repository, version)` and rewrites it and its pins in one transaction, so a durable redelivery and
+a boot backfill converge rather than accumulate.
+
+**`work/ReleaseLedgerBackfill` is a fourth startup class and deliberately not a fourth step in
+`RestartRecovery`.** Nothing was in flight: it fills in releases that predate the table, which is
+SBOM-shaped work (one idempotent read of an immutable tag) rather than recovery of an abandoned row.
+Its only possible input is `mt_latest`'s GITLINK rows — the one place "this repository released this
+version, at this commit" is written down — so it is one release per repository and that is all this
+question needs.
 
 **`PeerTarget.ARTIFACTS_SBOM` is a ninth address and the fourth on qits-artifacts, and its key
 carries no path.** The three registry keys name a MOUNT whose prefix is a repository row a
@@ -397,12 +450,18 @@ subscribes and publishes nothing.**
   morning's scan filled, and every pin of that dependency would read as up to date until the next
   scan. The guard is `VersionOrder`'s, the same comparison the pending rule makes. A frame that is not
   newer writes **nothing at all**, `checked_at` included: stamping it would say a lookup happened.
-- **`SCMRelease` does ONE thing here, and it is the gitlink.** Every release records the latest of a
+- **`SCMRelease` does TWO things here, and the first is the gitlink.** Every release records the latest of a
   GITLINK — the version, and the commit `refs/tags/<version>` resolves to, in `source_url` as
   `sha:<hex>`. It runs on every release whatever the branch was, and it is idempotent, so the
   redelivery an unreachable git host causes replays it harmlessly. The failure split is the seam's: a
   tag the host does not HOLD is poison (WARN, settle), a host that cannot be ASKED is retryable and
   thrown, because no scan ever refreshes this row.
+- **The SECOND is the release LEDGER, and it runs whether or not the latest column moved.**
+  `adoption/ReleaseLedger` reads the tree at the same tag and records its INTERNAL pins. The two
+  writes answer two questions and only one of them is forward-only: `mt_latest` is "where can a pin
+  move to", which a catch-up frame must not rewind, while a ledger row is "what did THIS release
+  declare" — a fact about a version rather than about the newest one. Same failure split, and the
+  tag sha is handed over already resolved rather than resolved twice. See "The release ledger".
 - **The maintenance-branch arm of `SCMRelease` is GONE, and `BranchState.RELEASED` is a word nothing
   writes.** It was there because qits-workspaces' door published the event naming the branch it had
   just tagged over, which was the one fact nothing else could tell this service. A release is now a
@@ -518,7 +577,9 @@ a JWKS, and a clone-alone build needs no issuer. There is no third state.
   that says what a test means, and it costs nothing.
 - **`InventoryReset` empties the store between methods, after `WorkQueue.awaitIdle`.** The graph
   goes first there — `mt_artifact_component` and `mt_artifact_edge` are the only rows in this schema
-  with a foreign key, and it points at `mt_artifact`. Flyway's
+  with a foreign key, and it points at `mt_artifact`. The ledger pair goes with it, pins before
+  releases: nothing enforces that order (see "The release ledger"), but the two read as unrelated
+  tables written the other way round. Flyway's
   `clean-at-start` runs per Quarkus start, not per test, and an active bump row holds its branch's
   lock: without the reset the second test of a class is answered 409 by the first test's leftovers.
   The drain first, or the delete lands between a running task's read and its write.

@@ -3,6 +3,7 @@ package eu.wohlben.qits.maintenance.bus;
 import eu.wohlben.qits.eventstream.QitsDurableEventListener;
 import eu.wohlben.qits.eventstream.control.CanonicalJson;
 import eu.wohlben.qits.eventstream.control.EventFrame;
+import eu.wohlben.qits.maintenance.adoption.ReleaseLedger;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.githost.FileLookup;
@@ -31,9 +32,10 @@ import org.jboss.logging.Logger;
  *   <caption>The three events and what each one moves</caption>
  *   <tr><th>event</th><th>publisher</th><th>what it means here</th></tr>
  *   <tr><td>{@code SCMRelease}</td><td>qits-projects</td>
- *       <td>a repository has a new released commit, so every GITLINK pinned at it has somewhere to
- *           move: {@code mt_latest} is written with the version and the sha its tag resolves
- *           to</td></tr>
+ *       <td>a repository has a new released commit. Two rows follow: {@code mt_latest} gets the
+ *           version and the sha its tag resolves to, so every GITLINK pinned at it has somewhere to
+ *           move; and the release LEDGER gets what the tree at that tag declared, which is how an
+ *           adoption of somebody else's release is later proved</td></tr>
  *   <tr><td>{@code SCMDeleteBranch}</td><td>qits-githost</td>
  *       <td>a {@code maintenance/<group>} branch is gone — the branch row becomes NONE, so the next
  *           bump starts fresh from main</td></tr>
@@ -133,13 +135,16 @@ public class ScmEventListener implements QitsDurableEventListener {
   static final String BRANCH_PREFIX = "maintenance/";
 
   /**
-   * A release's tag, spelled in full.
+   * A release's tag, spelled in full — and spelled in ONE place, which is {@link
+   * ReleaseLedger#TAG_PREFIX}.
    *
    * <p>Fully qualified rather than bare: git's own ref search would try {@code refs/<version>} and
    * a branch of that name before it reached the tag, and a release version is exactly the kind of
-   * string somebody once made a branch out of.
+   * string somebody once made a branch out of. Two readers now — this resolves the release's commit
+   * at it and the ledger reads the released tree at it — so a second copy of the string would be
+   * the one that quietly asked about a ref nobody has.
    */
-  static final String TAG_PREFIX = "refs/tags/";
+  static final String TAG_PREFIX = ReleaseLedger.TAG_PREFIX;
 
   /**
    * The {@code SCMRelease} fields this listener consumes, transcribed from qits-projects'
@@ -197,6 +202,17 @@ public class ScmEventListener implements QitsDurableEventListener {
    */
   @Inject GitHostReader gitHost;
 
+  /**
+   * The release ledger: what the tree at this release's tag DECLARED.
+   *
+   * <p>The second thing a release writes here, and it is a different fact from the gitlink latest
+   * above. That one says a submodule has somewhere to move; this one says what the released tree
+   * was itself carrying, which is the evidence an adoption of somebody ELSE's release is proved by
+   * — see {@link ReleaseLedger} for why a pin read at a tag is release-grade and a pin read at
+   * {@code main} is not.
+   */
+  @Inject ReleaseLedger ledger;
+
   @Override
   public String consumerId() {
     return CONSUMER_ID;
@@ -222,7 +238,10 @@ public class ScmEventListener implements QitsDurableEventListener {
 
   // --- SCMRelease -----------------------------------------------------------------------------
 
-  /** A repository was released — which here is one fact and one only: a gitlink's latest. */
+  /**
+   * A repository was released — which here is two facts about one tag: where a gitlink pinned at
+   * this repository can move to, and what the released tree was itself carrying.
+   */
   private void onRelease(EventFrame frame) {
     ScmReleasePayload release = decode(frame, ScmReleasePayload.class);
     if (release == null) {
@@ -314,6 +333,13 @@ public class ScmEventListener implements QitsDurableEventListener {
           "%s %s announced %s at %s, which is not newer than the gitlink latest recorded",
           frame.name(), frame.id(), repository, version);
     }
+    // AND THE LEDGER, WHETHER OR NOT THE COLUMN MOVED. The two writes answer two questions and only
+    // one of them is forward-only: `mt_latest` is "where can a gitlink pinned here move to", which a
+    // catch-up frame from last week must not rewind, while a ledger row is "what did THIS release
+    // declare" — a fact about a version rather than about the newest one, and a late-announced older
+    // release deserves its row exactly as much as this morning's does. The tag sha is already
+    // resolved above, so the ledger's own read of the tree costs no second resolution.
+    ledger.record(project, repository, version, tag.headSha(), Instant.now());
   }
 
   /**

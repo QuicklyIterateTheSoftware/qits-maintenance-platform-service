@@ -132,23 +132,7 @@ public class ManifestScanner {
     // config still reports whatever the manifests hold, exactly as it did before `ignore` existed.
     GroupConfig.Parsed config = groups(project, name, headSha);
 
-    List<ParsedPin> pins = new ArrayList<>();
-    if (!config.ignores(Ecosystem.MAVEN)) {
-      pins.addAll(mavenPins(project, name, headSha, root));
-    }
-    if (!config.ignores(Ecosystem.NPM)) {
-      pins.addAll(npmPins(project, name, headSha, root));
-    }
-    if (!config.ignores(Ecosystem.DOCKER)) {
-      pins.addAll(dockerPins(project, name, headSha, root));
-    }
-    if (!config.ignores(Ecosystem.GITLINK)) {
-      pins.addAll(gitlinkPins(project, name, headSha, root));
-    }
-    // ONE ROW PER LINE. Every module of a reactor names the same root property, and each one
-    // produced a pin against the root pom above. They are one line and one change; without this
-    // the payload would carry the same edit once per module and the commit message would repeat it.
-    pins = dedupe(pins);
+    List<ParsedPin> pins = pins(project, name, headSha, root, config);
 
     if (!config.ok()) {
       return new Read(
@@ -161,6 +145,77 @@ public class ManifestScanner {
     }
     return new Read(
         RepositoryStatus.OK, headSha, List.copyOf(pins), config.groups(), config.source(), null);
+  }
+
+  /**
+   * What one repository's manifests declared AT ONE REVISION, and nothing else.
+   *
+   * @param status the tree read's own outcome — FOUND, or why there are no pins. UNREACHABLE is the
+   *     caller's to retry; GONE and ABSENT mean the git host does not hold this revision, which for
+   *     a tag is as permanent as an answer gets
+   * @param sha the commit the revision resolved to, null unless FOUND
+   * @param pins every direct pin found at it, in discovery order
+   * @param message the sentence, for UNREACHABLE and INVALID
+   */
+  public record Pins(FileLookup.Status status, String sha, List<ParsedPin> pins, String message) {}
+
+  /**
+   * <b>Every pin one repository declared at one revision — the same discovery, none of the
+   * verdict.</b>
+   *
+   * <p>{@link #read(CatalogEntry)} answers a repository's CURRENT state and is what a scan writes
+   * the inventory from: a status, a grouping, a sentence for the row. This answers a historical
+   * question instead — what did the tree at {@code refs/tags/2026.906.1} declare — and a status
+   * column, a branch row and a group have no meaning about a tag nobody can push to. So the
+   * discovery is shared to the line (one head resolution, then the four parsers, then the
+   * per-line dedupe) and everything the scan wraps around it is not.
+   *
+   * <p><b>The repository's own {@code ignore:} is honoured here too</b>, because it is read at the
+   * same revision and says the same thing: an ecosystem a repository asks to be left out of is one
+   * it is left out of at a tag as well as on main. The motivating case makes that obvious — the
+   * wrapper's forty-seven lagging gitlinks are no more meaningful in a release of it than in its
+   * working tree.
+   *
+   * <p><b>Nothing here throws and nothing here is judged.</b> A revision the host does not hold is
+   * a status, not an exception; the caller decides whether that is poison or a retry. See {@code
+   * adoption/ReleaseLedger}, which is the one caller and holds the seam's failure split.
+   */
+  public Pins pinsAt(String project, String name, String revision) {
+    TreeLookup root = gitHost.head(project, name, revision);
+    if (!root.found()) {
+      return new Pins(root.status(), null, List.of(), root.message());
+    }
+    String sha = root.headSha();
+    GroupConfig.Parsed config = groups(project, name, sha);
+    return new Pins(FileLookup.Status.FOUND, sha, pins(project, name, sha, root, config), null);
+  }
+
+  /**
+   * The four parsers over one resolved tree, and the per-line dedupe that follows them.
+   *
+   * <p><b>Shared by the scan and by the ledger's read of a released tree</b>, which is the whole of
+   * what those two have in common: a second copy of this would be a second answer to "what does
+   * this repository declare", and the two would disagree the first time a parser changed.
+   */
+  private List<ParsedPin> pins(
+      String project, String name, String sha, TreeLookup root, GroupConfig.Parsed config) {
+    List<ParsedPin> pins = new ArrayList<>();
+    if (!config.ignores(Ecosystem.MAVEN)) {
+      pins.addAll(mavenPins(project, name, sha, root));
+    }
+    if (!config.ignores(Ecosystem.NPM)) {
+      pins.addAll(npmPins(project, name, sha, root));
+    }
+    if (!config.ignores(Ecosystem.DOCKER)) {
+      pins.addAll(dockerPins(project, name, sha, root));
+    }
+    if (!config.ignores(Ecosystem.GITLINK)) {
+      pins.addAll(gitlinkPins(project, name, sha, root));
+    }
+    // ONE ROW PER LINE. Every module of a reactor names the same root property, and each one
+    // produced a pin against the root pom above. They are one line and one change; without this
+    // the payload would carry the same edit once per module and the commit message would repeat it.
+    return dedupe(pins);
   }
 
   private static Read absent(String name, String branch) {

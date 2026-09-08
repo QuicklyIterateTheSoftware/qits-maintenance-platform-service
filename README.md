@@ -28,6 +28,7 @@ The contract — routes, model, config keys, schedules and the bump payload — 
 | an internal release | qits-events | `SoftwareRelease` off the durable bus — see **The event bus** |
 | a branch's life | qits-events | `SCMRelease`, `SCMDeleteBranch`, `SCMPublishCommit` |
 | what a release CONTAINS | qits-artifacts | `GET /artifacts/sboms/<type>/<name>/-/<version>` — one CycloneDX document per released artifact; see **The dependency graph** |
+| what a release DECLARED | qits-githost | the same manifests, read at `refs/tags/<version>` instead of at the main branch; see **The release ledger** |
 
 **The head sha is resolved once per repository and every manifest is read at it.** The git host
 stamps `Git-Commit-Sha` on every tree and blob answer, so one read of the root tree at `main` both
@@ -315,7 +316,7 @@ where v1 waited up to six hours for a poll.
 | listener | `consumerId` (storage — never change it) | events | what it does |
 |---|---|---|---|
 | `bus/SoftwareReleaseListener` | `maintenance-internal-latest` | `SoftwareRelease` (qits-ci) | moves `mt_latest` **forward only**, so every pin of that dependency is pending the moment the package is in the registry |
-| `bus/ScmEventListener` | `maintenance-branch-tracking` | `SCMRelease` (qits-projects), `SCMDeleteBranch`, `SCMPublishCommit` (qits-githost) | records every release as the latest of a **gitlink**, clears a maintenance branch when it is deleted, and re-reads one repository's manifests after a push to its main branch |
+| `bus/ScmEventListener` | `maintenance-branch-tracking` | `SCMRelease` (qits-projects), `SCMDeleteBranch`, `SCMPublishCommit` (qits-githost) | records every release as the latest of a **gitlink** and in the **release ledger**, clears a maintenance branch when it is deleted, and re-reads one repository's manifests after a push to its main branch |
 
 - **`SoftwareRelease` is the only writer of `mt_latest` that moves it forward only**, and that is the
   difference between an announcement and a poll. A poll ASKS a registry what the newest version is
@@ -337,6 +338,14 @@ where v1 waited up to six hours for a poll.
   while pairing two publishers' frames by repository and time is wrong exactly when two releases are
   close together. A tag the git host does not hold is settled; a git host that cannot be *asked* is
   thrown, because nothing else ever writes this row.
+- **`SCMRelease` makes a SECOND write here too, and it is the release ledger.** One hop after the
+  gitlink latest, the tree at `refs/tags/<version>` is read and its INTERNAL pins are recorded as
+  what that release DECLARED — see **The release ledger**. It runs **whether or not the latest
+  column moved**: `mt_latest` is forward-only because it answers "where can a pin move to", which a
+  catch-up frame must not rewind, while a ledger row answers "what did THIS release declare", and a
+  late-announced older release deserves its row exactly as much as this morning's does. The failure
+  split is the same one: an unreachable git host is thrown, a tag it does not hold is a WARN, and a
+  manifest that would not parse records whatever parsed.
 - **`SCMRelease` says nothing about a maintenance branch any more, and `BranchState.RELEASED` is a
   word nothing writes.** It used to: qits-workspaces' door published the event naming the branch it
   had just tagged over, which was the one fact nothing else could tell this service. A release is now
@@ -421,6 +430,59 @@ resolved at the WRITE now (`SoftwareReleaseListener`), and `ArtifactGraph` trans
 directions at READ time for the rows written before that — an id the catalog does not know passes
 through untouched in either arm, because an unknown spelling must not lose the fact that a release
 said it.
+
+## The release ledger — what a release DECLARED
+
+**An SBOM says what a release CONTAINS; the release ledger says what it DECLARED.** Two tables,
+`mt_release` (one row per released `(repository, version)`, with the commit its tag resolved to) and
+`mt_release_pin` (the INTERNAL pins the tree at that tag held). Written by `bus/ScmEventListener` on
+every `SCMRelease`, through `adoption/ReleaseLedger`.
+
+**It exists because the SBOM rule cannot reach the npm world at all, and that was measured.** On
+2026-09-08 the adoption journey of `qits-ui-components-jslib 2026.906.164412` named fifteen
+frontends at depth 1 and fifteen services at depth 2 and reported every one of them PENDING, while
+every one of them had picked the release up weeks earlier:
+
+- **a frontend publishes no registry artifact.** Its release is a git tag, and what consumes it is
+  the embedding service's gitlink bump — so there is no `mt_artifact` row of the frontend to hold a
+  component, and `dependents(npm, @qits/ui-components)` answered the empty list;
+- **a service's docker-image SBOM holds maven components only.** The compiled Angular dist carries
+  no npm metadata, so `qits-ci-service`'s newest document listed 239 maven components and 0 npm
+  ones, and the frontend→service hop was equally unprovable.
+
+**Why a pin is allowed to be evidence here, when a pin on `main` still is not.** The objection to a
+pin was never that it is a pin: it is that a pin read at `main` is a fact about somebody's WORKING
+TREE — nothing polls it, it moves under you, it is revertible, and a verdict computed from one would
+flicker. A pin read at `refs/tags/<version>` is a different fact. A tag is immutable and it is tied
+to the consumer's own released version, which is exactly what the adoption answer REPORTS. So the
+rule stands as it always did — the evidence is about a release, not a working tree — and the ledger
+is what makes it obtainable for a repository that publishes nothing.
+
+- **INTERNAL pins only**, by the same `kindOf` the inventory uses. EXTERNAL is somebody else's
+  package and nothing of ours releasing it makes anybody downstream; REACTOR and UNRESOLVED name no
+  version anything could compare. **GITLINK survives that filter without a special case**, because a
+  submodule is INTERNAL by construction — and it is the half that matters most.
+- **A gitlink pin's version is a COMMIT SHA**, kept verbatim, the same asymmetry `mt_pin.version`
+  carries. A reader resolves it through the submodule repository's own `mt_release` rows.
+- **The write is idempotent**: one row per `(repository, version)`, and re-recording rewrites the
+  pins rather than adding to them, because the second reading of one tag is a correction of the
+  first. That is what makes a durable redelivery and a backfill re-run converge.
+- **The reads are the manifest scanner's own**, at a revision instead of a branch — one head
+  resolution, the four parsers, the per-line dedupe. A second copy of that discovery would be a
+  second answer to "what does this repository declare", and the two would disagree the first time a
+  parser changed.
+- **It is a LOG, like `mt_artifact`, and unlike `mt_pin`.** A scan replaces `mt_pin` wholesale
+  because that question is about the main branch TODAY; a row here is the reading of one immutable
+  tree and nothing a repository does afterwards invalidates it.
+
+**A backfill fills in what the estate already released**, at boot, on the single worker thread
+(`work/ReleaseLedgerBackfill`). Its input is `mt_latest`'s GITLINK rows — the only place on this
+platform where "this repository released this version, at this commit" is written down, filled in by
+that same listener since long before this table existed. One release per repository, which is all
+`mt_latest` keeps and all this question needs: a journey asks who is carrying a release NOW, and a
+consumer's newest release is the one that answers. A repository with no inventory row is skipped (a
+ledger read needs a project to address the git host with), and a failure is one repository's rather
+than the run's.
 
 ## API
 
@@ -557,17 +619,31 @@ GET  /adoption/by-release?repository=&version=    → {repository, catalogId, ve
   and must not have to classify a refusal — and an unknown release is empty `packages` with a real,
   wholly PENDING closure. The retired `/trains/by-release` answered 404 for a release that had opened
   no station, which was a fact about the log rather than about the release.
-- **`state` is `ADOPTED` or `PENDING` and there is no third.** ADOPTED means the repository's own
-  release contains the coordinate at or above the required version, compared inclusively in that
-  ecosystem's own order — a consumer that skipped straight past the version has adopted it too.
-  `adoptedVersion` is **the adopter's OWN released version**, never the dependency version it took:
-  it is half of the address `release-requests/by-release/<catalogId>/<adoptedVersion>`, and a
-  dependency version there resolves to nothing. The EARLIEST matching release wins, by `occurredAt`.
+- **`state` is `ADOPTED` or `PENDING` and there is no third.** ADOPTED means one of the
+  repository's OWN releases proves it is carrying the coordinate at or above the required version,
+  compared inclusively in that ecosystem's own order — a consumer that skipped straight past the
+  version has adopted it too. `adoptedVersion` is **the adopter's OWN released version**, never the
+  dependency version it took: it is half of the address
+  `release-requests/by-release/<catalogId>/<adoptedVersion>`, and a dependency version there
+  resolves to nothing. The EARLIEST matching release wins, by `occurredAt`.
+- **TWO EVIDENCE KINDS PROVE IT, and both are about a RELEASE.** What the release CONTAINS — a
+  component in its bill of materials (`mt_artifact_component`), which sees transitives no manifest
+  names. And what the release DECLARED — a pin in the tree at its own tag (`mt_release_pin`), which
+  sees what nothing ever published. The second is not "a pin moved on a branch", which this service
+  still refuses: a pin read at `main` is a fact about somebody's working tree, revertible and
+  unpolled, while a pin read at `refs/tags/<version>` is immutable and is tied to the consumer's own
+  released version — the very thing `adoptedVersion` reports. See **The release ledger**.
 - **A PENDING hop leaves everything behind it PENDING**, because there is no version of it to
   require yet — a service cannot be shipping a library through a frontend that has not shipped the
-  library. And a hop reached only across a gitlink edge stays PENDING unless the embedder's own SBOM
-  names the submodule's published package: the edge is a submodule, the evidence is still a registry
-  coordinate. That is a gap in what is published rather than a defect here.
+  library.
+- **The GITLINK hop is provable now, and it used to be the one that never closed.** A repository's
+  own name is a coordinate in the `gitlink` ecosystem, so it joins the requirement at every hop
+  beside whatever the release put into a registry; the evidence for it is the ledger and only the
+  ledger, because no SBOM component is ever a gitlink. The pin's version is a COMMIT, so it is
+  resolved through the SUBMODULE repository's own releases (matched abbreviation-tolerantly) to the
+  version that commit belongs to, and that version is what the comparison sees. A commit the ledger
+  cannot place is no match — the embedder pinned an off-release commit, or a release older than
+  anything recorded.
 - **`repositoryStatus` is joined LIVE from `mt_repository`**; `ABSENT` beside a PENDING row says the
   journey is waiting on something the catalog no longer lists.
 - **`packages` is what the release put into a registry**, read from its `mt_artifact` rows through
@@ -664,12 +740,13 @@ audience `qits-workspaces`, for the release door — and it went with the door, 
 `QUARKUS_OIDC_CLIENT_WORKSPACES_*` is setting keys nothing reads.
 
 **The store** is its own PostgreSQL database, `qits_platform_maintenance`, declared by
-`resources: postgresql:db` in `.config/qits/deployments.yml`. Ten tables in three families:
+`resources: postgresql:db` in `.config/qits/deployments.yml`. Twelve tables in four families:
 `mt_repository`, `mt_pin`, `mt_group`, `mt_latest` (an inventory a scan replaces wholesale);
 `mt_scan`, `mt_branch`, `mt_bump` (a log of what was asked and what came back, derivable from
-nothing); and `mt_artifact`, `mt_artifact_component`, `mt_artifact_edge` (what each released
+nothing); `mt_artifact`, `mt_artifact_component`, `mt_artifact_edge` (what each released
 artifact CONTAINS, replaced per artifact by each ingest — and the only foreign keys in the schema,
-because both ends are this context's own).
+because both ends are this context's own); and `mt_release`, `mt_release_pin` (what each released
+TREE declared, rewritten per release by each recording).
 
 **A second database, `qits_platform_maintenance_eventstream`**, declared by
 `postgresql:eventstream:<name>` beside it, holds the bus's outbox and the two durable consumers'

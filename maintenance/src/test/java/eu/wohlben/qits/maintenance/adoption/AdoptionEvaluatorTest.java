@@ -103,6 +103,39 @@ class AdoptionEvaluatorTest {
     return new ParsedSbom.Component("c-" + name, null, ecosystem, name, version, true);
   }
 
+  /**
+   * A release as the LEDGER records it: the tree at its tag, and what that tree declared. This is
+   * the second evidence kind, and it is the only one a frontend can ever produce — it publishes no
+   * registry artifact, so there is deliberately no {@code released(...)} beside these calls.
+   */
+  private void declared(
+      String repository,
+      String version,
+      String sha,
+      Instant when,
+      MaintenanceStore.ReleasePin... pins) {
+    store.recordRelease(repository, version, sha, when, List.of(pins));
+  }
+
+  private static MaintenanceStore.ReleasePin declares(
+      Ecosystem ecosystem, String name, String version) {
+    return new MaintenanceStore.ReleasePin(ecosystem, name, version);
+  }
+
+  /** A submodule pin, whose "version" is the commit the parent's tree holds at that path. */
+  private static MaintenanceStore.ReleasePin submodules(String repository, String sha) {
+    return new MaintenanceStore.ReleasePin(Ecosystem.GITLINK, repository, sha);
+  }
+
+  /** A plausible 40-hex object name, seeded so two fixtures cannot collide. */
+  private static String commit(String seed) {
+    StringBuilder sha = new StringBuilder(Integer.toHexString(seed.hashCode()));
+    while (sha.length() < 40) {
+      sha.append("0123456789abcdef", sha.length() % 16, (sha.length() % 16) + 1);
+    }
+    return sha.substring(0, 40);
+  }
+
   private static AdoptionEvaluator.Adopter adopter(
       AdoptionEvaluator.Journey journey, String repository) {
     return journey.adopters().stream()
@@ -338,6 +371,272 @@ class AdoptionEvaluatorTest {
     assertEquals("2.0.0", adopter(travelled, frontend).adoptedVersion());
     assertEquals(AdoptionEvaluator.State.ADOPTED, adopter(travelled, service).state());
     assertEquals("9.0.0", adopter(travelled, service).adoptedVersion());
+  }
+
+  // --- the release-pin evidence -------------------------------------------------------------------
+
+  /**
+   * <b>THE BUG THIS EVIDENCE KIND EXISTS FOR.</b> A frontend publishes NOTHING to any registry —
+   * its release is a git tag — so it has no {@code mt_artifact} row, no document, and no component
+   * anywhere that could ever name the library it took. Measured live on 2026-09-08: fifteen
+   * frontends, all reported PENDING, all of them carrying the release.
+   *
+   * <p>What proves it is the frontend's own released TREE. Not its working tree — a tag is
+   * immutable and is tied to the version reported as {@code adoptedVersion}.
+   */
+  @Test
+  void aFrontendThatPublishesNothingIsAdoptedThroughItsOwnReleasedTree() {
+    String library = "qits-ui-components-jslib" + run;
+    String pkg = "@qits/ui-components" + run;
+    String took = "qits-took-frontend" + run;
+    String behind = "qits-behind-frontend" + run;
+
+    scanned(library, RepositoryArchetype.LIBRARY);
+    released(library, Ecosystem.NPM, pkg, "2026.906.164412", MARCH);
+
+    scanned(took, RepositoryArchetype.FRONTEND, pin(Ecosystem.NPM, pkg));
+    declared(
+        took, "2026.907.1", commit(took), APRIL, declares(Ecosystem.NPM, pkg, "2026.906.164412"));
+
+    scanned(behind, RepositoryArchetype.FRONTEND, pin(Ecosystem.NPM, pkg));
+    declared(
+        behind, "2026.907.2", commit(behind), APRIL,
+        declares(Ecosystem.NPM, pkg, "2026.905.1"));
+
+    AdoptionEvaluator.Journey journey = evaluator.of(library, "2026.906.164412");
+
+    AdoptionEvaluator.Adopter adopted = adopter(journey, took);
+    assertEquals(AdoptionEvaluator.State.ADOPTED, adopted.state());
+    assertEquals("2026.907.1", adopted.adoptedVersion(), "the frontend's OWN released version");
+    assertEquals(APRIL, adopted.adoptedAt());
+
+    assertEquals(
+        AdoptionEvaluator.State.PENDING,
+        adopter(journey, behind).state(),
+        "a released tree declaring an older version is evidence of a NON-adoption");
+  }
+
+  /**
+   * <b>THE SECOND HOP, PROVED.</b> A service consumes a frontend as a {@code webui} submodule, so
+   * what its released tree declares is a COMMIT and never a version — and its own SBOM lists maven
+   * components only, because a compiled Angular dist carries no npm metadata (239 and 0, measured
+   * on {@code qits-ci-service}). The sha is resolved through the FRONTEND's ledger to the release
+   * it belongs to, and that version is what the comparison sees.
+   */
+  @Test
+  void aServiceIsAdoptedThroughAGitlinkShaResolvedInTheFrontendsLedger() {
+    String library = "qits-hop-lib" + run;
+    String pkg = "@qits/hop" + run;
+    String frontend = "qits-hop-frontend" + run;
+    String service = "qits-hop-service" + run;
+    String taken = commit(frontend + "-taken");
+
+    scanned(library, RepositoryArchetype.LIBRARY);
+    released(library, Ecosystem.NPM, pkg, "2026.905.1", MARCH);
+
+    // The frontend takes the library and releases; that release IS the commit `taken`.
+    scanned(frontend, RepositoryArchetype.FRONTEND, pin(Ecosystem.NPM, pkg));
+    declared(frontend, "2026.906.1", taken, APRIL, declares(Ecosystem.NPM, pkg, "2026.905.1"));
+
+    // The service submodules the frontend, and its released tree holds that very commit.
+    scanned(
+        service,
+        RepositoryArchetype.SERVICE,
+        ParsedPin.of(
+            Ecosystem.GITLINK, ".gitmodules", frontend, taken, null,
+            "gitlink:service/src/main/webui"));
+    declared(service, "2026.907.1", commit(service), MAY, submodules(frontend, taken));
+
+    AdoptionEvaluator.Journey journey = evaluator.of(library, "2026.905.1");
+
+    assertEquals(AdoptionEvaluator.State.ADOPTED, adopter(journey, frontend).state());
+    AdoptionEvaluator.Adopter adopted = adopter(journey, service);
+    assertEquals(2, adopted.depth(), "reached across the submodule edge");
+    assertEquals(AdoptionEvaluator.State.ADOPTED, adopted.state());
+    assertEquals("2026.907.1", adopted.adoptedVersion(), "the SERVICE's own released version");
+    assertEquals(MAY, adopted.adoptedAt());
+  }
+
+  /** git's own rule for an abbreviated object name, which is what a tree may have recorded. */
+  @Test
+  void anAbbreviatedGitlinkShaStillResolvesToTheReleaseItNames() {
+    String library = "qits-abbrev-lib" + run;
+    String pkg = "@qits/abbrev" + run;
+    String frontend = "qits-abbrev-frontend" + run;
+    String service = "qits-abbrev-service" + run;
+    String taken = commit(frontend + "-taken");
+
+    scanned(library, RepositoryArchetype.LIBRARY);
+    released(library, Ecosystem.NPM, pkg, "1.0.0", MARCH);
+    scanned(frontend, RepositoryArchetype.FRONTEND, pin(Ecosystem.NPM, pkg));
+    declared(frontend, "2.0.0", taken, APRIL, declares(Ecosystem.NPM, pkg, "1.0.0"));
+    scanned(
+        service,
+        RepositoryArchetype.SERVICE,
+        ParsedPin.of(
+            Ecosystem.GITLINK, ".gitmodules", frontend, taken, null, "gitlink:webui"));
+    declared(
+        service, "3.0.0", commit(service), MAY, submodules(frontend, taken.substring(0, 8)));
+
+    assertEquals(
+        AdoptionEvaluator.State.ADOPTED,
+        adopter(evaluator.of(library, "1.0.0"), service).state());
+  }
+
+  /**
+   * <b>Two honest kinds of "no".</b> A sha that resolves to an OLDER release of the frontend is
+   * evidence the service is carrying the frontend from before it took the library; a sha the ledger
+   * cannot place at all is an off-release commit, or a release older than anything recorded — and
+   * neither is evidence of an adoption.
+   */
+  @Test
+  void aGitlinkShaResolvingToAnOlderReleaseOrToNothingIsNotAnAdoption() {
+    String library = "qits-stale-lib" + run;
+    String pkg = "@qits/stale" + run;
+    String frontend = "qits-stale-frontend" + run;
+    String stale = "qits-stale-service" + run;
+    String lost = "qits-lost-service" + run;
+    String before = commit(frontend + "-before");
+    String after = commit(frontend + "-after");
+
+    scanned(library, RepositoryArchetype.LIBRARY);
+    released(library, Ecosystem.NPM, pkg, "2026.905.1", MARCH);
+
+    scanned(frontend, RepositoryArchetype.FRONTEND, pin(Ecosystem.NPM, pkg));
+    // Two releases of the frontend: the older one without the library, the newer one with it.
+    declared(frontend, "1.0.0", before, APRIL, declares(Ecosystem.NPM, pkg, "2026.900.1"));
+    declared(frontend, "2.0.0", after, MAY, declares(Ecosystem.NPM, pkg, "2026.905.1"));
+
+    scanned(
+        stale,
+        RepositoryArchetype.SERVICE,
+        ParsedPin.of(Ecosystem.GITLINK, ".gitmodules", frontend, before, null, "gitlink:webui"));
+    declared(stale, "9.0.0", commit(stale), JUNE, submodules(frontend, before));
+
+    scanned(
+        lost,
+        RepositoryArchetype.SERVICE,
+        ParsedPin.of(Ecosystem.GITLINK, ".gitmodules", frontend, after, null, "gitlink:webui"));
+    declared(lost, "9.0.0", commit(lost), JUNE, submodules(frontend, commit("nobody-released")));
+
+    AdoptionEvaluator.Journey journey = evaluator.of(library, "2026.905.1");
+
+    assertEquals(
+        AdoptionEvaluator.State.ADOPTED,
+        adopter(journey, frontend).state(),
+        "the frontend's adopting release is 2.0.0, and that is what its children must carry");
+    assertEquals(
+        AdoptionEvaluator.State.PENDING,
+        adopter(journey, stale).state(),
+        "carrying the frontend from before it took the library");
+    assertEquals(
+        AdoptionEvaluator.State.PENDING,
+        adopter(journey, lost).state(),
+        "a commit the ledger cannot place proves nothing");
+  }
+
+  /**
+   * <b>The chain is the same chain, whatever proves each link.</b> The service's requirement is the
+   * FRONTEND's adopting version and never the library's, so a frontend that has not taken the
+   * library leaves the service PENDING — even though the service is faithfully carrying the
+   * frontend's newest release.
+   */
+  @Test
+  void aPendingFrontendLeavesTheServicePendingAcrossTheGitlinkToo() {
+    String library = "qits-blocked-lib" + run;
+    String pkg = "@qits/blocked" + run;
+    String frontend = "qits-blocked-frontend" + run;
+    String service = "qits-blocked-service" + run;
+    String first = commit(frontend + "-first");
+    String taken = commit(frontend + "-taken");
+
+    scanned(library, RepositoryArchetype.LIBRARY);
+    released(library, Ecosystem.NPM, pkg, "2026.905.1", MARCH);
+
+    // The frontend released once, and that release's tree declares an OLDER copy of the library.
+    scanned(frontend, RepositoryArchetype.FRONTEND, pin(Ecosystem.NPM, pkg));
+    declared(frontend, "1.0.0", first, APRIL, declares(Ecosystem.NPM, pkg, "2026.900.1"));
+
+    // The service is already at the commit the frontend's NEXT release will be cut from — which is
+    // the ordinary shape of a bump that landed before the sibling released.
+    scanned(
+        service,
+        RepositoryArchetype.SERVICE,
+        ParsedPin.of(Ecosystem.GITLINK, ".gitmodules", frontend, taken, null, "gitlink:webui"));
+    declared(service, "9.0.0", commit(service), MAY, submodules(frontend, taken));
+
+    AdoptionEvaluator.Journey blocked = evaluator.of(library, "2026.905.1");
+    assertEquals(AdoptionEvaluator.State.PENDING, adopter(blocked, frontend).state());
+    assertEquals(
+        AdoptionEvaluator.State.PENDING,
+        adopter(blocked, service).state(),
+        "there is no version of the frontend to require yet");
+
+    // The frontend takes it and releases that very commit; the service's SAME row closes, because
+    // its requirement is now 2.0.0 and the commit it holds resolves to exactly that release.
+    declared(frontend, "2.0.0", taken, JUNE, declares(Ecosystem.NPM, pkg, "2026.905.1"));
+
+    AdoptionEvaluator.Journey travelled = evaluator.of(library, "2026.905.1");
+    assertEquals("2.0.0", adopter(travelled, frontend).adoptedVersion());
+    assertEquals(AdoptionEvaluator.State.ADOPTED, adopter(travelled, service).state());
+    assertEquals("9.0.0", adopter(travelled, service).adoptedVersion());
+  }
+
+  /**
+   * <b>The earliest wins ACROSS the two evidence kinds, not within each of them.</b> "When did this
+   * repository start shipping it" has one answer, and it does not depend on which kind of proof
+   * happened to be available for which release.
+   */
+  @Test
+  void theEarliestMatchWinsAcrossTheDocumentAndTheReleasedTreeAlike() {
+    String library = "qits-both-lib" + run;
+    String pkg = "@qits/both" + run;
+    String consumer = "qits-both-consumer" + run;
+
+    scanned(library, RepositoryArchetype.LIBRARY);
+    released(library, Ecosystem.NPM, pkg, "1.0.0", MARCH);
+
+    scanned(consumer, RepositoryArchetype.SERVICE, pin(Ecosystem.NPM, pkg));
+    // The document proves the MAY release…
+    released(
+        consumer, Ecosystem.NPM, "@qits/both-consumer" + run, "2.0.0", MAY,
+        contains(Ecosystem.NPM, pkg, "1.0.0"));
+    // …and the released tree proves an earlier one, which nothing published a document for.
+    declared(consumer, "1.0.0", commit(consumer), APRIL, declares(Ecosystem.NPM, pkg, "1.0.0"));
+
+    AdoptionEvaluator.Adopter adopted = adopter(evaluator.of(library, "1.0.0"), consumer);
+
+    assertEquals(AdoptionEvaluator.State.ADOPTED, adopted.state());
+    assertEquals("1.0.0", adopted.adoptedVersion(), "the April release, proved by its own tree");
+    assertEquals(APRIL, adopted.adoptedAt());
+  }
+
+  /**
+   * <b>The release ledger is a fact about a repository's OWN release and never about somebody
+   * else's.</b> Two repositories declaring the same coordinate must not prove each other's
+   * adoption, which is what {@code mt_release.repository} being the catalog name is for.
+   */
+  @Test
+  void oneRepositorysReleasedTreeIsNeverEvidenceAboutAnother() {
+    String library = "qits-mine-lib" + run;
+    String pkg = "@qits/mine" + run;
+    String took = "qits-mine-took" + run;
+    String never = "qits-mine-never" + run;
+
+    scanned(library, RepositoryArchetype.LIBRARY);
+    released(library, Ecosystem.NPM, pkg, "1.0.0", MARCH);
+
+    scanned(took, RepositoryArchetype.SERVICE, pin(Ecosystem.NPM, pkg));
+    declared(took, "2.0.0", commit(took), APRIL, declares(Ecosystem.NPM, pkg, "1.0.0"));
+
+    // In the closure by its pin, and with no release of its own recorded anywhere.
+    scanned(never, RepositoryArchetype.SERVICE, pin(Ecosystem.NPM, pkg));
+
+    AdoptionEvaluator.Journey journey = evaluator.of(library, "1.0.0");
+
+    assertEquals(AdoptionEvaluator.State.ADOPTED, adopter(journey, took).state());
+    assertEquals(AdoptionEvaluator.State.PENDING, adopter(journey, never).state());
+    assertNull(adopter(journey, never).adoptedVersion());
   }
 
   // --- the release nobody has heard of --------------------------------------------------------------

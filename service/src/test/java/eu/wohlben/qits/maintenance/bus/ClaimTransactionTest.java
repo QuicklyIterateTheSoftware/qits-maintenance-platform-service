@@ -3,6 +3,7 @@ package eu.wohlben.qits.maintenance.bus;
 import static eu.wohlben.qits.maintenance.bus.ForeignEventContractTest.frame;
 import static eu.wohlben.qits.maintenance.bus.ForeignEventContractTest.scmReleasePayload;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.maintenance.api.InventoryReset;
 import eu.wohlben.qits.maintenance.manifest.GroupConfig;
@@ -137,6 +138,7 @@ class ClaimTransactionTest {
           store.allPins();
           store.groups(REPOSITORY);
           store.allLatest();
+          store.latestOf(Ecosystem.GITLINK);
           store.latest(Ecosystem.MAVEN, "g:a");
           store.scanPending(REPOSITORY);
           store.scan(scanId);
@@ -158,6 +160,9 @@ class ClaimTransactionTest {
           store.artifactsOfRepository(List.of(REPOSITORY));
           store.components(artifactId);
           store.edges(artifactId);
+          store.releasesOf(REPOSITORY);
+          store.releaseRecorded(REPOSITORY, "1.0.0");
+          store.releasePinCarriers(Ecosystem.GITLINK, REPOSITORY);
 
           // AND THEN A WRITE, which is where the production failure actually surfaced: the bare
           // read enlists, and the inNewTx behind it is the one that dies.
@@ -197,6 +202,9 @@ class ClaimTransactionTest {
         version,
         store.latest(Ecosystem.GITLINK, REPOSITORY).orElseThrow().latest,
         "the gitlink latest is what must survive a frame handled inside a claim");
+    assertTrue(
+        store.releaseRecorded(REPOSITORY, version),
+        "and so must the release ledger row, which is the second write of the same arm");
   }
 
   @Test
