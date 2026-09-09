@@ -1,5 +1,6 @@
 package eu.wohlben.qits.maintenance.schedule;
 
+import eu.wohlben.qits.maintenance.bump.BumpDispatcher;
 import eu.wohlben.qits.maintenance.bump.BumpService;
 import eu.wohlben.qits.maintenance.config.MaintenanceConfig;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
@@ -14,6 +15,7 @@ import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
 import io.quarkus.scheduler.Scheduled;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -22,6 +24,19 @@ import org.jboss.logging.Logger;
 
 /**
  * The nightly internal bump: one branch per repository whose own releases have moved on.
+ *
+ * <h2>It no longer dispatches — it opens a window</h2>
+ *
+ * <p>This cron used to walk the inventory and ask for every eligible bump in one tight loop. That
+ * put the whole night's builds into qits-ci as one wavefront and it put a library's bump and its
+ * consumer's in the same breath, so the consumer built against the pin it was about to be handed
+ * anyway. Both are fixed by moving the DISPATCH somewhere else: this cron now decides only that the
+ * night is open for business ({@link BumpDispatcher#open}), and {@link BumpDispatchSchedule} hands
+ * out one bump at a time, from the bottom of the dependency chain, while qits-ci is idle.
+ *
+ * <p><b>{@code qits.maintenance.bump.dispatch.gated=false} brings the old loop back</b>, unchanged,
+ * in {@link #requestInternalBumps()}. It is kept reachable rather than deleted because how much a
+ * qits-ci can take at once is a property of a deployment.
  *
  * <h2>It is its own cron, and that is the point of it existing at all</h2>
  *
@@ -97,6 +112,8 @@ public class BumpSchedule {
 
   @Inject BumpService bumps;
 
+  @Inject BumpDispatcher dispatcher;
+
   @Scheduled(
       cron = "{qits.maintenance.bump.internal.cron}",
       timeZone = "{qits.maintenance.time-zone}",
@@ -104,12 +121,39 @@ public class BumpSchedule {
   void onInternalSchedule() {
     try {
       refuseExternalAuto();
-      requestInternalBumps();
+      if (config.bumpDispatchGated()) {
+        openTheDispatchWindow();
+      } else {
+        requestInternalBumps();
+      }
     } catch (RuntimeException e) {
       // A background chore's failure is a line in the log and a retry on the next schedule, never a
       // dead scheduler thread or a service that stops answering.
       LOG.errorf(e, "The nightly internal bump could not be run; the next schedule retries.");
     }
+  }
+
+  /**
+   * The gated night: the window opens and nothing is asked for here.
+   *
+   * <p>The two switches are read again by every tick, so a deployment that flips one at 03:00 is
+   * obeyed at 03:00 — but reading them here too keeps the ordinary "it is off" line in the log at
+   * the hour somebody looks for it, rather than as a window that opens and shuts a tick later.
+   */
+  private void openTheDispatchWindow() {
+    if (!config.bumpEnabled()) {
+      LOG.infof(
+          "Bumping is disabled (qits.maintenance.bump.enabled=false); no dispatch window is"
+              + " opened.");
+      return;
+    }
+    if (!config.bumpInternalAuto()) {
+      LOG.infof(
+          "The nightly internal bump is off (qits.maintenance.bump.internal.auto=false); the"
+              + " buttons still work.");
+      return;
+    }
+    dispatcher.open(Instant.now());
   }
 
   /** One bump per OK repository whose INTERNAL group has something pending and no writer. */

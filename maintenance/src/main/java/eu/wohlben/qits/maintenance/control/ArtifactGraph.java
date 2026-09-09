@@ -329,6 +329,38 @@ public class ArtifactGraph {
         artifact.sbomStatus);
   }
 
+  /**
+   * <b>WHO PUBLISHES WHAT</b> — every artifact coordinate this platform has released, mapped to the
+   * repository that produced it.
+   *
+   * <p>The inverse of {@link #dependents}: that answers "who ships me" from a coordinate, this
+   * answers "whose release is this" for every coordinate at once. It exists for the bump
+   * dispatcher, which has a list of pending changes and needs to know which of them are another
+   * candidate's release — a per-coordinate lookup would be one query per pending change per tick.
+   *
+   * <p>The key is {@code (ecosystem, name)} spelled by {@link #producerKey}, which is the same join
+   * key {@code mt_pin} and {@code mt_artifact} are related by and the only one they share. The
+   * newest row per coordinate decides, and the translation of {@code mt_artifact.repository} is
+   * {@link RepositoryNames}' as everywhere else here.
+   */
+  public Map<String, String> producers() {
+    RepositoryNames names = names();
+    Map<String, String> byCoordinate = new LinkedHashMap<>();
+    for (MtArtifact artifact : store.newestArtifactPerName()) {
+      String repository = names.of(artifact.repository);
+      if (repository == null || repository.isBlank() || artifact.name == null) {
+        continue;
+      }
+      byCoordinate.putIfAbsent(producerKey(artifact.ecosystem, artifact.name), repository);
+    }
+    return Map.copyOf(byCoordinate);
+  }
+
+  /** The {@code (ecosystem, name)} spelling {@link #producers} is keyed by. */
+  public static String producerKey(String ecosystem, String name) {
+    return ecosystem + " " + name;
+  }
+
   // --- the one translation ----------------------------------------------------------------------
 
   /**

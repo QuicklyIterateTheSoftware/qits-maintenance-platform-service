@@ -1,5 +1,6 @@
 package eu.wohlben.qits.maintenance.api;
 
+import eu.wohlben.qits.maintenance.bump.CiClient;
 import eu.wohlben.qits.maintenance.manifest.GitmodulesParser;
 import eu.wohlben.qits.maintenance.peer.FakePeers;
 import eu.wohlben.qits.maintenance.peer.PeerTarget;
@@ -261,6 +262,33 @@ public final class Fixture {
         FakePeers.Scripted.ok(
             "{\"eventId\":\"e1\",\"runIds\":[\"" + runId + "\"],\"repositoriesRead\":1,"
                 + "\"repositoriesSkipped\":[]}"));
+  }
+
+  /**
+   * qits-ci has nothing queued and nothing running — the state the dispatch gate waits for.
+   *
+   * <p>Every test that expects the clock to hand a bump out has to say this: an UNSCRIPTED listing
+   * is a 404, and the gate reads a listing it could not read as BUSY.
+   */
+  public static void scriptCiQueueEmpty(FakePeers peers) {
+    peers.answer(PeerTarget.CI, CiClient.ACTIVE_RUNS_PATH, FakePeers.Scripted.ok("{\"runs\":[]}"));
+  }
+
+  /** qits-ci is busy: {@code active} runs queued or running, across every repository. */
+  public static void scriptCiQueue(FakePeers peers, int active) {
+    StringBuilder runs = new StringBuilder("{\"runs\":[");
+    for (int index = 0; index < active; index++) {
+      runs.append(index == 0 ? "" : ",")
+          .append("{\"id\":\"busy-")
+          .append(index)
+          .append("\",\"status\":\"")
+          // One QUEUED and the rest RUNNING: the gate counts the listing rather than matching on a
+          // status, and a fixture that only ever said QUEUED would let a filter pass unnoticed.
+          .append(index == 0 ? "QUEUED" : "RUNNING")
+          .append("\"}");
+    }
+    peers.answer(
+        PeerTarget.CI, CiClient.ACTIVE_RUNS_PATH, FakePeers.Scripted.ok(runs.append("]}").toString()));
   }
 
   public static void scriptRun(FakePeers peers, String runId, String status) {

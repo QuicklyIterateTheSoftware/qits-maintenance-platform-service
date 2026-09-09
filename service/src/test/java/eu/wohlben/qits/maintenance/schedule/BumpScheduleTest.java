@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.maintenance.api.Fixture;
 import eu.wohlben.qits.maintenance.api.InventoryReset;
+import eu.wohlben.qits.maintenance.bump.BumpDispatcher;
 import eu.wohlben.qits.maintenance.bump.BumpService;
 import eu.wohlben.qits.maintenance.config.MaintenanceConfig;
 import eu.wohlben.qits.maintenance.entity.MtBump;
@@ -37,6 +38,11 @@ import org.junit.jupiter.api.Test;
  * application.properties}), so nothing else can start this and a test that waited for 02:00 would be
  * indistinguishable from a test that hung.
  *
+ * <p><b>The cron opens a window and {@code BumpDispatcher} sends</b>, so every method here drives
+ * both halves through {@link #night()}. What the two of them decide TOGETHER is what these tests
+ * are about — which groups get a bump — and splitting the assertions across the seam would leave
+ * the interesting answer untested on either side of it.
+ *
  * <p><b>Only the row is asserted, never the CI trigger.</b> What the schedule decides is WHICH groups
  * get a bump; what a bump then does with qits-ci is {@code MaintenanceApiTest}'s subject, and
  * asserting it twice would make one change fail in two places for one reason.
@@ -49,6 +55,8 @@ class BumpScheduleTest {
   @Inject ScanService scans;
 
   @Inject BumpService bumps;
+
+  @Inject BumpDispatcher dispatcher;
 
   @Inject MaintenanceStore store;
 
@@ -72,6 +80,7 @@ class BumpScheduleTest {
     Fixture.scriptScan(peers);
     Fixture.scriptBranchAbsent(peers);
     Fixture.scriptCiAccepts(peers, "run-scheduled");
+    Fixture.scriptCiQueueEmpty(peers);
     Fixture.scriptReleaseRequestAccepted(peers, "rr-scheduled");
   }
 
@@ -93,6 +102,22 @@ class BumpScheduleTest {
     queue.awaitIdle(Duration.ofSeconds(60));
   }
 
+  /**
+   * A whole night: the cron opens the window and the dispatcher ticks until it stops asking.
+   *
+   * <p><b>The cron no longer sends anything</b>, so a test that called it alone would assert
+   * against a window rather than against a bump. The loop is bounded — the fixture holds one
+   * repository, so a second tick is already the "nothing is owed" ending — and a dispatcher that
+   * kept finding work would fail here rather than spin.
+   */
+  private void night() {
+    schedule.onInternalSchedule();
+    for (int tick = 0; tick < 5 && dispatcher.tick().isPresent(); tick++) {
+      queue.awaitIdle(Duration.ofSeconds(30));
+    }
+    queue.awaitIdle(Duration.ofSeconds(30));
+  }
+
   private List<MtBump> bumpsOf(String group) {
     return store.bumps(Fixture.REPOSITORY, 50).stream()
         .filter(bump -> group.equals(bump.groupName))
@@ -103,7 +128,7 @@ class BumpScheduleTest {
   void theNightlyBumpAsksForTheInternalHalfAndForNothingElse() {
     scan();
 
-    schedule.onInternalSchedule();
+    night();
 
     // The INTERNAL half, and it is the clock's: SCHEDULED, not MANUAL.
     List<MtBump> internal = bumpsOf("dependencies");
@@ -124,7 +149,7 @@ class BumpScheduleTest {
     scan();
     bumps.request(Fixture.REPOSITORY, "dependencies", BumpTrigger.MANUAL);
 
-    schedule.onInternalSchedule();
+    night();
 
     List<MtBump> internal = bumpsOf("dependencies");
     assertEquals(1, internal.size(), "a group with an active bump must not get a second one");
@@ -151,7 +176,7 @@ class BumpScheduleTest {
         "the git host said nothing",
         Instant.now());
 
-    schedule.onInternalSchedule();
+    night();
 
     assertTrue(bumpsOf("dependencies").isEmpty(), "only an OK repository is bumped by the clock");
   }
@@ -179,7 +204,7 @@ class BumpScheduleTest {
                 + "\",\"name\":\"qits-ci-service\",\"mainBranch\":\"main\"}]}"));
     scan();
 
-    schedule.onInternalSchedule();
+    night();
 
     assertEquals(
         RepositoryStatus.ABSENT.name(),
@@ -197,7 +222,7 @@ class BumpScheduleTest {
     // Wipe the latest versions: every pin is then at the newest this service knows of.
     inventory.clearLatest();
 
-    schedule.onInternalSchedule();
+    night();
 
     assertTrue(bumpsOf("dependencies").isEmpty(), "nothing is pending, so nothing is asked for");
   }
@@ -219,6 +244,13 @@ class BumpScheduleTest {
           }
 
           @Override
+          public boolean bumpDispatchGated() {
+            // The gate under test is the clock's, not the dispatch mode's: this must hold for the
+            // shipped path, so the mock says what the jar says.
+            return true;
+          }
+
+          @Override
           public boolean bumpEnabled() {
             return true;
           }
@@ -231,7 +263,7 @@ class BumpScheduleTest {
         },
         MaintenanceConfig.class);
 
-    schedule.onInternalSchedule();
+    night();
     assertTrue(bumpsOf("dependencies").isEmpty(), "the gate is off, so the clock asked for nothing");
 
     bumps.request(Fixture.REPOSITORY, "dependencies", BumpTrigger.MANUAL);

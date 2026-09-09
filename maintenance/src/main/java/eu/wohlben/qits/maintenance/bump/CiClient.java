@@ -15,7 +15,8 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * The two calls this service makes to qits-ci: apply a bump, and read the run that applies it.
+ * The three calls this service makes to qits-ci: apply a bump, read the run that applies it, and
+ * ask whether qits-ci is busy.
  *
  * <p><b>{@code eventId} is the bump's row id and that is the dedupe key.</b> qits-ci records at most
  * one run per (event id, repository, config path), so a dispatch whose ANSWER this service lost —
@@ -44,6 +45,9 @@ public class CiClient {
   public static final String EVENT_NAME = "MaintenanceBump";
 
   public static final String TRIGGER_PATH = "/ci/api/events/trigger";
+
+  /** Everything qits-ci has accepted and not finished, across every repository. */
+  public static final String ACTIVE_RUNS_PATH = "/ci/api/runs/active";
 
   /** The file in the wrapper repository that declares the pipeline. qits-ci records it as a run's
    * {@code configPath}, and it is the same for every bump, so the bump detail carries it as a
@@ -156,6 +160,51 @@ public class CiClient {
       return new RunState(null, "the run " + runId + " answered no status");
     }
     return new RunState(body.get("status").asText(), null);
+  }
+
+  /**
+   * How busy qits-ci is right now.
+   *
+   * @param active how many runs it has accepted and not finished, or null when the listing could
+   *     not be read
+   * @param error why it could not be read
+   */
+  public record QueueState(Integer active, String error) {
+
+    /** Whether the listing answered at all. An unreadable queue is not an empty one. */
+    public boolean readable() {
+      return active != null;
+    }
+
+    /**
+     * <b>Nothing accepted and nothing running — and an unreadable listing is never this.</b> A
+     * dispatch gate that read "could not ask" as "nothing is going" would fire the whole night's
+     * bumps at the one moment qits-ci is least able to say so.
+     */
+    public boolean empty() {
+      return active != null && active == 0;
+    }
+  }
+
+  /**
+   * Whether qits-ci has anything queued or running.
+   *
+   * <p><b>Every entry of the listing counts, whatever its status says.</b> qits-ci documents the
+   * two active states as {@code QUEUED} and {@code RUNNING} and this route returns exactly those —
+   * so the honest reading of "is the queue empty" is the SIZE of the listing, not a filter over a
+   * vocabulary. A third non-terminal status qits-ci invents tomorrow is still work in flight, and a
+   * gate matching on {@code QUEUED} would quietly stop seeing it.
+   */
+  public QueueState activeRuns() {
+    PeerAnswer answer = peers.get(PeerTarget.CI, ACTIVE_RUNS_PATH).answer();
+    if (!answer.ok()) {
+      return new QueueState(null, "the active runs could not be read: " + answer.failure());
+    }
+    JsonNode body = answer.json();
+    if (body == null || !body.hasNonNull("runs") || !body.get("runs").isArray()) {
+      return new QueueState(null, "the active runs listing carried no `runs` array");
+    }
+    return new QueueState(body.get("runs").size(), null);
   }
 
   private static List<String> runIds(JsonNode result) {

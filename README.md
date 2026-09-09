@@ -25,6 +25,7 @@ The contract — routes, model, config keys, schedules and the bump payload — 
 | external latest | qits-platform-mirror | `central` maven-metadata, `npmjs` packument |
 | applying a bump | qits-ci | `POST /ci/api/events/trigger`, event `MaintenanceBump` |
 | the bump's outcome | qits-ci + qits-githost | `GET /ci/api/runs/{id}`, then the branch head |
+| whether CI is busy | qits-ci | `GET /ci/api/runs/active` — the dispatch gate; an unreadable listing counts as busy |
 | an internal release | qits-events | `SoftwareRelease` off the durable bus — see **The event bus** |
 | a branch's life | qits-events | `SCMRelease`, `SCMDeleteBranch`, `SCMPublishCommit` |
 | what a release CONTAINS | qits-artifacts | `GET /artifacts/sboms/<type>/<name>/-/<version>` — one CycloneDX document per released artifact; see **The dependency graph** |
@@ -204,12 +205,61 @@ is the sha the tree holds now.
 ## The bump
 
 **Two callers ask for one: a person, and the clock.** `POST
-/repositories/{name}/groups/{group}/bumps` is the button, on any group. The clock is
-`schedule/BumpSchedule` at 02:00, and it asks for the INTERNAL group (`dependencies`) of every OK
-repository that has something pending there and no bump already going — the external half and a
-repository's own configured groups are manual-only. **No scan bumps anything any more**, whoever
-triggered it; the old `bump.auto` tail of a SCHEDULED scan is gone, because a scan's schedule is set
-by how fast facts go stale and a bump's by when a branch is welcome.
+/repositories/{name}/groups/{group}/bumps` is the button, on any group. The clock owes the INTERNAL
+group (`dependencies`) of every OK repository that has something pending there and no bump already
+going — the external half and a repository's own configured groups are manual-only. **No scan bumps
+anything any more**, whoever triggered it; the old `bump.auto` tail of a SCHEDULED scan is gone,
+because a scan's schedule is set by how fast facts go stale and a bump's by when a branch is welcome.
+
+### The clock does not fire — it opens a window
+
+`schedule/BumpSchedule` at 02:00 used to walk the inventory and ask for every eligible bump in one
+tight loop. The first live run of that asked for 30 at once, and the wavefront was only half the
+damage: a library's bump and its consumer's went out in the same breath, so the consumer built
+against the pin it was about to be handed anyway and needed a second bump the next night.
+
+So the cron now only opens a **dispatch window** (`bump.internal.window`, 6h), and
+`bump/BumpDispatcher` — ticked by `schedule/BumpDispatchSchedule` on the same 15s interval the poller
+uses — hands out **one bump per tick**, in this order:
+
+| gate | question | when it is not met |
+|---|---|---|
+| the window | is the night open | nothing happens, and outside a window this costs one field read |
+| in flight | how many bumps of ours are REQUESTED or RUNNING | wait; the window stays open |
+| owed | is anything a candidate | **the window closes** — the ordinary ending |
+| qits-ci | `GET /ci/api/runs/active`, every entry counted | wait |
+
+**Both counts are compared against `bump.dispatch.max-in-flight`.** At its default of 1 that is the
+request in its plain form: an empty CI queue and nothing of ours outstanding. **An unreadable
+listing is BUSY, never empty** — a gate that read "I could not ask" as "nothing is going" would fire
+the whole night at the one moment qits-ci is least able to say so.
+
+**The candidates are recomputed every tick, never frozen as a night's plan.** `PendingChanges` is
+computed on every read anyway, so the tick after a bump releases sees its consumers' new pin instead
+of the one they were already going to get.
+
+**The window is in memory and a restart drops it.** Deliberate: it is one instant that is worthless
+an hour later, a process down at 02:00 misses the night today too, and every *bump* is a row — so
+nothing in flight is lost, only the permission to start more.
+
+### Bottom of the chain first
+
+`bump/BumpOrder` picks the candidate nothing else owed sits below. The relation is read off the
+**changes**, not off the whole graph: a candidate is held back only while one of its own pending
+changes names something another candidate publishes. A dependency on a repository with nothing owed
+is not a reason to wait — that release already happened, and its version is what the change moves to.
+
+Two spellings of "who publishes this", because there are two kinds of edge: a maven, npm or docker
+coordinate is matched through `ArtifactGraph#producers()` (the released-artifact ledger), and a
+GITLINK pin — which has no artifact at all — is matched by name, because a submodule's `name` IS its
+repository. Only for that ecosystem, so a package called like a repository invents no edge.
+
+**A cycle degrades to a pick, never to a stall.** The graph is not guaranteed acyclic; when every
+candidate waits on another, the least-blocked one goes with a WARN naming what it was waiting on. A
+night in which nothing is bumped is the worse outcome.
+
+**`bump.dispatch.gated=false` brings the old loop-and-fire back**, unchanged. It stays reachable
+rather than deleted because how much a qits-ci can take at once is a property of a deployment.
 
 **One nightly bump coalesces every release since the last one.** The changes are frozen onto the row
 at request time, so five internal releases between two nights are ONE branch push, one CI build, one
@@ -686,7 +736,10 @@ environment without a rebuild.
 | `qits.maintenance.bump.internal.cron` | `0 0 2 * * ?` | the nightly INTERNAL bump, 02:00 — after both scans, so the inventory it reads is today's |
 | `qits.maintenance.bump.internal.auto` | `true` | whether the clock asks for those bumps. **The live deployment holds it `false` until the pre-split branches are drained** |
 | `qits.maintenance.bump.external.auto` | `false` | **reserved.** External bumps are manual-only; setting it logs a WARN once and does nothing |
-| `qits.maintenance.bump.poll-interval` | `15s` | how often an unfinished bump is looked at |
+| `qits.maintenance.bump.poll-interval` | `15s` | how often an unfinished bump is looked at — and how often a dispatch is considered |
+| `qits.maintenance.bump.dispatch.gated` | `true` | one bump at a time against an idle qits-ci. `false` restores the old fire-everything loop |
+| `qits.maintenance.bump.dispatch.max-in-flight` | `1` | what "idle" means, compared to BOTH our unfinished bumps and qits-ci's whole active listing. Floored at 1 |
+| `qits.maintenance.bump.internal.window` | `6h` | the ceiling on how long after 02:00 a branch may still arrive. It closes early the moment nothing is owed |
 | `qits.maintenance.environment` | `dev` | which environment's CI is recorded on a bump row |
 | `qits.auth.machine.audience` | `qits-platform-maintenance` | this service's own id at qits-platform-idp |
 
