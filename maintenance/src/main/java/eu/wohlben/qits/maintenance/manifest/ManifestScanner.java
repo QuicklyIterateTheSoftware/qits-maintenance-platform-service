@@ -97,11 +97,41 @@ public class ManifestScanner {
       eu.wohlben.qits.maintenance.model.GroupSource groupSource,
       String message) {}
 
-  /** Reads one repository. */
+  /** Reads one repository at its default branch — what every scheduled scan asks for. */
   public Read read(CatalogEntry entry) {
+    return read(entry, null);
+  }
+
+  /**
+   * Reads one repository at {@code revision}, or at its default branch when that is null.
+   *
+   * <p><b>The override exists so a release can be read as a release.</b> A release on this platform
+   * is a TAG, and {@code main} is finalized afterwards — at once for a repository that deploys
+   * nothing, after the deployment for one that does. So the manifests a release produced are
+   * readable at {@code refs/tags/<version>} the instant the release is announced, and at {@code
+   * main} only once something else has happened. A scan keyed on a release that read the branch
+   * would record the PREVIOUS release's pins and stamp the row as freshly checked, which is worse
+   * than not scanning: nothing afterwards looks stale enough to re-read. Measured live 2026-09-09 on
+   * qits-artifacts-frontend — scan 32ms after the release, pins two days old.
+   *
+   * <p>It is also the more honest read whatever the timing, and {@code adoption/ReleaseLedger} says
+   * so for the same reason: a pin read at a tag is release-grade, and a pin read at a branch is
+   * whatever happened to be there. The two converge here because {@code main} only ever advances by
+   * release — so the override buys the inventory hours of freshness and costs it no accuracy.
+   *
+   * <p><b>What it does change is what {@code head_sha} names</b>: the commit the pins were read at,
+   * which for a tag read is the release's commit rather than the branch's tip. The same commit, once
+   * the branch has caught up.
+   */
+  public Read read(CatalogEntry entry, String revision) {
     String project = entry.project();
     String name = entry.name();
-    String branch = entry.mainBranch() == null || entry.mainBranch().isBlank() ? "main" : entry.mainBranch();
+    String branch =
+        revision != null && !revision.isBlank()
+            ? revision
+            : entry.mainBranch() == null || entry.mainBranch().isBlank()
+                ? "main"
+                : entry.mainBranch();
 
     TreeLookup root = gitHost.head(project, name, branch);
     switch (root.status()) {
