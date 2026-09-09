@@ -471,6 +471,70 @@ class ScmEventListenerTest {
     assertThrows(IllegalStateException.class, () -> released(FRONTEND, MAIN, VERSION));
   }
 
+  // --- the release's manifests ------------------------------------------------------------------
+
+  /**
+   * <b>The gap that let a released repository stay stale.</b> A release moves main, and it is the
+   * only signature that says so — the push half never sees one, because a release's {@code branch}
+   * names the {@code release/<id>} fold and qits-githost publishes no {@code SCMPublishCommit} for
+   * the fold. Without this the inventory held the manifests of the last scheduled scan, which on a
+   * repository this service had just bumped meant showing it as behind on the dependency it had
+   * itself brought up to date.
+   */
+  @Test
+  void aReleaseQueuesAScanOfTheReleasedRepository() {
+    gitHost.holds(REPOSITORY, "refs/tags/" + VERSION, RELEASE_SHA);
+
+    released(REPOSITORY, "release/6f0d1f2e-0000-4000-8000-000000000000", VERSION);
+
+    assertEquals(1, scans.requested.size());
+    RecordingScans.Requested queued = scans.requested.get(0);
+    assertEquals(REPOSITORY, queued.repository());
+    assertEquals(ScanTrigger.EVENT, queued.trigger(), "a release scans and never bumps");
+    assertEquals(ScanScope.INTERNAL, queued.scope());
+  }
+
+  /**
+   * The scan is asked for BEFORE the tag is resolved, so a git host that will not answer costs the
+   * gitlink latest and never the manifest refresh — the two facts need different things to be true.
+   */
+  @Test
+  void aReleaseQueuesTheScanEvenWhenTheGitHostCannotResolveItsTag() {
+    gitHost.unreachable(REPOSITORY, "refs/tags/" + VERSION);
+
+    assertThrows(
+        IllegalStateException.class,
+        () -> released(REPOSITORY, MAIN, VERSION),
+        "the gitlink half is retryable and stays owed");
+    assertEquals(1, scans.requested.size(), "the scan was already asked for");
+  }
+
+  /** The push half's debounce, on the other signature: one queued scan covers both announcements. */
+  @Test
+  void aReleaseIsDebouncedAgainstTheScanAlreadyQueued() {
+    gitHost.holds(REPOSITORY, "refs/tags/" + VERSION, RELEASE_SHA);
+    released(REPOSITORY, MAIN, VERSION);
+    store.pendingScans.add(REPOSITORY);
+
+    released(REPOSITORY, MAIN, VERSION);
+
+    assertEquals(1, scans.requested.size());
+  }
+
+  /**
+   * The guard is on the scan half ALONE. A repository no scan has read has no row to refresh — but
+   * its gitlink latest is keyed by name and needs no row to be true, so that half still writes.
+   */
+  @Test
+  void aReleaseOfARepositoryThisInventoryDoesNotHoldStillRecordsTheGitlinkLatest() {
+    gitHost.holds(FRONTEND, "refs/tags/" + VERSION, RELEASE_SHA);
+
+    released(FRONTEND, MAIN, VERSION);
+
+    assertTrue(scans.requested.isEmpty(), "there is no row to refresh yet");
+    assertEquals(VERSION, store.latestRow(Ecosystem.GITLINK, FRONTEND).latest);
+  }
+
   // --- the push ---------------------------------------------------------------------------------
 
   @Test

@@ -32,10 +32,12 @@ import org.jboss.logging.Logger;
  *   <caption>The three events and what each one moves</caption>
  *   <tr><th>event</th><th>publisher</th><th>what it means here</th></tr>
  *   <tr><td>{@code SCMRelease}</td><td>qits-projects</td>
- *       <td>a repository has a new released commit. Two rows follow: {@code mt_latest} gets the
- *           version and the sha its tag resolves to, so every GITLINK pinned at it has somewhere to
- *           move; and the release LEDGER gets what the tree at that tag declared, which is how an
- *           adoption of somebody else's release is later proved</td></tr>
+ *       <td>a repository has a new released commit. Two rows follow and one scan: {@code mt_latest}
+ *           gets the version and the sha its tag resolves to, so every GITLINK pinned at it has
+ *           somewhere to move; the release LEDGER gets what the tree at that tag declared, which is
+ *           how an adoption of somebody else's release is later proved; and the released repository
+ *           is queued for a rescan, because a release moved its main branch and no other signature
+ *           says so</td></tr>
  *   <tr><td>{@code SCMDeleteBranch}</td><td>qits-githost</td>
  *       <td>a {@code maintenance/<group>} branch is gone — the branch row becomes NONE, so the next
  *           bump starts fresh from main</td></tr>
@@ -66,6 +68,14 @@ import org.jboss.logging.Logger;
  * the head the push just made. Whether the pending set that falls out should become a branch is
  * still the clock's standing instruction or a person's press: {@link ScanTrigger#EVENT} scans and
  * never bumps, or every repository somebody touched during the day would grow a branch.
+ *
+ * <p><b>A RELEASE draws the same conclusion, and has to draw it from its own signature.</b> Main
+ * moves two ways on this platform and only one of them is a push this listener can see: a release is
+ * a fold of {@code release/<id>} plus a tag, announced as {@code SCMRelease} alone, whose
+ * {@code branch} names that fold rather than {@code main}. So the push half's main-branch test can
+ * never match a release, and until {@link #onReleasedManifests} existed every release on this
+ * platform left the inventory holding a stale manifest until the next scheduled scan. Both halves
+ * queue the same {@link ScanTrigger#EVENT} scan through the same debounce; neither bumps.
  *
  * <p>The scan goes through {@link ScanService#request} — the same path {@code POST /scans} with a
  * {@code repository} takes — so it is a row a client can follow, it is queued behind the one worker
@@ -239,15 +249,75 @@ public class ScmEventListener implements QitsDurableEventListener {
   // --- SCMRelease -----------------------------------------------------------------------------
 
   /**
-   * A repository was released — which here is two facts about one tag: where a gitlink pinned at
-   * this repository can move to, and what the released tree was itself carrying.
+   * A repository was released — which here is three facts, two about one tag and one about the
+   * repository's own main branch: where a gitlink pinned at this repository can move to, what the
+   * released tree was itself carrying, and that this repository's manifests have moved.
    */
   private void onRelease(EventFrame frame) {
     ScmReleasePayload release = decode(frame, ScmReleasePayload.class);
     if (release == null) {
       return;
     }
+    onReleasedManifests(frame, release);
     onGitlinkReleased(frame, release);
+  }
+
+  // --- SCMRelease, the manifest half ------------------------------------------------------------
+
+  /**
+   * <b>A release moved main, so the released repository's manifests are re-read.</b>
+   *
+   * <p>This is the same conclusion {@link #onPush} draws from a push, reached from the other
+   * signature because <b>a release does not produce a push this listener can see</b>. A release is a
+   * fold of {@code release/<id>} and a tag over it, published by qits-projects as {@code SCMRelease}
+   * alone; the {@code branch} it names is that fold and never {@code main}, and qits-githost emits no
+   * {@code SCMPublishCommit} for the fold itself. So {@link #onPush}'s main-branch test could never
+   * match a release, and every release on this platform left the inventory holding the manifests of
+   * whatever the last scheduled scan happened to read.
+   *
+   * <p><b>Which is worst for the pins this service moves itself.</b> A bump lands on
+   * {@code maintenance/<group>}, is released onto main, and the pin it changed still reads the old
+   * version here until the next 00:30 scan — so the dependency page shows a repository as behind on
+   * the very dependency it was just brought up to date on, and the pending set the nightly bump
+   * reads is composed against a manifest that is a day stale. Seen live on 2026-09-09:
+   * qits-projects-frontend released {@code @qits/ui-components 2026.908.204937} at 18:34 and this
+   * inventory's head for it stayed at the commit before the bump.
+   *
+   * <p><b>Ahead of the gitlink half, and deliberately.</b> It asks the git host nothing, so a tag
+   * that cannot be resolved — the retryable throw below — must not also cost the manifest refresh.
+   * The cost of it being first is that a redelivery can queue a second scan once the first has
+   * finished; a scan is idempotent and the debounce absorbs the burst, which is the same trade
+   * {@link #onPush} already makes for a merge.
+   *
+   * <p>A repository this inventory does not hold is skipped for the reason a push to one is: there
+   * is no row to refresh, and the next scheduled scan reads the catalog and creates it. The gitlink
+   * half does NOT share that guard — it addresses such a repository by the payload's own project —
+   * because a latest row is keyed by name alone and needs no inventory row to be true.
+   */
+  private void onReleasedManifests(EventFrame frame, ScmReleasePayload release) {
+    String repository = repositoryName(release);
+    if (repository == null) {
+      // The gitlink half logs this too, and says the same thing about the same payload.
+      return;
+    }
+    if (store.repository(repository).isEmpty()) {
+      LOG.debugf(
+          "%s %s released %s, which this inventory does not hold yet; no scan is queued",
+          frame.name(), frame.id(), repository);
+      return;
+    }
+    if (store.scanPending(repository)) {
+      LOG.debugf(
+          "%s %s released %s, and a scan of it is already queued or running",
+          frame.name(), frame.id(), repository);
+      return;
+    }
+    // INTERNAL scope, for the reason the push half takes it: every scan re-reads every manifest and
+    // the scope governs only which half of the registry lookups refresh.
+    UUID id = scans.request(ScanScope.INTERNAL, repository, ScanTrigger.EVENT);
+    LOG.infof(
+        "%s %s released %s %s; queued the scan %s of that repository",
+        frame.name(), frame.id(), repository, trimmed(release.version()), id);
   }
 
   // --- SCMRelease, the gitlink half -----------------------------------------------------------
