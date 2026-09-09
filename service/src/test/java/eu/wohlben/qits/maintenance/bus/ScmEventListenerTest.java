@@ -211,13 +211,20 @@ class ScmEventListenerTest {
   /** A scan service that records the request instead of opening a row and queueing work. */
   private static final class RecordingScans extends ScanService {
 
-    record Requested(ScanScope scope, String repository, ScanTrigger trigger) {}
+    record Requested(
+        ScanScope scope, String repository, ScanTrigger trigger, String revision) {}
 
     final List<Requested> requested = new ArrayList<>();
 
+    /**
+     * Only the four-argument overload is recorded, because it is the one the production code reaches:
+     * the three-argument form delegates to it with a null revision, so overriding both would let a
+     * caller's revision go unobserved.
+     */
     @Override
-    public UUID request(ScanScope scope, String repository, ScanTrigger trigger) {
-      requested.add(new Requested(scope, repository, trigger));
+    public UUID request(
+        ScanScope scope, String repository, ScanTrigger trigger, String revision) {
+      requested.add(new Requested(scope, repository, trigger, revision));
       return UUID.randomUUID();
     }
   }
@@ -474,15 +481,15 @@ class ScmEventListenerTest {
   // --- the release's manifests ------------------------------------------------------------------
 
   /**
-   * <b>The gap that let a released repository stay stale.</b> A release moves main, and it is the
-   * only signature that says so — the push half never sees one, because a release's {@code branch}
-   * names the {@code release/<id>} fold and qits-githost publishes no {@code SCMPublishCommit} for
-   * the fold. Without this the inventory held the manifests of the last scheduled scan, which on a
-   * repository this service had just bumped meant showing it as behind on the dependency it had
-   * itself brought up to date.
+   * <b>The gap that let a released repository stay stale, and the read that closes it.</b> A release
+   * changes a repository's manifests and produces no push this listener can see — the merge goes
+   * through qits-githost's REST door, which fires no post-receive. So the scan is queued here, and it
+   * is queued <b>at the tag</b>: {@code main} is finalized after the release, so a scan of the branch
+   * would read the previous release's pins and stamp the row as freshly checked. Measured live
+   * 2026-09-09 on qits-artifacts-frontend — scan 32ms after the event, pins two days old.
    */
   @Test
-  void aReleaseQueuesAScanOfTheReleasedRepository() {
+  void aReleaseQueuesAScanOfThatRepositoryAtTheReleasedTag() {
     gitHost.holds(REPOSITORY, "refs/tags/" + VERSION, RELEASE_SHA);
 
     released(REPOSITORY, "release/6f0d1f2e-0000-4000-8000-000000000000", VERSION);
@@ -492,11 +499,15 @@ class ScmEventListenerTest {
     assertEquals(REPOSITORY, queued.repository());
     assertEquals(ScanTrigger.EVENT, queued.trigger(), "a release scans and never bumps");
     assertEquals(ScanScope.INTERNAL, queued.scope());
+    assertEquals(
+        "refs/tags/" + VERSION,
+        queued.revision(),
+        "the tag and never the branch — main has not caught up when this frame arrives");
   }
 
   /**
-   * The scan is asked for BEFORE the tag is resolved, so a git host that will not answer costs the
-   * gitlink latest and never the manifest refresh — the two facts need different things to be true.
+   * The scan is asked for BEFORE the tag is resolved for the gitlink latest, so a git host that will
+   * not answer leaves the frame owed without the manifest refresh depending on that retry.
    */
   @Test
   void aReleaseQueuesTheScanEvenWhenTheGitHostCannotResolveItsTag() {
@@ -549,6 +560,9 @@ class ScmEventListenerTest {
         ScanScope.INTERNAL,
         queued.scope(),
         "every scan re-reads every manifest; the scope governs only which registries answer");
+    assertNull(
+        queued.revision(),
+        "a push names the branch it landed on, so the scan reads the default branch as always");
   }
 
   /** A merge is a burst of pushes, and a scan already queued reads the head at the moment it runs. */

@@ -92,11 +92,32 @@ public class ScanService {
    * yet.
    */
   public UUID request(ScanScope scope, String repository, ScanTrigger trigger) {
+    return request(scope, repository, trigger, null);
+  }
+
+  /**
+   * The same scan, reading one repository's manifests at {@code revision} instead of at its default
+   * branch — what a release-triggered scan asks for, because a release is a tag and the branch has
+   * not caught up yet. See {@link ManifestScanner#read(CatalogEntry, String)} for why that is the
+   * honest read rather than merely the earlier one.
+   *
+   * <p><b>The revision rides the closure and is deliberately NOT a column on the scan row.</b> It is
+   * a property of the work rather than of the record a client polls: the queue is in this process, so
+   * a scan that does not run is one whose row never reaches a terminal state anyway, and a migration
+   * to persist a value nothing could replay from would buy nothing. It is refused for a whole-catalog
+   * scan, where one revision cannot be true of forty-eight repositories.
+   */
+  public UUID request(ScanScope scope, String repository, ScanTrigger trigger, String revision) {
+    if (revision != null && !revision.isBlank() && repository == null) {
+      throw new IllegalArgumentException(
+          "a revision names one repository's history; a whole-catalog scan cannot take one");
+    }
     UUID id = store.openScan(scope, repository, trigger.name(), Instant.now());
     String what =
         "the " + trigger.name().toLowerCase(java.util.Locale.ROOT) + " " + scope + " scan " + id
-            + (repository == null ? "" : " of " + repository);
-    queue.submit(what, () -> run(id, scope, repository, what));
+            + (repository == null ? "" : " of " + repository)
+            + (revision == null || revision.isBlank() ? "" : " at " + revision);
+    queue.submit(what, () -> run(id, scope, repository, revision, what));
     return id;
   }
 
@@ -108,9 +129,9 @@ public class ScanService {
    * RUNNING for ever — a scan that is not running and does not say so is worse than a failed one,
    * because nothing and nobody can tell the difference from a slow one.
    */
-  void run(UUID id, ScanScope scope, String repository, String what) {
+  void run(UUID id, ScanScope scope, String repository, String revision, String what) {
     try {
-      scan(id, scope, repository, what);
+      scan(id, scope, repository, revision, what);
     } catch (RuntimeException e) {
       LOG.errorf(e, "%s could not be completed", what);
       store.scanStatus(id, ScanStatus.FAILED, message(e), Instant.now());
@@ -118,7 +139,7 @@ public class ScanService {
   }
 
   /** What a scan does, with the row's ending left to {@link #run}. */
-  private void scan(UUID id, ScanScope scope, String repository, String what) {
+  private void scan(UUID id, ScanScope scope, String repository, String revision, String what) {
     Instant now = Instant.now();
     store.scanStatus(id, ScanStatus.RUNNING, null, now);
     CatalogReader.Result read = catalog.read();
@@ -147,7 +168,7 @@ public class ScanService {
     }
 
     for (CatalogEntry entry : entries) {
-      scanOne(entry, now);
+      scanOne(entry, revision, now);
     }
     // BEFORE the registry half, so no ghost's pins are looked up: a dropped repository's rows are
     // gone by the time refreshLatest reads the inventory back out of the store.
@@ -168,9 +189,9 @@ public class ScanService {
    * <p>A repository that blows up is that repository's row, not the scan's: forty-eight others
    * still have manifests worth reading.
    */
-  private void scanOne(CatalogEntry entry, Instant now) {
+  private void scanOne(CatalogEntry entry, String revision, Instant now) {
     try {
-      readInto(entry, now);
+      readInto(entry, revision, now);
     } catch (RuntimeException e) {
       LOG.warnf(e, "%s could not be scanned", entry.name());
       store.markRepository(
@@ -184,8 +205,8 @@ public class ScanService {
     }
   }
 
-  private void readInto(CatalogEntry entry, Instant now) {
-    ManifestScanner.Read read = manifests.read(entry);
+  private void readInto(CatalogEntry entry, String revision, Instant now) {
+    ManifestScanner.Read read = manifests.read(entry, revision);
     if (read.status() == RepositoryStatus.UNREACHABLE) {
       store.markRepository(
           entry.name(),
