@@ -1,0 +1,67 @@
+package eu.wohlben.qits.maintenance.model;
+
+/**
+ * WHOSE BRANCH A BUMP IS WRITING — the one fact that decides how its ending is read.
+ *
+ * <p><b>Two modes rather than one reinterpreted.</b> Everything this service does to a {@code
+ * maintenance/<group>} branch rests on OWNING that branch: nobody else commits to it, so the head
+ * moving is the run's work and the head not moving is the run finding nothing to write. A bump onto
+ * a branch somebody else owns has none of that. The workspace commits to it constantly, so the same
+ * measurement — did the head move — would call an ordinary afternoon's work a success and an
+ * ff-rejection somebody else's rewrite. The two are not one mode with a flag on it; they are two
+ * readings of the same three facts, and this column is which reading applies.
+ *
+ * <p><b>A word rather than a boolean, and the difference is what a third mode costs.</b> The modes
+ * differ in four places — whether a branch row is written, whether the ending compares heads,
+ * whether a release request is opened, and what the active-bump lock is keyed on — so a boolean
+ * called {@code targeted} would spell every one of them as {@code !targeted}, which names the older
+ * of the two behaviours after the newer one. It also makes the group path's own meaning a negation
+ * in every query and in every {@code psql} session that goes looking for one. A word says what a row
+ * IS, reads as itself in a listing, and a fourth reading of the same facts is a constant here rather
+ * than a second boolean nobody can combine with the first.
+ *
+ * <p><b>No check constraint backs it</b>, for the reason {@code ScanTrigger} and the five status
+ * enums have none: the invariant lives at the single writer — {@code MaintenanceStore} takes this
+ * enum and nothing else writes the column — and a constraint would make a new constant a migration.
+ */
+public enum BumpMode {
+
+  /**
+   * The branch is this service's: {@code maintenance/<group>}, named from the group, tracked by an
+   * {@code mt_branch} row, deleted by the release that lands it, and released by the ask this
+   * service makes when the run comes back green.
+   */
+  GROUP,
+
+  /**
+   * The branch is the CALLER'S, and it was named in the request rather than derived from anything
+   * here.
+   *
+   * <p>A wrapper release request wants its gitlink pins IN the fold it is going to gate, which means
+   * they have to be written onto the workspace branch that request is built from — a branch this
+   * service did not create, does not name, will not delete and has no lifecycle for. It writes no
+   * {@code mt_branch} row (there is no branch of ours to record), it opens no release request (the
+   * caller already has one — a second ask would be a second request for the same work), and its
+   * verdict is its CI run's, not its branch head's.
+   */
+  TARGETED;
+
+  /** Whether a row in this mode owns the branch it writes — which is the whole of the difference. */
+  public boolean ownsTheBranch() {
+    return this == GROUP;
+  }
+
+  /** The mode a column holds, defaulting to {@link #GROUP} for a row written before it existed. */
+  public static BumpMode of(String stored) {
+    if (stored == null || stored.isBlank()) {
+      return GROUP;
+    }
+    try {
+      return valueOf(stored);
+    } catch (IllegalArgumentException e) {
+      // A word this build does not know is not a reason to lose a row. The older reading is the
+      // conservative one: it reads heads and refuses to release anything it did not push.
+      return GROUP;
+    }
+  }
+}

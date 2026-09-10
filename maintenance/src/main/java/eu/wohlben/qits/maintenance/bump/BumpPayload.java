@@ -56,6 +56,27 @@ public final class BumpPayload {
   private BumpPayload() {}
 
   /**
+   * The two things the step refuses about a ref that {@link #REF} alone lets through: a LEADING DASH
+   * and a {@code ..} anywhere in it.
+   *
+   * <p><b>Both were unreachable until a caller started naming the branch.</b> Every ref this service
+   * composed was {@code maintenance/<group>} or a repository's main branch, so neither could begin
+   * with a dash; the step checked them anyway, because a ref reaches an argv there. A TARGETED bump
+   * takes the branch verbatim from another service, and the step's own guard —
+   * {@code ''|-*|*..*|*[!0-9A-Za-z._/-]*} — is exactly the shape a payload must be held to on this
+   * side, so that a bad ref is a sentence on a row rather than a red run and a step log.
+   *
+   * <p>A dash is admitted anywhere else in a ref, because {@code release/2026.910-1} is an ordinary
+   * name and only the FIRST character can turn one into an option.
+   */
+  private static boolean plainRef(String ref) {
+    return ref != null
+        && REF.matcher(ref).matches()
+        && !ref.startsWith("-")
+        && !ref.contains("..");
+  }
+
+  /**
    * Every reason this payload cannot be sent, or an empty list.
    *
    * <p>Every problem is reported rather than the first: a repository whose configuration produces
@@ -66,10 +87,10 @@ public final class BumpPayload {
     if (group == null || !GROUP.matcher(group).matches()) {
       problems.add("the group name '" + group + "' is not " + GROUP.pattern());
     }
-    if (branch == null || !REF.matcher(branch).matches()) {
+    if (!plainRef(branch)) {
       problems.add("the branch '" + branch + "' is not a plain ref");
     }
-    if (baseRef == null || !REF.matcher(baseRef).matches()) {
+    if (!plainRef(baseRef)) {
       problems.add("the base ref '" + baseRef + "' is not a plain ref");
     }
     for (Change change : changes) {

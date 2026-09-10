@@ -14,7 +14,11 @@ import java.util.UUID;
  *
  * @param id the bump, which is also the ci event's dedupe key
  * @param repository which repository
- * @param group which group, and therefore which branch
+ * @param group which group, and therefore which branch — or the stated sentinel {@code targeted} on
+ *     a TARGETED bump, which belongs to no group and named its own branch
+ * @param mode GROUP or TARGETED: whose branch this wrote. GROUP owns {@code branch}, tracks it and
+ *     asks for its release; TARGETED wrote onto the caller's branch, tracks nothing and asks for
+ *     nothing
  * @param branch the ref the changes go on
  * @param environment which environment's ci ran it
  * @param trigger SCHEDULED or MANUAL
@@ -28,6 +32,12 @@ import java.util.UUID;
  * @param startedAt when the row was opened
  * @param finishedAt when it ended, null while it has not
  * @param message the sentence
+ * @param resultSha <b>the commit this bump wrote</b> — the branch head as read once the run ended.
+ *     It is what a TARGETED caller polls for: it asked for pins to be put in a fold it is about to
+ *     gate, and this is which commit holds them. Null while the bump has not ended, null on an
+ *     ending that pushed nothing, and null on a green run whose head could not be read afterwards —
+ *     the verdict is the run's, so a git host that was briefly away costs the sha and not the
+ *     SUCCEEDED. A group bump's own answer to the same question is its branch row's {@code headSha}
  * @param releaseRequestId what came of asking qits-projects to release the branch: the release
  *     request's id — OPEN, not released; the gates settle it and Auto Release tags it afterwards —
  *     or {@code converged} (there was nothing to hold on to), {@code refused} (a refusal a retry
@@ -45,6 +55,7 @@ public record BumpDto(
     UUID id,
     String repository,
     String group,
+    String mode,
     String branch,
     String environment,
     String trigger,
@@ -57,6 +68,7 @@ public record BumpDto(
     Instant startedAt,
     Instant finishedAt,
     String message,
+    String resultSha,
     String releaseRequestId,
     String releaseState,
     String releaseDetail,

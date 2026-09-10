@@ -167,7 +167,10 @@ half-rewritten. It also means the git host and the registries see one caller.
 
 **A second bump of one (repository, group) is refused earlier still**, by `MaintenanceStore.openBump`,
 whose active-bump check is **inside** the opening transaction — a person and a scheduled scan
-arriving together is the ordinary case, not a race worth losing.
+arriving together is the ordinary case, not a race worth losing. **The property being protected is a
+REF, and the group is only a stand-in for one**: `openTargetedBump` therefore locks on
+`(repository, branch)`, and both checks carry the mode so neither mode's lock can be taken by the
+other's row.
 
 **A task never throws out of `WorkQueue`.** A thrown exception would lose the sentence; every task
 logs its own failure and ends.
@@ -191,7 +194,24 @@ work that reaches the front after the barrier does not exist yet.
 
 ## Bumping
 
-**Two callers, and no scan is one of them.** The button is `POST
+**THERE ARE TWO MODES AND EVERY RULE BELOW IS ABOUT THE FIRST ONE.** A GROUP bump writes
+`maintenance/<group>` — a branch this service names, creates, tracks in `mt_branch`, releases and
+lets the release delete. A TARGETED bump (`POST /repositories/{name}/branches/bumps`,
+`BumpService.requestTargeted`) writes a branch the CALLER names and owns: a workspace branch whose
+release request wants its gitlink pins *in the fold* CI gates, rather than banked by the release
+afterwards. `mt_bump.mode` is which, and `V12__bump_mode.sql` argues every consequence. The four that
+matter: **no `mt_branch` row** (that row's unique `(repository, group_name)` index is an ownership
+claim over a ref we do not own), **no release ask** (the caller already holds the request the pins
+are for), **no head comparison and therefore no STALE arm** (the workspace commits to its own branch
+while the run goes; calling that STALE would declare a live branch abandoned, silently and for
+ever), and **the lock is keyed on the BRANCH** (two targeted bumps onto two branches of one
+repository are both legitimate; two onto one branch are not). What it shares is everything else: the
+payload, `BumpPayload`, the dedupe key, the 503 rule, the poller and the in-flight cap. Its group
+column carries the stated sentinel `targeted` — a label for the payload and the commit subject,
+never a key; the mode is the discriminator, which is why `newestBump`, `activeBump` and
+`bumpsOwedARelease` all carry a mode term.
+
+**Two callers on the group path, and no scan is one of them.** The button is `POST
 /repositories/{name}/groups/{group}/bumps`; the clock is `schedule/BumpSchedule` at 02:00, INTERNAL
 group only. A SCHEDULED scan used to ask for the bumps it found, gated by `bump.auto` — that key and
 that coupling are both gone. A scan is a READ whose schedule is set by how fast facts go stale; a
@@ -211,16 +231,20 @@ with no run id is FAILED, because qits-ci records a run only if the payload's re
 readable in that evaluation; anything else non-2xx is FAILED. Treating an empty `runIds` as success
 would report a branch that was never written.
 
-**Only the branch HEAD is compared, never a commit count.** One bump is up to two commits — the
-maven step and the node/docker step each clone, commit and push — so a service expecting one would
-report every mixed group as broken. The head is read before the trigger and again when the run ends;
-unmoved after a green run is NOTHING_TO_DO, and moved after a red one is STALE.
+**Only the branch HEAD is compared, never a commit count — on a GROUP bump.** One bump is up to two
+commits — the maven step and the node/docker step each clone, commit and push — so a service
+expecting one would report every mixed group as broken. The head is read before the trigger and again
+when the run ends; unmoved after a green run is NOTHING_TO_DO, and moved after a red one is STALE.
+**What licenses all of that is that nothing else commits to `maintenance/<group>`**, which is exactly
+what a TARGETED bump cannot assume: its verdict is its CI run's, its `result_sha` is the head read
+once afterwards, and an unreadable head costs the sha and not the SUCCEEDED.
 
 **`BumpPayload.problems` refuses on this side what the step refuses on that one.** The step holds
 `to`, `group`, the refs and the manifest path to the same rules; failing here puts the reason on the
 bump row instead of in a step log somebody has to go and read.
 
-**SUCCEEDED asks for the release; the other three endings do not.** `ReleaseRequestClient` posts to
+**A SUCCEEDED group bump asks for the release; the other three endings do not, and a TARGETED bump
+never does.** `ReleaseRequestClient` posts to
 qits-projects' `POST /projects/api/repositories/<repoId>/release-requests` with the branch and the
 commit-subject summary. Nothing merges and nothing is released at that call: a release REQUEST is
 OPENED, the quality gates settle the fold it makes, and Auto Release tags it. **This service's job

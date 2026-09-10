@@ -21,6 +21,26 @@ public class BumpAlreadyActiveException extends MaintenanceException {
     this.activeBumpId = activeBumpId;
   }
 
+  private BumpAlreadyActiveException(String message, UUID activeBumpId) {
+    super(409, message);
+    this.activeBumpId = activeBumpId;
+  }
+
+  /**
+   * The same refusal for a TARGETED bump, which is locked on the branch rather than on a group.
+   *
+   * <p>Its own sentence rather than the one above with a branch substituted for a group: a caller
+   * reading "a bump of qits-qits/workspace/ws-7 is already active" would go looking for a group by
+   * that name. What is held here is a REF, and two targeted bumps onto two different branches of one
+   * repository are refused by nothing — see {@code MaintenanceStore.openTargetedBump}.
+   */
+  public static BumpAlreadyActiveException onBranch(
+      String repository, String branch, UUID activeBumpId) {
+    return new BumpAlreadyActiveException(
+        "a bump of " + repository + " onto " + branch + " is already active: " + activeBumpId,
+        activeBumpId);
+  }
+
   public UUID activeBumpId() {
     return activeBumpId;
   }

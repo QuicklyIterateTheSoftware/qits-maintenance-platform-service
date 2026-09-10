@@ -335,6 +335,12 @@ public class BumpDispatcher {
     // from shutting on its own work: the repository being bumped right now is not a candidate — an
     // active bump is a skip — so a check the other way round would read "nothing is owed" while the
     // night's last bump is still running.
+    //
+    // AND IT COUNTS TARGETED BUMPS TOO, deliberately. Everything else about a targeted bump is
+    // outside this gate — it is not a candidate, it holds no group's lock and it waits on no release
+    // — but it IS a CI run this service asked for, and the whole of what this number is for is not
+    // handing qits-ci more than it can take. A count that saw only the nightly half would open the
+    // valve at exactly the moment somebody's release request had a build going.
     int allowed = config.bumpMaxInFlight();
     int inFlight = store.activeBumps().size();
     if (inFlight >= allowed) {

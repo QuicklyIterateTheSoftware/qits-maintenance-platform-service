@@ -8,7 +8,9 @@ import eu.wohlben.qits.maintenance.dto.DownstreamDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDependentsDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDetailDto;
 import eu.wohlben.qits.maintenance.dto.RepositoryDto;
+import eu.wohlben.qits.maintenance.error.BadRequestException;
 import eu.wohlben.qits.maintenance.model.BumpTrigger;
+import eu.wohlben.qits.maintenance.pending.Change;
 import jakarta.annotation.security.RolesAllowed;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -54,6 +56,26 @@ public class RepositoryController {
 
   /** What a 202 answers with — the id to poll. */
   public record AcceptedResponse(UUID id) {}
+
+  /**
+   * The body of a TARGETED bump: whose branch, and what to write on it.
+   *
+   * <p><b>Both are stated and neither is derived, which is the whole shape of the mode.</b> The
+   * group door beside it is given a group and works the rest out — the branch from the naming rule,
+   * the changes from the inventory. There is nothing to work out here: the caller holds a release
+   * request on a particular branch and wants a particular set of pins inside that request's fold,
+   * and this service recomputing either of them would put a different commit on somebody else's
+   * branch than the one that was asked for.
+   *
+   * <p><b>{@code changes} is the same {@link Change} record the payload carries</b>, not a reduced
+   * one. The step edits by {@code manifestPath} and {@code location} and names the dependency in the
+   * commit it writes; a body that carried only "this gitlink to that version" would have this
+   * service invent the other three fields out of an inventory that may be a scan behind.
+   *
+   * @param branch the caller's branch, without {@code refs/heads/}
+   * @param changes the pins to write; an empty list is accepted and ends NOTHING_TO_DO
+   */
+  public record TargetedBumpRequest(String branch, List<Change> changes) {}
 
   @GET
   @Operation(summary = "Every repository in the inventory, with its groups and what is pending")
@@ -157,6 +179,56 @@ public class RepositoryController {
   @RolesAllowed({"qits:admin", "qits:system"})
   public Response bump(@PathParam("name") String name, @PathParam("group") String group) {
     UUID id = bumps.request(name, group, BumpTrigger.MANUAL);
+    return Response.status(Response.Status.ACCEPTED)
+        .entity(new AcceptedResponse(id))
+        .type(MediaType.APPLICATION_JSON)
+        .build();
+  }
+
+  /**
+   * Asks for the named changes to be written onto a branch <b>the caller owns</b>, and does NOT
+   * wait.
+   *
+   * <p><b>Its own noun rather than a variant of the group door.</b> {@code
+   * /groups/{group}/bumps} is addressed by a thing this service knows about — a group it read out of
+   * a repository's own configuration — and everything else about the bump follows from it. This one
+   * is addressed by a branch this service has never heard of and will never hear of again: a
+   * workspace branch qits-projects owns, carrying a release request whose fold wants its gitlink
+   * pins inside it rather than banked by the release afterwards. Hanging that off the group path
+   * would make the group segment a lie in half the requests.
+   *
+   * <p><b>202 with the id, for the reason the group door gives</b>: a bump is a clone, an edit and a
+   * push in somebody else's pipeline. {@code GET /bumps/{id}} takes the id, and for this caller the
+   * field that matters there is {@code resultSha} — <b>which commit now holds the pins</b>, so that
+   * the request it is arming can be checked against a commit rather than against a hope.
+   *
+   * <p><b>409 while a bump onto THAT BRANCH is active, and never merely onto that repository.</b> One
+   * repository may have several release requests open at once, each on its own branch, each entitled
+   * to its own pins; the thing that cannot happen twice at once is two runs pushing one ref. Also
+   * 409 when bumping is switched off, which stops this door exactly as it stops the schedule.
+   *
+   * <p><b>400 when the branch or a change is not something the bump step would accept</b> — the same
+   * rules {@code BumpPayload} holds a group bump to, refused here rather than as a red run somebody
+   * has to go and read a step log for. This door refuses synchronously where the group path records
+   * the reason on the row, because there is a caller on the other end of this one.
+   */
+  @POST
+  @jakarta.ws.rs.Path("/{name}/branches/bumps")
+  @Operation(summary = "Write the named changes onto a branch the caller owns")
+  @APIResponse(responseCode = "202", description = "Requested; poll GET /bumps/{id} for resultSha")
+  @APIResponse(responseCode = "400", description = "The branch or a change is not a valid payload")
+  @APIResponse(responseCode = "404", description = "No such repository in the inventory")
+  @APIResponse(
+      responseCode = "409",
+      description = "One is already active on that branch, or bumping is disabled")
+  @RolesAllowed({"qits:admin", "qits:system"})
+  public Response bumpBranch(@PathParam("name") String name, TargetedBumpRequest request) {
+    if (request == null || request.branch() == null || request.branch().isBlank()) {
+      throw new BadRequestException("a targeted bump names the branch it writes onto");
+    }
+    UUID id =
+        bumps.requestTargeted(
+            name, request.branch().trim(), request.changes(), BumpTrigger.MANUAL);
     return Response.status(Response.Status.ACCEPTED)
         .entity(new AcceptedResponse(id))
         .type(MediaType.APPLICATION_JSON)

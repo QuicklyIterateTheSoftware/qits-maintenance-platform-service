@@ -59,6 +59,23 @@ import java.util.Set;
  * moment it lands the next tick sees an unblocked candidate. Breaking that "cycle" would dispatch
  * precisely the build against the stale pin the ordering is for. Only when every free candidate
  * waits on another <i>free</i> candidate is there a knot nothing but a pick can undo.
+ *
+ * <h2>What this orders, and what it does not</h2>
+ *
+ * <p><b>This orders WHICH PINS ARE READY, and it never decided which branch anything lands on.</b>
+ * The reason a library goes before its consumer is that the consumer's {@code to} is not worth
+ * writing yet — the version it would be handed is not released — and that is a fact about the pin,
+ * not about the ref it would be written to. So the arrival of a second bump mode changes nothing
+ * here: a targeted bump names its own branch, and the ordering has no opinion about branches to
+ * lose.
+ *
+ * <p><b>Targeted bumps are not candidates and cannot be.</b> {@code BumpDispatcher.assess} builds
+ * this list out of what the inventory says is PENDING, which is a question about a repository's pins
+ * on <i>main</i>; a targeted bump exists because a caller asked for named changes on a named branch,
+ * which nothing here could have derived and nothing here should second-guess. The consequence worth
+ * stating: a targeted bump neither blocks a candidate nor is blocked by one, and if the pins it
+ * carries were computed by somebody else against an unreleased version, this class is not what would
+ * have caught it — the caller owns that decision along with the branch.
  */
 public final class BumpOrder {
 

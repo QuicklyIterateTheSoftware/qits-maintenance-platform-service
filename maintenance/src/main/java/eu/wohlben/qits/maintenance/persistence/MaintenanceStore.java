@@ -21,6 +21,7 @@ import eu.wohlben.qits.maintenance.latest.VersionOrder;
 import eu.wohlben.qits.maintenance.manifest.GroupConfig;
 import eu.wohlben.qits.maintenance.manifest.ParsedPin;
 import eu.wohlben.qits.maintenance.model.BranchState;
+import eu.wohlben.qits.maintenance.model.BumpMode;
 import eu.wohlben.qits.maintenance.model.BumpStatus;
 import eu.wohlben.qits.maintenance.model.BumpTrigger;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
@@ -704,6 +705,62 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
           row.id = UUID.randomUUID();
           row.repository = repository;
           row.groupName = group;
+          row.mode = BumpMode.GROUP.name();
+          row.branch = branch;
+          row.environment = environment;
+          row.trigger = trigger.name();
+          row.status = BumpStatus.REQUESTED.name();
+          row.changes = writeJson(changes);
+          row.startedAt = now;
+          row.persist();
+          getEntityManager().flush();
+          return row.id;
+        });
+  }
+
+  /**
+   * Opens a bump onto a branch this service does not own.
+   *
+   * <p><b>THE LOCK IS KEYED ON THE BRANCH, and that is the whole difference from {@link #openBump}
+   * above.</b> "One bump at a time" is not a property of a group — it is a property of a REF. The
+   * push is ff-only and never forced, so two runs writing one branch make the second a rejection at
+   * best and two commits computed from two readings at worst. For a group bump the group is a
+   * faithful stand-in for the ref, because the ref is named from it and nothing else writes it. For a
+   * targeted bump it is not a stand-in at all: the caller names the branch, and one repository may
+   * have several release requests open at once, each on its own workspace branch, each legitimately
+   * wanting its own pins. Locking those against each other by repository would serialize unrelated
+   * work and refuse the second caller a bump it is entitled to; locking them by branch refuses
+   * exactly the thing that cannot be done twice.
+   *
+   * <p><b>And the two locks do not see each other, deliberately.</b> A targeted bump onto a
+   * workspace branch and a group bump onto {@code maintenance/dependencies} are two refs, so neither
+   * has any reason to hold the other up — which is why both checks carry the mode as well as their
+   * key, rather than sharing one query and hoping the sentinel group name never collides with a real
+   * one.
+   *
+   * <p>The check is inside the transaction for the reason {@link #openBump}'s is.
+   */
+  @ActivateRequestContext
+  public UUID openTargetedBump(
+      String repository,
+      String group,
+      String branch,
+      String environment,
+      BumpTrigger trigger,
+      List<?> changes,
+      Instant now) {
+    return DbRetry.inNewTx(
+        "open a targeted bump of " + repository + " onto " + branch,
+        () -> {
+          MtBump active = activeTargetedBumpRow(repository, branch);
+          if (active != null) {
+            throw BumpAlreadyActiveException.onBranch(repository, branch, active.id);
+          }
+          MtBump row = new MtBump();
+          row.id = UUID.randomUUID();
+          row.repository = repository;
+          row.groupName = group;
+          row.mode = BumpMode.TARGETED.name();
           row.branch = branch;
           row.environment = environment;
           row.trigger = trigger.name();
@@ -752,6 +809,25 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
   @ActivateRequestContext
   public void bumpFinished(
       UUID id, BumpStatus status, String ciRunStatus, String message, Instant now) {
+    bumpFinished(id, status, ciRunStatus, message, null, now);
+  }
+
+  /**
+   * Closes a bump, naming the commit it wrote.
+   *
+   * <p><b>The sha is written only where it is known, and never cleared.</b> Passing null leaves the
+   * column alone rather than blanking it — every ending that pushed nothing goes through the shorter
+   * overload above and has nothing to say about a commit, and an ending that DID read one must not
+   * have it erased by a later write that did not.
+   */
+  @ActivateRequestContext
+  public void bumpFinished(
+      UUID id,
+      BumpStatus status,
+      String ciRunStatus,
+      String message,
+      String resultSha,
+      Instant now) {
     DbRetry.runInNewTx(
         "finish bump " + id,
         () -> {
@@ -762,6 +838,9 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
           row.status = status.name();
           if (ciRunStatus != null) {
             row.ciRunStatus = ciRunStatus;
+          }
+          if (resultSha != null) {
+            row.resultSha = resultSha;
           }
           row.message = message;
           row.finishedAt = status.terminal() ? now : null;
@@ -832,6 +911,12 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
    * <p>Bounded by construction rather than by a limit: every outcome of the ask writes the column, so
    * a row leaves this listing after one tick. The rows that stay are the ones whose ask is genuinely
    * owed, and the branch-state check the caller makes is what ends even those.
+   *
+   * <p><b>GROUP mode only, and that is what keeps the boundedness true.</b> A targeted bump never
+   * asks for a release — the caller already has the request its pins are for — so its {@code
+   * release_request_id} is null for ever by design. Without the term every targeted row would join
+   * this listing the moment it succeeded and be re-attempted once per poll tick for the life of the
+   * row: not an ask that is owed, but one that will never be made.
    */
   @ActivateRequestContext
   public List<MtBump> bumpsOwedARelease() {
@@ -839,9 +924,10 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
         "read the bumps owed a release ask",
         () ->
             MtBump.find(
-                    "status = ?1 and releaseRequestId is null",
+                    "status = ?1 and releaseRequestId is null and mode = ?2",
                     Sort.by("startedAt"),
-                    BumpStatus.SUCCEEDED.name())
+                    BumpStatus.SUCCEEDED.name(),
+                    BumpMode.GROUP.name())
                 .list());
   }
 
@@ -881,12 +967,20 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
                 .list());
   }
 
-  /** The bump holding one branch's lock, if there is one. */
+  /** The group bump holding one group's branch, if there is one. */
   @ActivateRequestContext
   public Optional<MtBump> activeBump(String repository, String group) {
     return DbRetry.inNewTx(
         "read the active bump of one group",
         () -> Optional.ofNullable(activeBumpRow(repository, group)));
+  }
+
+  /** The targeted bump holding one caller's branch, if there is one. */
+  @ActivateRequestContext
+  public Optional<MtBump> activeTargetedBump(String repository, String branch) {
+    return DbRetry.inNewTx(
+        "read the active targeted bump of one branch",
+        () -> Optional.ofNullable(activeTargetedBumpRow(repository, branch)));
   }
 
   /**
@@ -906,10 +1000,16 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
             Optional.ofNullable(
                 (MtBump)
                     MtBump.find(
-                            "repository = ?1 and groupName = ?2",
+                            // GROUP MODE ONLY. The question is whether this group's nightly branch is
+                            // waiting on a release; a targeted bump onto somebody's workspace branch
+                            // is not an answer to it, and letting one be the newest row would hold —
+                            // or free — a group on the strength of work done to a different ref for a
+                            // different caller.
+                            "repository = ?1 and groupName = ?2 and mode = ?3",
                             Sort.by("startedAt").descending(),
                             repository,
-                            group)
+                            group,
+                            BumpMode.GROUP.name())
                         .firstResult()));
   }
 
@@ -971,11 +1071,31 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
         });
   }
 
+  /**
+   * The GROUP bump holding one group's branch, if there is one.
+   *
+   * <p>The mode term is not a tidiness: a targeted row carries a sentinel in {@code group_name}, and
+   * without the term a repository that declared a group spelled like the sentinel would find its
+   * nightly bump held up by somebody else's workspace branch.
+   */
   private static MtBump activeBumpRow(String repository, String group) {
     return MtBump.find(
-            "repository = ?1 and groupName = ?2 and status in ?3",
+            "repository = ?1 and groupName = ?2 and mode = ?3 and status in ?4",
             repository,
             group,
+            BumpMode.GROUP.name(),
+            List.of(BumpStatus.REQUESTED.name(), BumpStatus.RUNNING.name()))
+        .firstResult();
+  }
+
+  /** The TARGETED bump holding one branch, if there is one. Keyed on the ref, which is the thing
+   * that cannot be written twice at once — see {@link #openTargetedBump}. */
+  private static MtBump activeTargetedBumpRow(String repository, String branch) {
+    return MtBump.find(
+            "repository = ?1 and branch = ?2 and mode = ?3 and status in ?4",
+            repository,
+            branch,
+            BumpMode.TARGETED.name(),
             List.of(BumpStatus.REQUESTED.name(), BumpStatus.RUNNING.name()))
         .firstResult();
   }

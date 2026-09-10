@@ -363,6 +363,9 @@ public class Inventory {
         row.id,
         row.repository,
         row.groupName,
+        // Read through the enum rather than passed straight out: a row written before the column
+        // existed carries null, and GROUP is what it is rather than a gap in the answer.
+        eu.wohlben.qits.maintenance.model.BumpMode.of(row.mode).name(),
         row.branch,
         row.environment,
         row.trigger,
@@ -377,6 +380,7 @@ public class Inventory {
         row.startedAt,
         row.finishedAt,
         row.message,
+        row.resultSha,
         row.releaseRequestId,
         row.releaseState,
         row.releaseDetail,

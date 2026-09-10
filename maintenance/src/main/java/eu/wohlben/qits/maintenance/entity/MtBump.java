@@ -27,8 +27,34 @@ public class MtBump extends PanacheEntityBase {
   @Column(nullable = false, length = 255)
   public String repository;
 
+  /**
+   * Which group's pending changes this carries — <b>or, for a {@link #mode TARGETED} bump, the
+   * stated sentinel {@code BumpService.TARGETED_GROUP}</b>, because a targeted bump has no group at
+   * all and the column is not null.
+   *
+   * <p><b>For a targeted row this is a LABEL and never a key.</b> {@link #mode} is the
+   * discriminator: every query that means "the group path" says so by mode, so a repository that
+   * really does declare a group spelled like the sentinel collides with nothing. The sentinel is
+   * carried anyway rather than left blank because it reaches two places a person reads — the
+   * payload's {@code group}, which the step refuses unless it is a plain name, and the commit
+   * subject the step writes onto somebody else's branch, where {@code bump(targeted): 3
+   * dependencies} says what wrote it.
+   */
   @Column(name = "group_name", nullable = false, length = 255)
   public String groupName;
+
+  /**
+   * {@code BumpMode}'s names: GROUP or TARGETED — <b>whose branch this is writing</b>, which is what
+   * decides how the ending is read.
+   *
+   * <p>GROUP owns {@link #branch}: the head before and after the run is the measurement, an {@code
+   * mt_branch} row tracks it, and a green run that pushed asks for a release. TARGETED does not own
+   * it: the branch is the caller's, its head moves for reasons that are not this service's, so the
+   * verdict is the CI run's alone, no branch row is written and no release is asked for. See {@code
+   * V12__bump_mode.sql} for what each of those would get wrong the other way round.
+   */
+  @Column(nullable = false, length = 16)
+  public String mode;
 
   /** The ref this bump writes, without {@code refs/heads/}. Stored rather than derived from the
    * group: it is what the payload carried, and a row must stay readable after the naming rule
@@ -75,6 +101,22 @@ public class MtBump extends PanacheEntityBase {
 
   @Column(columnDefinition = "text")
   public String message;
+
+  /**
+   * WHAT COMMIT THIS BUMP WROTE — the branch head as read once the run ended.
+   *
+   * <p><b>It exists because a TARGETED bump has nowhere else to put it.</b> A group bump's answer is
+   * {@code mt_branch.head_sha}, which it may write because the branch is its own; a targeted bump
+   * writes no branch row, and its caller — which asked for pins to be put in a fold it is about to
+   * gate — needs the sha more than any group reader ever did.
+   *
+   * <p>Null while the bump has not ended, null on an ending that pushed nothing, and null on a green
+   * run whose branch head could not be read afterwards: <b>the verdict belongs to the run</b>, so a
+   * git host that was briefly away costs the sha and a sentence on {@link #message}, never the
+   * SUCCEEDED.
+   */
+  @Column(name = "result_sha", length = 64)
+  public String resultSha;
 
   /**
    * What came of asking qits-projects to release the branch this bump pushed.

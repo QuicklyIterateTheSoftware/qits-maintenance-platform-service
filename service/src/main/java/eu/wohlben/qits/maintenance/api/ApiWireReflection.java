@@ -36,6 +36,10 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 @RegisterForReflection(
     targets = {
       RepositoryController.AcceptedResponse.class,
+      // The targeted bump door's body. It is DESERIALIZED rather than returned, which the analysis
+      // is no better at seeing through: the route's 202 rides in a Response.entity, so the whole
+      // method is invisible to it and the request record goes with it.
+      RepositoryController.TargetedBumpRequest.class,
       ScanController.StartScanRequest.class,
       ScanController.StartScanRequest.Response.class,
       ArtifactController.IngestRequest.class,

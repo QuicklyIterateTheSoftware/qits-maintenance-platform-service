@@ -254,6 +254,30 @@ public final class Fixture {
         FakePeers.Scripted.ok("{\"entries\":[]}", Map.of("Git-Commit-Sha", sha)));
   }
 
+  /**
+   * A branch this service does NOT own, at a sha — a workspace branch carrying a release request.
+   *
+   * <p>Its own helper rather than a parameter on {@link #scriptBranchAt}: that one is keyed on the
+   * fixture's one maintenance branch, and the point of a targeted bump is a ref whose name came from
+   * a caller. The revision is percent-encoded exactly as {@code GitHostReader} encodes it, so a
+   * branch with a slash in it — which is every branch either side of this ever uses — is armed at
+   * the address the reader will actually ask for.
+   */
+  public static void scriptForeignBranchAt(FakePeers peers, String branch, String sha) {
+    peers.answer(
+        PeerTarget.GITHOST,
+        TREE + branch.replace("/", "%2F"),
+        FakePeers.Scripted.ok("{\"entries\":[]}", Map.of("Git-Commit-Sha", sha)));
+  }
+
+  /** …and the same branch with the git host away, which must never change a verdict. */
+  public static void scriptForeignBranchUnreachable(FakePeers peers, String branch) {
+    peers.answer(
+        PeerTarget.GITHOST,
+        TREE + branch.replace("/", "%2F"),
+        FakePeers.Scripted.unreachable("connection refused"));
+  }
+
   /** qits-ci accepts the trigger and names one run. */
   public static void scriptCiAccepts(FakePeers peers, String runId) {
     peers.answer(

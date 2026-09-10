@@ -1,0 +1,73 @@
+-- A BUMP ONTO A BRANCH THIS SERVICE DOES NOT OWN — and the column that keeps the two apart.
+--
+-- Everything the bump machinery does rests on one assumption that was never written down because
+-- nothing had violated it: the branch is OURS. `maintenance/<group>` is named from the group by
+-- this service, created by its own CI step, tracked by an mt_branch row whose unique
+-- (repository, group_name) index IS the ownership claim, deleted by the release that lands it, and
+-- put back to NONE by the SCMDeleteBranch that follows. Nobody else commits to it. That is what
+-- licenses the completion test: read the head before the trigger, read it again when the run ends,
+-- and call the difference the run's work — SUCCEEDED if it moved, NOTHING_TO_DO if it did not, and
+-- STALE if it moved under a RED run, because an ff-only push that was refused means somebody
+-- rewrote the branch by hand and it is theirs now.
+--
+-- A WRAPPER RELEASE REQUEST NEEDS ITS PINS IN THE FOLD. qits-qits is released with its submodule
+-- gitlinks banked afterwards, by the release itself, which means the pins a request carries are not
+-- the pins CI gated and not the pins a person approved. Putting them in the fold means writing them
+-- onto the workspace branch the request is built from — a branch qits-projects owns, that this
+-- service did not create, will not delete, and has no lifecycle for.
+--
+-- EVERY ONE OF THE FOUR ASSUMPTIONS ABOVE IS FALSE ON THAT BRANCH, and each is false in a way that
+-- produces a wrong verdict rather than an error:
+--
+--   * the head moves for reasons that are not us. A workspace commits to its branch all afternoon.
+--     Before-and-after would report the workspace's own commit as our success, and — worse — would
+--     report a commit that landed under a red run as STALE, which is this service declaring that a
+--     live workspace branch is somebody's abandoned hand-written mess and must never be written to
+--     again;
+--   * an mt_branch row would COLLIDE. The index is unique on (repository, group_name) and a
+--     targeted bump has no group; writing one would either fight the repository's real group row or
+--     invent a second claim over a branch we do not own;
+--   * the release ask would DOUBLE. The caller is asking for pins because it already has a release
+--     request open on that branch. A second ask is a second request for the same work;
+--   * and the active-bump lock is keyed on the wrong thing. One bump at a time is a property of a
+--     BRANCH — the push is ff-only, two runs writing one ref make the second a rejection — and for
+--     a group branch the group is a faithful stand-in for it. For a targeted bump it is not: two
+--     bumps onto two different branches of one repository are legitimate and must both go, while
+--     two onto one branch must not.
+--
+-- SO THE MODE IS ON THE ROW, and it is what dispatch, poll and finish read to know which of the two
+-- readings applies. A word rather than a boolean: the modes differ in four behaviours, not one, and
+-- `targeted = false` would name the older reading after the newer one in every query and every psql
+-- session. `mode` says what a row IS. No check constraint, for the reason ScanTrigger has none —
+-- MaintenanceStore is the only writer and it takes the enum, so a third reading is a constant
+-- rather than a migration.
+--
+-- NOT NULL WITH A DEFAULT, AND THE DEFAULT IS THE BACKFILL. Every row that predates this column was
+-- written by the group path — there was no other path — so 'GROUP' is not a guess about them, it is
+-- what they are. The default stays on the column afterwards rather than being dropped: it makes the
+-- older reading the one a row falls back to if anything ever inserts without naming a mode, and the
+-- older reading is the conservative one (it compares heads and refuses to release a branch it did
+-- not push).
+alter table mt_bump add column mode varchar(16) not null default 'GROUP';
+
+-- WHAT COMMIT DID THIS WRITE — the question a targeted bump exists to answer, and the one the group
+-- path never had to store.
+--
+-- A group bump's answer is already written down: mt_branch.head_sha, read again when the run ends
+-- and kept there because the branch is ours to record. A targeted bump writes no such row, and its
+-- caller needs the sha more than any group bump's reader ever did — it asked for pins to be put in a
+-- fold it is about to gate, and "which commit holds them" is the thing it goes on to check and to
+-- show a person. So the column exists precisely BECAUSE the other mode's answer lives somewhere a
+-- targeted bump has no right to write.
+--
+-- It holds the branch head as read after the run, which is what the CI step pushed. Nullable, and
+-- null is a real state rather than a gap: a green run whose branch head could not be read afterwards
+-- is still a green run, and the verdict belongs to the run rather than to whether the git host
+-- answered a second question. The message says so when that happens.
+alter table mt_bump add column result_sha varchar(64);
+
+-- The sweep's read gained a term: `where status = 'SUCCEEDED' and release_request_id is null and
+-- mode = 'GROUP'`. A targeted bump never asks for a release and would otherwise sit in that listing
+-- for ever, being re-attempted once per poll tick for the life of the row. V4's partial index still
+-- serves the read — the rows it wants are the transient few, and mode filters what it hands back —
+-- so nothing here replaces it.
