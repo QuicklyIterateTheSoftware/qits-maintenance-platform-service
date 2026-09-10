@@ -7,9 +7,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.maintenance.api.Fixture;
 import eu.wohlben.qits.maintenance.api.InventoryReset;
 import eu.wohlben.qits.maintenance.bump.BumpDispatcher;
+import eu.wohlben.qits.maintenance.bump.BumpService;
 import eu.wohlben.qits.maintenance.bump.CiClient;
 import eu.wohlben.qits.maintenance.model.BumpStatus;
+import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.model.ScanScope;
+import eu.wohlben.qits.maintenance.pending.Change;
 import eu.wohlben.qits.maintenance.peer.FakePeers;
 import eu.wohlben.qits.maintenance.peer.PeerTarget;
 import eu.wohlben.qits.maintenance.persistence.MaintenanceStore;
@@ -145,5 +148,99 @@ class BumpDispatchTest {
 
     assertTrue(dispatcher.tick().isEmpty());
     assertFalse(dispatcher.windowOpen(Instant.now()), "nothing is owed, so the night is over");
+  }
+
+  /**
+   * <b>THE LIVE FAILURE, END TO END.</b> At 05:52 one repository was dispatched, came back
+   * SUCCEEDED with a release request open, and was dispatched again thirty seconds later — then
+   * again, and again, every one of those a CI run that could only answer NOTHING_TO_DO. Pending is
+   * read off the pins on <i>main</i>, and main does not move until that release lands, so the
+   * repository is genuinely still owed; what it is not, is sendable.
+   *
+   * <p>The two assertions are one fact each and both matter: no second bump, and <b>the window is
+   * still open</b>. Held has to keep counting as owed, or a night whose chain is waiting on releases
+   * would declare itself finished and lose everything behind it.
+   */
+  @Test
+  void aBumpWhoseBranchIsWaitingOnItsReleaseIsNotDispatchedAgain() {
+    Fixture.scriptCiQueueEmpty(peers);
+    dispatcher.open(Instant.now());
+
+    UUID id = dispatcher.tick().orElseThrow();
+    queue.awaitIdle(Duration.ofSeconds(30));
+    store.bumpFinished(
+        id, BumpStatus.SUCCEEDED, "SUCCESS", "the branch is pushed and its release is open", Instant.now());
+
+    assertTrue(dispatcher.tick().isEmpty(), "the same changes have already been asked for");
+    assertEquals(1, store.bumps(Fixture.REPOSITORY, 50).size(), "and no second row was written");
+    assertTrue(
+        dispatcher.windowOpen(Instant.now()),
+        "held is still owed: the window must not close on a chain that is only half sent");
+  }
+
+  /**
+   * The same hold for the other ending that leaves the pins where they were. NOTHING_TO_DO is what
+   * the re-dispatch loop kept producing, and a run that found nothing to write is the strongest
+   * possible evidence that sending it once more would find nothing either.
+   */
+  @Test
+  void aBumpThatFoundNothingToDoAlsoHoldsItsRepositoryBack() {
+    Fixture.scriptCiQueueEmpty(peers);
+    dispatcher.open(Instant.now());
+
+    UUID id = dispatcher.tick().orElseThrow();
+    queue.awaitIdle(Duration.ofSeconds(30));
+    store.bumpFinished(
+        id, BumpStatus.NOTHING_TO_DO, "SUCCESS", "the versions were already there", Instant.now());
+
+    assertTrue(dispatcher.tick().isEmpty());
+    assertEquals(1, store.bumps(Fixture.REPOSITORY, 50).size());
+  }
+
+  /**
+   * <b>A FAILURE HOLDS NOTHING.</b> There is no branch waiting on a release — the run went red, or
+   * qits-ci recorded no run at all — so the work is owed in the plainest sense and the next tick
+   * inside the window is exactly the retry.
+   */
+  @Test
+  void aFailedBumpIsRetriedRatherThanHeld() {
+    Fixture.scriptCiQueueEmpty(peers);
+    dispatcher.open(Instant.now());
+
+    UUID id = dispatcher.tick().orElseThrow();
+    queue.awaitIdle(Duration.ofSeconds(30));
+    store.bumpFinished(id, BumpStatus.FAILED, "FAILED", "the run went red", Instant.now());
+
+    assertTrue(dispatcher.tick().isPresent(), "a failure must stay retryable");
+    assertEquals(2, store.bumps(Fixture.REPOSITORY, 50).size());
+  }
+
+  /**
+   * <b>THE HOLD IS ON THE CHANGES, NOT ON THE REPOSITORY.</b> An upstream released while the first
+   * branch was waiting, so the pending set is no longer the set that was sent — that is a different
+   * bump, and refusing it would sit on a genuinely new version until the window expired.
+   */
+  @Test
+  void aPendingSetThatMovedSinceTheLastBumpGoesAgain() {
+    Fixture.scriptCiQueueEmpty(peers);
+    dispatcher.open(Instant.now());
+
+    UUID id = dispatcher.tick().orElseThrow();
+    queue.awaitIdle(Duration.ofSeconds(30));
+    store.bumpFinished(id, BumpStatus.SUCCEEDED, "SUCCESS", "pushed", Instant.now());
+    assertTrue(dispatcher.tick().isEmpty(), "held, until something moves");
+
+    // One of the dependencies it just asked for releases again. Nothing else about the repository
+    // changes: the same group, the same branch, one different `to`.
+    Change moved =
+        BumpService.changes(store.bump(id).orElseThrow()).stream()
+            .filter(change -> Ecosystem.MAVEN.wireName().equals(change.ecosystem()))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("the internal group carries a maven change"));
+    store.recordLatestIfNewer(
+        Ecosystem.MAVEN, moved.name(), "2029.101.1", "test", Instant.now());
+
+    assertTrue(dispatcher.tick().isPresent(), "a new upstream release is a new bump");
+    assertEquals(2, store.bumps(Fixture.REPOSITORY, 50).size());
   }
 }

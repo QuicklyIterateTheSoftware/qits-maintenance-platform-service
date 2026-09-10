@@ -864,6 +864,30 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
         () -> Optional.ofNullable(activeBumpRow(repository, group)));
   }
 
+  /**
+   * The newest bump of one group, whatever became of it.
+   *
+   * <p><b>Newest, not newest-ended</b> — the dispatcher asks this to find out whether the last thing
+   * it did to a repository is still standing, and a row that is REQUESTED or RUNNING is an answer to
+   * that question too (it is not a bump that ended without failing, so it holds nothing back). One
+   * row per repository per tick, which is why this exists rather than {@link #bumps(String, int)}:
+   * that one reads a page of history for a listing, and the gate wants a single row.
+   */
+  @ActivateRequestContext
+  public Optional<MtBump> newestBump(String repository, String group) {
+    return DbRetry.inNewTx(
+        "read the newest bump of one group",
+        () ->
+            Optional.ofNullable(
+                (MtBump)
+                    MtBump.find(
+                            "repository = ?1 and groupName = ?2",
+                            Sort.by("startedAt").descending(),
+                            repository,
+                            group)
+                        .firstResult()));
+  }
+
   private static MtBump activeBumpRow(String repository, String group) {
     return MtBump.find(
             "repository = ?1 and groupName = ?2 and status in ?3",

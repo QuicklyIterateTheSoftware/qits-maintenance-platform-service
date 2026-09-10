@@ -9,6 +9,7 @@ import eu.wohlben.qits.maintenance.bump.BumpDispatcher;
 import eu.wohlben.qits.maintenance.bump.BumpService;
 import eu.wohlben.qits.maintenance.config.MaintenanceConfig;
 import eu.wohlben.qits.maintenance.entity.MtBump;
+import eu.wohlben.qits.maintenance.model.BumpStatus;
 import eu.wohlben.qits.maintenance.model.BumpTrigger;
 import eu.wohlben.qits.maintenance.model.RepositoryStatus;
 import eu.wohlben.qits.maintenance.model.ScanScope;
@@ -213,6 +214,31 @@ class BumpScheduleTest {
     assertTrue(
         bumpsOf("dependencies").isEmpty(),
         "a repository the catalog no longer lists has nothing the clock may bump");
+  }
+
+  /**
+   * <b>THE SECOND NIGHT, AND THE RELEASE HAS NOT LANDED.</b> The first night pushed the branch and
+   * opened a release request; the pins on main are untouched until that lands and a scan re-reads
+   * them, so the inventory still says the group is owed exactly these changes. A cron that asked
+   * again would push the same branch a second time and burn a run that can only find nothing.
+   *
+   * <p>Held is what stops it, and the window expiring is the only backstop it needs: nothing here
+   * unwinds, because the release landing removes the repository from the candidate list on its own.
+   */
+  @Test
+  void aBranchStillWaitingOnItsReleaseIsNotAskedForAgainTheNextNight() {
+    scan();
+    night();
+    MtBump first = bumpsOf("dependencies").getFirst();
+    store.bumpFinished(
+        first.id, BumpStatus.SUCCEEDED, "SUCCESS", "pushed, release open", Instant.now());
+
+    night();
+
+    assertEquals(
+        1,
+        bumpsOf("dependencies").size(),
+        "the changes have already been asked for and are waiting on a release");
   }
 
   /** A group with nothing pending is not a bump that finds nothing — it is no bump at all. */

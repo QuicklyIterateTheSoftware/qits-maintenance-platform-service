@@ -36,6 +36,11 @@ class BumpOrderTest {
     return new BumpOrder.Candidate(repository, "dependencies", List.of(changes));
   }
 
+  /** Owed, already bumped, waiting on the release that will move its main. */
+  private static BumpOrder.Candidate held(String repository, Change... changes) {
+    return new BumpOrder.Candidate(repository, "dependencies", List.of(changes), true);
+  }
+
   private static Change on(String ecosystem, String name) {
     return new Change(ecosystem, "pom.xml", name, "1", "2", "property");
   }
@@ -125,5 +130,72 @@ class BumpOrderTest {
   @Test
   void nothingOwedIsNoPick() {
     assertEquals(Optional.empty(), BumpOrder.next(List.of(), PRODUCERS));
+  }
+
+  /**
+   * <b>THE RE-DISPATCH LOOP, STATED AS AN ORDERING FACT.</b> The library's branch is pushed and its
+   * release is open; pending is read off main, so it is still owed and still a candidate. Picking it
+   * again is the wasted CI run that came back NOTHING_TO_DO every fifteen seconds — so it is never
+   * the pick, and the free candidate behind it goes instead.
+   */
+  @Test
+  void aHeldCandidateIsNeverThePickAndAFreeOneGoesInstead() {
+    List<BumpOrder.Candidate> candidates =
+        List.of(
+            held(LIB, on("maven", "io.quarkus.platform:quarkus-bom")),
+            candidate(WRAPPER, on("npm", "@angular/core")));
+
+    BumpOrder.Pick pick = BumpOrder.next(candidates, PRODUCERS).orElseThrow();
+
+    assertEquals(WRAPPER, pick.candidate().repository(), "the held library is not dispatchable");
+    assertFalse(pick.cycleBroken());
+  }
+
+  /**
+   * <b>AND HELD STILL BLOCKS.</b> A repository that has pushed its branch stops being dispatchable
+   * but has not released; a consumer sent now builds against the pin the pending release is about to
+   * replace, which is exactly the two-nights-for-one-hop waste this class exists to collapse.
+   */
+  @Test
+  void aCandidateWhoseUpstreamIsHeldStillWaits() {
+    List<BumpOrder.Candidate> candidates =
+        List.of(
+            candidate(SERVICE, on("maven", "eu.wohlben.qits:qits-eventstream")),
+            held(LIB, on("maven", "io.quarkus.platform:quarkus-bom")));
+
+    assertEquals(
+        Optional.empty(),
+        BumpOrder.next(candidates, PRODUCERS),
+        "the library's release is in flight and the service waits for it");
+  }
+
+  /**
+   * Every candidate held is the ordinary waiting state of a night whose releases are all in flight —
+   * no pick, and emphatically not a cycle: the caller must not break anything and must not close its
+   * window on it.
+   */
+  @Test
+  void everythingHeldDispatchesNothing() {
+    List<BumpOrder.Candidate> candidates =
+        List.of(
+            held(SERVICE, on("maven", "eu.wohlben.qits:qits-eventstream")),
+            held(LIB, on("docker", "qits/qits-ci")));
+
+    assertEquals(Optional.empty(), BumpOrder.next(candidates, PRODUCERS));
+  }
+
+  /**
+   * A knot is only a knot among the candidates that could actually move. Held candidates are in
+   * {@code owed} so they block, but a "cycle" that runs through one of them unties itself the moment
+   * that release lands — breaking it would dispatch the stale build on purpose.
+   */
+  @Test
+  void aCycleThroughAHeldCandidateIsNotBroken() {
+    List<BumpOrder.Candidate> candidates =
+        List.of(
+            candidate(SERVICE, on("maven", "eu.wohlben.qits:qits-eventstream")),
+            held(LIB, on("docker", "qits/qits-ci")));
+
+    assertEquals(Optional.empty(), BumpOrder.next(candidates, PRODUCERS));
   }
 }

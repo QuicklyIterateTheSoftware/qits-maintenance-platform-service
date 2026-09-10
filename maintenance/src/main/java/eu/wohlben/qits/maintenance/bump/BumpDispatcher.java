@@ -2,11 +2,13 @@ package eu.wohlben.qits.maintenance.bump;
 
 import eu.wohlben.qits.maintenance.config.MaintenanceConfig;
 import eu.wohlben.qits.maintenance.control.ArtifactGraph;
+import eu.wohlben.qits.maintenance.entity.MtBump;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
 import eu.wohlben.qits.maintenance.entity.MtRepository;
 import eu.wohlben.qits.maintenance.manifest.GroupConfig;
+import eu.wohlben.qits.maintenance.model.BumpStatus;
 import eu.wohlben.qits.maintenance.model.BumpTrigger;
 import eu.wohlben.qits.maintenance.model.RepositoryStatus;
 import eu.wohlben.qits.maintenance.pending.Change;
@@ -68,6 +70,29 @@ import org.jboss.logging.Logger;
  * nothing and buys the whole point of the ordering: once the bottom bump releases and the next scan
  * has read it, its consumers' pending sets name the version that was just cut. A plan frozen at
  * 02:00 would hand every consumer the pin it was already going to get.
+ *
+ * <h2>Pending is read off main, so a bumped repository stays owed — and is HELD, not re-sent</h2>
+ *
+ * <p><b>The one live failure this gate had was re-dispatching the same repository every tick.</b> A
+ * bump writes the {@code maintenance/dependencies} branch and opens a release request; {@link
+ * PendingChanges} reads the pins on <i>main</i>, and main does not move until that release lands and
+ * the next scan re-reads it. The bump itself has ended, so {@code activeBump} is gone, so the very
+ * next tick saw the repository owed again and sent it — a second CI run that could only come back
+ * NOTHING_TO_DO, then a third, for as long as the window was open.
+ *
+ * <p>So a candidate is HELD when <b>the newest bump row for that group ended without failing</b> —
+ * SUCCEEDED or NOTHING_TO_DO — <b>and recorded the same set of changes it would carry now</b>. Same
+ * set, order-insensitive, compared on (ecosystem, name, from, to): the manifest path and the
+ * location are how an edit is applied, not what it is. A held candidate is not dispatched, stays in
+ * the owed set so {@link BumpOrder} keeps its consumers waiting, and keeps the window open — a night
+ * whose whole remaining chain is waiting on releases must not end early.
+ *
+ * <p><b>Nothing unwinds a hold, because nothing has to.</b> The release lands, a scan re-reads main,
+ * the pending set empties and the repository stops being a candidate at all — there is no expiry, no
+ * timer and no state to reconcile. If the release never lands, the six-hour window expiring is the
+ * backstop, and the next night starts from whatever main actually says. A FAILED bump holds nothing:
+ * a failure has to be retryable, and a changed pending set holds nothing either — a new upstream
+ * release arrived, and that is a different bump.
  *
  * <p><b>The window lives in memory and a restart drops it.</b> That is deliberate and it is the
  * cheap correct answer: a process that is down at 02:00 misses the night today too, the state is
@@ -186,6 +211,11 @@ public class BumpDispatcher {
 
     Optional<BumpOrder.Pick> pick = BumpOrder.next(candidates, artifacts.producers());
     if (pick.isEmpty()) {
+      // Everything owed is waiting on a release that has already been asked for. An ordinary state
+      // and not a stall: DEBUG, no cycle break, and the window stays open for what comes after it.
+      LOG.debugf(
+          "All %d owed bump(s) are waiting on a release of their own branch; nothing is dispatched.",
+          candidates.size());
       return Optional.empty();
     }
     return dispatch(pick.get(), candidates.size());
@@ -226,6 +256,15 @@ public class BumpDispatcher {
    * something is pending, no writer on that branch — and they are applied here rather than there
    * because they are now a question asked every fifteen seconds instead of once a night. See {@code
    * BumpSchedule} for why each of them is a skip rather than a failure.
+   *
+   * <p><b>The last of them is a flag rather than a skip.</b> A repository whose branch is already
+   * pushed and waiting on a release is still owed — see this class's javadoc — so it is returned
+   * {@linkplain BumpOrder.Candidate#held() held} instead of being dropped: dropping it would let its
+   * consumers go early and would let the window close on a chain that is only half sent.
+   *
+   * <p>One extra row read per candidate per tick, and only for the repositories that got as far as
+   * having something pending — at roughly fifty repositories that is cheaper than the CI run a
+   * single re-dispatch costs.
    */
   public List<BumpOrder.Candidate> candidates() {
     String group = GroupConfig.DEFAULT_GROUP;
@@ -252,8 +291,50 @@ public class BumpDispatcher {
       if (store.activeBump(row.name, group).isPresent()) {
         continue;
       }
-      candidates.add(new BumpOrder.Candidate(row.name, group, changes));
+      candidates.add(
+          new BumpOrder.Candidate(row.name, group, changes, held(row.name, group, changes)));
     }
     return List.copyOf(candidates);
+  }
+
+  /**
+   * Whether this group's branch has already been bumped for exactly these changes and is waiting on
+   * the release that will move main.
+   */
+  private boolean held(String repository, String group, List<Change> pending) {
+    Optional<MtBump> newest = store.newestBump(repository, group);
+    if (newest.isEmpty()) {
+      return false;
+    }
+    MtBump bump = newest.get();
+    BumpStatus status = BumpStatus.valueOf(bump.status);
+    if (status != BumpStatus.SUCCEEDED && status != BumpStatus.NOTHING_TO_DO) {
+      // REQUESTED and RUNNING never reach here — an active bump is a skip above — and FAILED must
+      // stay retryable: the branch it was going to push is not there to be released.
+      return false;
+    }
+    return sameChanges(BumpService.changes(bump), pending);
+  }
+
+  /**
+   * Whether two change lists ask for the same thing, order-insensitively.
+   *
+   * <p><b>Compared on (ecosystem, name, from, to) and not on the whole record.</b> Those four are
+   * what the bump is FOR; {@code manifestPath} and {@code location} say how the edit is applied and
+   * a scan that re-read the same repository can legitimately spell them differently — a pin that
+   * moved file, a property that became an element — without any dependency having moved. Comparing
+   * those too would report a new bump every time a manifest was reshaped, which is the
+   * re-dispatch loop this exists to stop.
+   */
+  private static boolean sameChanges(List<Change> recorded, List<Change> pending) {
+    return keys(recorded).equals(keys(pending));
+  }
+
+  private static Set<String> keys(List<Change> changes) {
+    Set<String> keys = new LinkedHashSet<>();
+    for (Change change : changes) {
+      keys.add(change.ecosystem() + " " + change.name() + " " + change.from() + " " + change.to());
+    }
+    return keys;
   }
 }
