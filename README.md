@@ -229,6 +229,27 @@ uses — hands out **one bump per tick**, in this order:
 | owed | is anything a candidate | **the window closes** — the ordinary ending |
 | qits-ci | `GET /ci/api/runs/active`, every entry counted | wait |
 
+**A repository whose branch is pushed is HELD — and a hold asks what became of its release.** Pending
+is read off the pins on `main`, and main does not move until the release lands, so a bumped
+repository is still owed by every measurement here: held keeps it out of the pick, keeps it blocking
+its consumers, and keeps the window open. That rests on the release being on its way, and on
+2026-09-10 it was not — one repository's release request was REJECTED for a red gating build at
+07:14, and four hours later the window was still open, qits-ci idle, that repository the only thing
+owed, nothing dispatched and nothing saying why. So the hold reads the request
+(`ReleaseRequestClient.state`): PENDING, READY and RELEASED hold; REJECTED, FAILED, CONFLICTED and
+WITHDRAWN make the candidate **stalled** — dropped from the night, so its consumers go and the window
+can close — and an unreadable answer holds, like an unreadable CI queue. It is asked again every
+tick and never stored as a verdict, because qits-projects re-arms a rejection on the next merged sha;
+`bump.dispatch.release-state-ttl` (60s) is how long one answer is reused, and `mt_bump.release_state`
+is what a reader sees.
+
+**`GET /bumps/window` answers WHY, not just whether.** Beside `openedAt`/`closesAt` it carries the
+tick's own reasoning as the read finds it — `outcome`, the in-flight and CI counts, how many are owed
+and held, every stalled repository with qits-projects' sentence about it, and what would go next.
+Three investigations on this gate had to reconstruct "pending bumps, no builds" out of three
+services' logs; the gate knows the answer at the moment it decides, and this is it said out loud.
+Nothing on that read closes a window or dispatches anything.
+
 **Both counts are compared against `bump.dispatch.max-in-flight`.** At its default of 1 that is the
 request in its plain form: an empty CI queue and nothing of ours outstanding. **An unreadable
 listing is BUSY, never empty** — a gate that read "I could not ask" as "nothing is going" would fire
@@ -745,6 +766,7 @@ environment without a rebuild.
 | `qits.maintenance.bump.poll-interval` | `15s` | how often an unfinished bump is looked at — and how often a dispatch is considered |
 | `qits.maintenance.bump.dispatch.gated` | `true` | one bump at a time against an idle qits-ci. `false` restores the old fire-everything loop |
 | `qits.maintenance.bump.dispatch.max-in-flight` | `1` | what "idle" means, compared to BOTH our unfinished bumps and qits-ci's whole active listing. Floored at 1 |
+| `qits.maintenance.bump.dispatch.release-state-ttl` | `60s` | how long qits-projects' answer about ONE release request is reused before a held candidate asks again. `0` asks every tick |
 | `qits.maintenance.bump.internal.window` | `6h` | the ceiling on how long after 02:00 a branch may still arrive. It closes early the moment nothing is owed |
 | `qits.maintenance.environment` | `dev` | which environment's CI is recorded on a bump row |
 | `qits.auth.machine.audience` | `qits-platform-maintenance` | this service's own id at qits-platform-idp |

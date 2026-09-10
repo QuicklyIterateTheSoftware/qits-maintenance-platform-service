@@ -1,17 +1,64 @@
 package eu.wohlben.qits.maintenance.dto;
 
 import java.time.Instant;
+import java.util.List;
 
 /**
- * The dispatch window, as {@code GET /bumps/window} serves it.
+ * The dispatch window, as {@code GET /bumps/window} serves it — <b>and the reason nothing is being
+ * dispatched, which is the question this door is actually opened for.</b>
  *
  * <p><b>{@code open} is not a stored column</b> — it is {@code closesAt} against the clock, which is
  * the same comparison the tick makes. A row whose window has expired but which no tick has reached
  * yet is a real state and this reports it honestly: {@code closesAt} in the past, {@code open}
  * false.
  *
+ * <p><b>Everything from {@code outcome} down is the tick's own reasoning, computed on the read and
+ * changing nothing.</b> Three separate investigations on this ticket had to reconstruct "there are
+ * pending bumps and no builds" out of this service's logs, qits-ci's run listing and qits-projects'
+ * release requests, and the fourth was a stalled release nothing reported at all. The gate knows
+ * why it is not dispatching at the moment it decides not to; this is that answer, said out loud.
+ *
  * @param openedAt when the cron — or the button — opened it
  * @param closesAt when it ends
  * @param open whether anything would be dispatched right now
+ * @param outcome which gate answered: {@code NO_WINDOW}, {@code WINDOW_OVER}, {@code DISABLED},
+ *     {@code IN_FLIGHT}, {@code NOTHING_OWED}, {@code ALL_STALLED}, {@code CI_UNREADABLE}, {@code
+ *     CI_BUSY}, {@code WAITING_ON_RELEASES} or {@code DISPATCH}
+ * @param summary the same thing as a sentence
+ * @param inFlight bumps of this service's that have not ended, null when the gate answered before
+ *     asking
+ * @param allowed how many may be in flight — {@code bump.dispatch.max-in-flight}
+ * @param ciActive what qits-ci's active listing holds, null when it was not asked or would not
+ *     answer
+ * @param owed repositories owed a bump that could still be sent one
+ * @param held how many of those are waiting on a release of their own branch
+ * @param stalled the ones waiting on a release that has STOPPED — these are not owed any more as
+ *     far as the dispatcher is concerned, and each one names the request and what qits-projects said
+ * @param next what would be dispatched right now, null when nothing would be
  */
-public record BumpWindowDto(Instant openedAt, Instant closesAt, boolean open) {}
+public record BumpWindowDto(
+    Instant openedAt,
+    Instant closesAt,
+    boolean open,
+    String outcome,
+    String summary,
+    Integer inFlight,
+    Integer allowed,
+    Integer ciActive,
+    int owed,
+    int held,
+    List<StalledBumpDto> stalled,
+    String next) {
+
+  /**
+   * One repository owed a bump whose release has stopped.
+   *
+   * @param repository the repository
+   * @param group the group whose branch is waiting
+   * @param releaseRequestId the request in qits-projects, null when the ask itself was refused
+   * @param state REJECTED, FAILED, CONFLICTED, WITHDRAWN — or REFUSED for the ask
+   * @param reason that service's sentence, usually the gating run that went red
+   */
+  public record StalledBumpDto(
+      String repository, String group, String releaseRequestId, String state, String reason) {}
+}

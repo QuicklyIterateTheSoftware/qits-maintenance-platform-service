@@ -803,6 +803,30 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
   }
 
   /**
+   * Records what qits-projects last said about the release request this bump opened.
+   *
+   * <p><b>Bookkeeping for a reader, never a gate.</b> The dispatcher acts on the answer it has just
+   * received and writes it here so that a bump standing since the morning explains itself in the
+   * listing; see {@link MtBump#releaseState}. A row whose state has not moved is still re-stamped,
+   * because "when was this last true" is half of what the column is worth.
+   */
+  @ActivateRequestContext
+  public void bumpReleaseState(UUID id, String state, String detail, Instant at) {
+    DbRetry.runInNewTx(
+        "record the release state of bump " + id,
+        () -> {
+          MtBump row = MtBump.findById(id);
+          if (row == null) {
+            return;
+          }
+          row.releaseState = state;
+          row.releaseDetail = detail;
+          row.releaseStateAt = at;
+          getEntityManager().flush();
+        });
+  }
+
+  /**
    * Every bump that pushed a branch and has not settled its release ask — what the sweep re-attempts.
    *
    * <p>Bounded by construction rather than by a limit: every outcome of the ask writes the column, so

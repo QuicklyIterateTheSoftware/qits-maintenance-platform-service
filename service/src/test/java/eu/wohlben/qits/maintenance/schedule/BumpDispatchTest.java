@@ -255,6 +255,123 @@ class BumpDispatchTest {
   }
 
   /**
+   * <b>THE FOURTH LIVE FAILURE: A HOLD THAT WAITS FOR A RELEASE THAT IS NOT COMING.</b> On
+   * 2026-09-10 the night's twentieth bump pushed its branch at 07:05 and its release request was
+   * REJECTED nine minutes later — the repository's gating build does not compile. Four hours on, the
+   * window was still open, qits-ci was idle, that one repository was the only thing owed, nothing
+   * had been dispatched since 10:54, and no line anywhere said why. A dead release and a release in
+   * flight were the same state, and a dead one holds for ever.
+   *
+   * <p>Three assertions, one fact each: it is not dispatched again (the branch already carries the
+   * change, so a fresh bump could only answer NOTHING_TO_DO), it is <b>not a candidate at all</b> —
+   * so it stops holding its consumers back — and the window therefore <b>closes</b>, because a night
+   * must not stay open for work that cannot be done.
+   */
+  @Test
+  void aBumpWhoseReleaseWasRejectedStopsBeingWaitedOnAndSaysSo() {
+    Fixture.scriptCiQueueEmpty(peers);
+    dispatcher.open(Instant.now());
+
+    UUID id = dispatcher.tick().orElseThrow();
+    queue.awaitIdle(Duration.ofSeconds(30));
+    store.bumpFinished(id, BumpStatus.SUCCEEDED, "SUCCESS", "pushed", Instant.now());
+    store.bumpReleaseAsked(id, "rr-rejected", "the release request rr-rejected is PENDING");
+    Fixture.scriptReleaseRequestState(
+        peers, "rr-rejected", "REJECTED", "Gating run 3248b7f4 finished FAILED");
+
+    BumpDispatcher.Decision decision = dispatcher.explain(Instant.now());
+    assertEquals("ALL_STALLED", decision.outcome());
+    assertEquals(0, decision.owed(), "a release that has stopped is not work this gate can do");
+    assertEquals(1, decision.stalled().size());
+    assertEquals(Fixture.REPOSITORY, decision.stalled().get(0).repository());
+    assertEquals("REJECTED", decision.stalled().get(0).state());
+    assertTrue(
+        decision.stalled().get(0).reason().contains("3248b7f4"),
+        "and it carries qits-projects' own sentence, which is the failing gating run");
+
+    assertTrue(dispatcher.tick().isEmpty());
+    assertEquals(1, store.bumps(Fixture.REPOSITORY, 50).size(), "no second, pointless CI run");
+    assertFalse(
+        dispatcher.windowOpen(Instant.now()),
+        "and the night ends rather than standing open on a build that needs a person");
+  }
+
+  /**
+   * <b>The ordinary case is unchanged, and that is the half worth pinning.</b> A release that is
+   * still PENDING is exactly what a hold is for: not dispatched, still owed, window still open.
+   */
+  @Test
+  void aReleaseStillOnItsWayHoldsExactlyAsItDidBefore() {
+    Fixture.scriptCiQueueEmpty(peers);
+    dispatcher.open(Instant.now());
+
+    UUID id = dispatcher.tick().orElseThrow();
+    queue.awaitIdle(Duration.ofSeconds(30));
+    store.bumpFinished(id, BumpStatus.SUCCEEDED, "SUCCESS", "pushed", Instant.now());
+    store.bumpReleaseAsked(id, "rr-open", "the release request rr-open is PENDING");
+    Fixture.scriptReleaseRequestState(peers, "rr-open", "PENDING", null);
+
+    assertTrue(dispatcher.tick().isEmpty());
+    assertEquals(1, store.bumps(Fixture.REPOSITORY, 50).size());
+    assertTrue(dispatcher.windowOpen(Instant.now()), "something is still coming");
+    assertEquals(
+        "PENDING",
+        store.bump(id).orElseThrow().releaseState,
+        "and what was read is on the row, so a bump standing for hours explains itself");
+  }
+
+  /**
+   * <b>UNREADABLE IS NOT STALLED</b>, the same ruling the CI queue gets one gate down: a peer that
+   * could not be asked is evidence about nothing. Reading it as "the release has stopped" would drop
+   * a repository out of the night — and let its consumers build against the old pin — because
+   * qits-projects restarted.
+   */
+  @Test
+  void aReleaseRequestThatCannotBeReadIsHeldRatherThanStalled() {
+    Fixture.scriptCiQueueEmpty(peers);
+    dispatcher.open(Instant.now());
+
+    UUID id = dispatcher.tick().orElseThrow();
+    queue.awaitIdle(Duration.ofSeconds(30));
+    store.bumpFinished(id, BumpStatus.SUCCEEDED, "SUCCESS", "pushed", Instant.now());
+    store.bumpReleaseAsked(id, "rr-silent", "the release request rr-silent is PENDING");
+    Fixture.scriptReleaseRequestStateUnreachable(peers, "rr-silent");
+
+    BumpDispatcher.Decision decision = dispatcher.explain(Instant.now());
+    assertEquals(1, decision.owed());
+    assertEquals(1, decision.held());
+    assertTrue(decision.stalled().isEmpty());
+    assertTrue(dispatcher.tick().isEmpty());
+    assertTrue(dispatcher.windowOpen(Instant.now()));
+  }
+
+  /**
+   * <b>A stall is not a verdict.</b> qits-projects re-arms REJECTED back to PENDING on the next
+   * merged sha — a push to the branch, a sibling's release, a pending tag reaching main — so the
+   * answer is asked again on every tick and a request that came back to life is held again with
+   * nothing to unwind. Recording the rejection would have kept the repository out of every night
+   * after the thing that rejected it was fixed.
+   */
+  @Test
+  void aRejectionThatIsReArmedIsWaitedOnAgain() {
+    Fixture.scriptCiQueueEmpty(peers);
+    dispatcher.open(Instant.now());
+
+    UUID id = dispatcher.tick().orElseThrow();
+    queue.awaitIdle(Duration.ofSeconds(30));
+    store.bumpFinished(id, BumpStatus.SUCCEEDED, "SUCCESS", "pushed", Instant.now());
+    store.bumpReleaseAsked(id, "rr-rearmed", "the release request rr-rearmed is PENDING");
+    Fixture.scriptReleaseRequestState(peers, "rr-rearmed", "REJECTED", "a red gate");
+    assertEquals(1, dispatcher.explain(Instant.now()).stalled().size());
+
+    // Somebody pushes the fix; the fold re-arms.
+    Fixture.scriptReleaseRequestState(peers, "rr-rearmed", "PENDING", null);
+    BumpDispatcher.Decision decision = dispatcher.explain(Instant.now());
+    assertTrue(decision.stalled().isEmpty());
+    assertEquals(1, decision.held(), "held again, with no state of ours to undo");
+  }
+
+  /**
    * <b>THE HOLD IS ON THE CHANGES, NOT ON THE REPOSITORY.</b> An upstream released while the first
    * branch was waiting, so the pending set is no longer the set that was sent — that is a different
    * bump, and refusing it would sit on a genuinely new version until the window expired.

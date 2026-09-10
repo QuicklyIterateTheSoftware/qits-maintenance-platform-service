@@ -1,0 +1,42 @@
+-- WHAT BECAME OF THE RELEASE A BUMP ASKED FOR — the missing half of the dispatch hold.
+--
+-- V4 gave a bump the id of the release request it opened. Nothing ever read that id back, because
+-- nothing had to: the ask was the end of the bump's job and qits-projects' own row was the record.
+--
+-- The gated dispatcher made it something to read. A bump writes a `maintenance/<group>` branch;
+-- pending is computed from the pins on `main`; main does not move until the release lands. So
+-- between the two the repository is still owed, and the dispatcher HOLDS it — never re-sent, still
+-- blocking its consumers, still keeping the night's window open — on the assumption that the
+-- release is on its way.
+--
+-- Measured live on 2026-09-10, and the assumption is not always true:
+--
+--   07:05:30  qits-deployments-platform-service bumped SUCCEEDED, branch pushed, request opened
+--   07:14:05  that release request REJECTED — its gating build fails to compile
+--   11:20     the window still open, qits-ci idle, that one repository owed, nothing dispatched
+--             at all, and no line anywhere saying why
+--
+-- A dead release and a release in flight were the same state to this service, and the dead one held
+-- for ever: nothing unwinds a hold except main moving, and main was never going to move. The estate
+-- stopped on one red build with nothing to point at.
+--
+-- So the dispatcher asks qits-projects what became of the request, and a request that is going
+-- nowhere makes its candidate STALLED rather than held: dropped from the dispatch set, so its
+-- consumers stop waiting on it and the window stops staying open for it, and reported with the
+-- reason on the window's own door.
+--
+-- THESE COLUMNS ARE THE OBSERVATION, NOT THE GATE. The gate re-asks on every tick and acts on the
+-- answer it just got. What is stored here is what a person needs when they open a bump that has been
+-- standing since this morning: the state, that service's sentence about it, and when it was read.
+-- Storing it as a verdict would be wrong in a way that matters — qits-projects re-arms REJECTED,
+-- FAILED and CONFLICTED back to PENDING on the next merged sha (a push to the branch, a sibling's
+-- release, a pending tag reaching main) — so a frozen REJECTED would keep a repository out of every
+-- night after the thing that rejected it had been fixed.
+--
+-- Nullable with no backfill and no check constraint: every bump that predates this has never been
+-- asked about, which is exactly what null says, and the state vocabulary is another service's enum
+-- and grows without asking this one.
+
+alter table mt_bump add column release_state varchar(32);
+alter table mt_bump add column release_detail text;
+alter table mt_bump add column release_state_at timestamp(6) with time zone;

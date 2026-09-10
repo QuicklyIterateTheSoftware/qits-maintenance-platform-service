@@ -10,6 +10,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Set;
 
 /**
  * The release ask: the one call this service makes to qits-projects that is not a read, and the
@@ -22,8 +23,13 @@ import java.nio.charset.StandardCharsets;
  * default branch, this branch and every released tag still in flight onto {@code release/<id>},
  * settles the quality gates against that fold, and the Auto Release arm tags it once they pass.
  * <b>The train's job ends here.</b> What became of the request is qits-projects' to finish and
- * {@code SCMRelease} on the bus to announce, and this service deliberately does not poll it — two
+ * {@code SCMRelease} on the bus to announce, and this service does not poll its progress — two
  * mechanisms watching one fact would be two ways to disagree about it.
+ *
+ * <p><b>{@link #state} is the one exception and it asks a different question.</b> Not "how far along
+ * is the release" but "is this request still one my bump can wait for" — the question the dispatch
+ * hold rests on, which nothing on the bus answers: a rejection is a state change on a row over
+ * there and publishes no event at all. See that method for the failure it was written for.
  *
  * <p><b>It replaces qits-workspaces' release door</b>, which this service called until the door was
  * removed. The door was synchronous in shape — it took an {@code expectedSha}, answered a request id
@@ -197,6 +203,88 @@ public class ReleaseRequestClient {
         "qits-projects could not be reached ("
             + answer.failure()
             + "); the branch is pushed and the next sweep asks again");
+  }
+
+  /**
+   * What qits-projects says has become of one release request.
+   *
+   * @param state the state verbatim — {@code PENDING}, {@code READY}, {@code RELEASED}, {@code
+   *     REJECTED}, {@code FAILED}, {@code CONFLICTED}, {@code WITHDRAWN} — or null when it could not
+   *     be read
+   * @param detail that service's own sentence about why, when it has one ({@code detail}, or the
+   *     conflict when the fold is what failed)
+   * @param error why it could not be read, or null
+   */
+  public record ReleaseState(String state, String detail, String error) {
+
+    /** The states in which a release is still on its way, or has already arrived. */
+    private static final Set<String> COMING = Set.of("PENDING", "READY", "RELEASED");
+
+    /** Whether qits-projects answered at all. */
+    public boolean readable() {
+      return state != null;
+    }
+
+    /**
+     * <b>Whether nothing is coming from this request as it stands.</b> Red gates, a mechanical
+     * failure, a fold that will not apply, an explicit withdrawal — none of them moves {@code main},
+     * so a bump waiting on one is waiting for something that has stopped happening.
+     *
+     * <p><b>It is not a verdict for ever, and must never be recorded as one.</b> qits-projects
+     * re-arms REJECTED, FAILED and CONFLICTED back to PENDING on the next merged sha — a push to the
+     * branch, a sibling's release, a pending tag reaching main — so this question is asked again on
+     * every tick and a request that comes back to life is simply held again.
+     *
+     * <p>An unreadable answer is <b>not</b> stalled: it is a peer that could not be asked, and the
+     * safe reading of that is the one the whole gate takes elsewhere — carry on waiting.
+     */
+    public boolean stalled() {
+      return state != null && !COMING.contains(state);
+    }
+
+    /** The sentence a person reads: the state, and what that service said about it. */
+    public String sentence() {
+      if (state == null) {
+        return error == null ? "the release request could not be read" : error;
+      }
+      return detail == null || detail.isBlank() ? state : state + ": " + detail;
+    }
+  }
+
+  /**
+   * What became of one release request — <b>the one read this service makes about a request it
+   * opened</b>, and the only thing that can end a hold.
+   *
+   * <p><b>This is not the polling the class header rules out, and the difference is which question
+   * is asked.</b> Watching a request's progress would be a second mechanism racing qits-projects'
+   * own; this asks whether the thing a bump is <i>waiting for</i> still exists. A bump that pushed a
+   * branch stays owed until the release lands on main, and until 2026-09-10 nothing here could tell
+   * "the release is coming" from "the release was rejected four hours ago" — so a repository whose
+   * gating build fails was held for ever, held its consumers behind it, and kept the night's window
+   * open dispatching nothing. The estate stopped with one red build and said nothing. That is the
+   * whole reason this method exists, and the answer is deliberately never stored as a verdict.
+   *
+   * @param repoId the repository as qits-projects ids it — {@code mt_repository.catalog_id}
+   * @param requestId the request this bump recorded
+   */
+  public ReleaseState state(String repoId, String requestId) {
+    String path =
+        REQUESTS_PATH_PREFIX + encode(repoId) + REQUESTS_PATH_SUFFIX + "/" + encode(requestId);
+    PeerAnswer answer = peers.get(PeerTarget.PROJECTS, path).answer();
+    if (!answer.ok()) {
+      // A 404 is not "stalled" either. A request qits-projects no longer holds is a fact this
+      // service cannot act on, and guessing at it would re-dispatch a branch that may be released.
+      return new ReleaseState(
+          null, null, "the release request " + requestId + " could not be read: " + answer.failure());
+    }
+    JsonNode request = answer.json() == null ? null : answer.json().get("request");
+    String state = text(request, "state");
+    if (state == null) {
+      return new ReleaseState(
+          null, null, "the release request " + requestId + " answered no state");
+    }
+    String detail = text(request, "detail");
+    return new ReleaseState(state, detail == null ? text(request, "conflict") : detail, null);
   }
 
   /**

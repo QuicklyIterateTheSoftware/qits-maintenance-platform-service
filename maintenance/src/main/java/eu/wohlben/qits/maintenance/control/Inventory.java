@@ -1,5 +1,6 @@
 package eu.wohlben.qits.maintenance.control;
 
+import eu.wohlben.qits.maintenance.bump.BumpDispatcher;
 import eu.wohlben.qits.maintenance.bump.BumpService;
 import eu.wohlben.qits.maintenance.dto.BumpDto;
 import eu.wohlben.qits.maintenance.dto.BumpWindowDto;
@@ -54,6 +55,8 @@ public class Inventory {
   @Inject MaintenanceStore store;
 
   @Inject BumpService bumps;
+
+  @Inject BumpDispatcher dispatcher;
 
   /** The other half of the dependency picture — what the releases CONTAIN. See {@link ArtifactGraph}. */
   @Inject ArtifactGraph graph;
@@ -262,11 +265,42 @@ public class Inventory {
    * <p>{@code open} is computed here rather than stored: a row whose {@code closesAt} has passed but
    * which no tick has reached yet is a real state, and reporting it as open would be a lie a reader
    * could act on.
+   *
+   * <p><b>The read runs the tick's own reasoning and acts on none of it</b> — {@link
+   * BumpDispatcher#explain} — so that "there are pending bumps and nothing is queued" has an answer
+   * at the door rather than in three services' logs. It costs what a tick costs: the candidate walk,
+   * one listing read from qits-ci and, for a held candidate, one release-request read (inside its
+   * ttl, usually a cache hit). Nothing here closes a window and nothing here dispatches.
    */
   public Optional<BumpWindowDto> bumpWindow(Instant now) {
     return store
         .bumpWindowRow()
-        .map(row -> new BumpWindowDto(row.openedAt, row.closesAt, now.isBefore(row.closesAt)));
+        .map(
+            row -> {
+              BumpDispatcher.Decision decision = dispatcher.explain(now);
+              return new BumpWindowDto(
+                  row.openedAt,
+                  row.closesAt,
+                  now.isBefore(row.closesAt),
+                  decision.outcome(),
+                  decision.summary(),
+                  decision.inFlight(),
+                  decision.allowed(),
+                  decision.ciActive(),
+                  decision.owed(),
+                  decision.held(),
+                  decision.stalled().stream()
+                      .map(
+                          one ->
+                              new BumpWindowDto.StalledBumpDto(
+                                  one.repository(),
+                                  one.group(),
+                                  one.requestId(),
+                                  one.state(),
+                                  one.reason()))
+                      .toList(),
+                  decision.pick() == null ? null : decision.pick().candidate().repository());
+            });
   }
 
   public ScanDto scan(UUID id) {
@@ -344,6 +378,9 @@ public class Inventory {
         row.finishedAt,
         row.message,
         row.releaseRequestId,
+        row.releaseState,
+        row.releaseDetail,
+        row.releaseStateAt,
         BumpService.changes(row));
   }
 }

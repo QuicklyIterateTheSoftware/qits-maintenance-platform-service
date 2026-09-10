@@ -316,6 +316,33 @@ public final class Fixture {
                 + "\"detail\":null,\"version\":null,\"retryable\":false}}"));
   }
 
+  /**
+   * qits-projects answers what became of one request — the read the dispatch hold rests on.
+   *
+   * <p>Keyed on the request's own path, which is the collection's plus the id: the POST that opens a
+   * request and the GET that asks after it are two routes, and a fixture arming only the first is
+   * what a hold that never asked looked like.
+   */
+  public static void scriptReleaseRequestState(
+      FakePeers peers, String requestId, String state, String detail) {
+    peers.answer(
+        PeerTarget.PROJECTS,
+        RELEASE_REQUESTS_PATH + "/" + requestId,
+        FakePeers.Scripted.ok(
+            "{\"request\":{\"id\":\"" + requestId + "\",\"repoId\":\"" + CATALOG_ID
+                + "\",\"state\":\"" + state + "\",\"detail\":"
+                + (detail == null ? "null" : "\"" + detail + "\"")
+                + ",\"version\":null,\"retryable\":false}}"));
+  }
+
+  /** …and does not answer at all, which must never be read as "the release has stopped". */
+  public static void scriptReleaseRequestStateUnreachable(FakePeers peers, String requestId) {
+    peers.answer(
+        PeerTarget.PROJECTS,
+        RELEASE_REQUESTS_PATH + "/" + requestId,
+        FakePeers.Scripted.unreachable("connection refused"));
+  }
+
   /** qits-projects answers something else — a 5xx, a refusal, an auth failure. */
   public static void scriptReleaseRequestAnswers(FakePeers peers, int status, String body) {
     peers.answer(

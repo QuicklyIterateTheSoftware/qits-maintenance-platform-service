@@ -43,6 +43,9 @@ public class MaintenanceConfig {
   @ConfigProperty(name = "qits.maintenance.bump.internal.window")
   Duration bumpWindow;
 
+  @ConfigProperty(name = "qits.maintenance.bump.dispatch.release-state-ttl")
+  Duration bumpReleaseStateTtl;
+
   @ConfigProperty(name = "qits.maintenance.internal.maven-groups")
   List<String> internalMavenGroups;
 
@@ -135,6 +138,21 @@ public class MaintenanceConfig {
    */
   public Duration bumpWindow() {
     return bumpWindow == null ? Duration.ofHours(6) : bumpWindow;
+  }
+
+  /**
+   * How long qits-projects' answer about one release request is reused before it is asked again.
+   *
+   * <p>The dispatcher asks that question of every HELD candidate on every tick — "is the release
+   * this branch is waiting for still coming" — and a chain waiting on ten releases would make ten
+   * calls every fifteen seconds for hours. Never negative, and zero is honoured: it means ask every
+   * tick, which is what a suite that drives ticks back to back wants.
+   */
+  public Duration bumpReleaseStateTtl() {
+    if (bumpReleaseStateTtl == null || bumpReleaseStateTtl.isNegative()) {
+      return Duration.ofMinutes(1);
+    }
+    return bumpReleaseStateTtl;
   }
 
   /**
