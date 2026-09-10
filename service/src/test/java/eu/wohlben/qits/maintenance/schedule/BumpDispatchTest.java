@@ -81,7 +81,7 @@ class BumpDispatchTest {
     assertFalse(bumped());
     assertFalse(
         peers.called(PeerTarget.CI, CiClient.ACTIVE_RUNS_PATH),
-        "and nothing was asked of qits-ci: outside a window this costs one field read");
+        "and nothing was asked of qits-ci: outside a window this costs one row read");
   }
 
   /** The whole point: a busy qits-ci is not handed another build. */
@@ -213,6 +213,45 @@ class BumpDispatchTest {
 
     assertTrue(dispatcher.tick().isPresent(), "a failure must stay retryable");
     assertEquals(2, store.bumps(Fixture.REPOSITORY, 50).size());
+  }
+
+  /**
+   * <b>THE SECOND LIVE FAILURE: THE NIGHT MUST SURVIVE THIS SERVICE'S OWN REDEPLOY.</b> On
+   * 2026-09-10 nineteen bumps went out one at a time from 06:32, and one of them was the bump of
+   * {@code qits-maintenance-platform-service} itself. It succeeded at 08:01, its release deployed at
+   * 08:11, the container was replaced — and with the window held in a field, the night ended there:
+   * eleven repositories owed, four hours of window left, and no cron until 02:00.
+   *
+   * <p><b>So this test never calls {@link BumpDispatcher#open}.</b> The window is written to the
+   * store as a previous process left it, and the dispatcher — which is what a restarted one is —
+   * picks the night up from the row.
+   */
+  @Test
+  void aWindowOpenedBeforeARestartIsResumedFromTheStore() {
+    Fixture.scriptCiQueueEmpty(peers);
+    Instant now = Instant.now();
+    store.openBumpWindow(now.minus(Duration.ofHours(2)), now.plus(Duration.ofHours(4)));
+
+    assertTrue(dispatcher.windowOpen(now), "the row is the window; the field was only a cache");
+    assertTrue(dispatcher.tick().isPresent(), "the night carries on where the last process left it");
+    assertTrue(bumped());
+  }
+
+  /**
+   * <b>And resuming is not the same as never ending.</b> A service that was down for the whole six
+   * hours comes back to a window that is already over, and the first tick shuts it rather than
+   * dispatching a night's worth of bumps at whatever hour it happened to start.
+   */
+  @Test
+  void aWindowThatExpiredWhileTheServiceWasDownIsClosedOnTheFirstTick() {
+    Fixture.scriptCiQueueEmpty(peers);
+    Instant now = Instant.now();
+    store.openBumpWindow(now.minus(Duration.ofHours(7)), now.minus(Duration.ofHours(1)));
+
+    assertFalse(dispatcher.windowOpen(now));
+    assertTrue(dispatcher.tick().isEmpty());
+    assertFalse(bumped(), "02:00's window does not get to fire at 09:00");
+    assertTrue(store.bumpWindow().isEmpty(), "and the row is gone rather than re-read every tick");
   }
 
   /**

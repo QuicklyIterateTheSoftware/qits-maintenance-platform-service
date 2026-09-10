@@ -7,6 +7,7 @@ import eu.wohlben.qits.maintenance.entity.MtArtifactComponent;
 import eu.wohlben.qits.maintenance.entity.MtArtifactEdge;
 import eu.wohlben.qits.maintenance.entity.MtBranch;
 import eu.wohlben.qits.maintenance.entity.MtBump;
+import eu.wohlben.qits.maintenance.entity.MtBumpWindow;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
@@ -886,6 +887,60 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
                             repository,
                             group)
                         .firstResult()));
+  }
+
+  // --- the dispatch window --------------------------------------------------------------------
+
+  /**
+   * When the open dispatch window ends, or empty when there is no window.
+   *
+   * <p><b>A read per tick rather than a field read.</b> Outside a window this is the whole cost of
+   * the dispatch schedule — one primary-key lookup of one row every fifteen seconds, four thousand
+   * a day, which is less than the poller beside it does in an hour. What it buys is the window
+   * surviving the redeploy that this service's own bump causes; see {@link MtBumpWindow}.
+   */
+  @ActivateRequestContext
+  public Optional<Instant> bumpWindow() {
+    return DbRetry.inNewTx(
+        "read the bump dispatch window",
+        () ->
+            Optional.ofNullable((MtBumpWindow) MtBumpWindow.findById(MtBumpWindow.INTERNAL))
+                .map(row -> row.closesAt));
+  }
+
+  /** Opens the window, or replaces the one that is open. An upsert on the singleton key. */
+  @ActivateRequestContext
+  public void openBumpWindow(Instant now, Instant closes) {
+    DbRetry.runInNewTx(
+        "open the bump dispatch window",
+        () -> {
+          MtBumpWindow row = MtBumpWindow.findById(MtBumpWindow.INTERNAL);
+          boolean fresh = row == null;
+          if (fresh) {
+            row = new MtBumpWindow();
+            row.id = MtBumpWindow.INTERNAL;
+          }
+          row.openedAt = now;
+          row.closesAt = closes;
+          if (fresh) {
+            row.persist();
+          }
+          getEntityManager().flush();
+        });
+  }
+
+  /**
+   * Closes it. Deleting the row is what "no window" means, and calling this with none open is not
+   * an error — every one of the dispatcher's closing conditions may be reached twice.
+   */
+  @ActivateRequestContext
+  public void closeBumpWindow() {
+    DbRetry.runInNewTx(
+        "close the bump dispatch window",
+        () -> {
+          MtBumpWindow.deleteById(MtBumpWindow.INTERNAL);
+          getEntityManager().flush();
+        });
   }
 
   private static MtBump activeBumpRow(String repository, String group) {

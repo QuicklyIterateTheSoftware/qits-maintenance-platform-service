@@ -3,6 +3,7 @@ package eu.wohlben.qits.maintenance.bump;
 import eu.wohlben.qits.maintenance.config.MaintenanceConfig;
 import eu.wohlben.qits.maintenance.control.ArtifactGraph;
 import eu.wohlben.qits.maintenance.entity.MtBump;
+import eu.wohlben.qits.maintenance.entity.MtBumpWindow;
 import eu.wohlben.qits.maintenance.entity.MtGroup;
 import eu.wohlben.qits.maintenance.entity.MtLatest;
 import eu.wohlben.qits.maintenance.entity.MtPin;
@@ -24,7 +25,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicReference;
 import org.jboss.logging.Logger;
 
 /**
@@ -94,11 +94,25 @@ import org.jboss.logging.Logger;
  * a failure has to be retryable, and a changed pending set holds nothing either — a new upstream
  * release arrived, and that is a different bump.
  *
- * <p><b>The window lives in memory and a restart drops it.</b> That is deliberate and it is the
- * cheap correct answer: a process that is down at 02:00 misses the night today too, the state is
- * one instant that is worthless an hour later, and a table for it would be a schema change to
- * remember something the next cron re-derives. What a restart cannot lose is a bump — those are
- * rows, and {@code BumpPollSchedule} picks up whatever was in flight.
+ * <h2>The window is a ROW, because this service redeploys itself in the middle of one</h2>
+ *
+ * <p>It was first an {@code AtomicReference<Instant>} here, with a paragraph arguing that losing it
+ * to a restart was the cheap correct answer — a process down at 02:00 misses the night today too.
+ * <b>That was wrong, and wrong for a reason particular to this service: qits-maintenance is one of
+ * the repositories qits-maintenance bumps.</b> Measured live on 2026-09-10 — nineteen bumps
+ * dispatched one at a time from 06:32, then the bump of {@code qits-maintenance-platform-service}
+ * itself succeeded at 08:01, its release deployed at 08:11, the container was replaced, and nothing
+ * was dispatched again: eleven repositories owed, four hours of window left, and no cron until the
+ * next night. A restart mid-window is not this design's rare accident, it is its ordinary outcome,
+ * since a successful bump here becomes a release and a release becomes a redeploy of this
+ * container.
+ *
+ * <p>So the window is {@code mt_bump_window} — one row, {@link MtBumpWindow#INTERNAL}, deleted when
+ * it closes. A restart resumes the night where it was. What it does NOT do is make the window
+ * eternal: {@code closesAt} is compared with the clock exactly as the field was, so a window whose
+ * service was down for its whole six hours comes back already over and closes on its first tick.
+ * The cost is one primary-key read every fifteen seconds; see {@link
+ * eu.wohlben.qits.maintenance.persistence.MaintenanceStore#bumpWindow()}.
  */
 @ApplicationScoped
 public class BumpDispatcher {
@@ -115,9 +129,6 @@ public class BumpDispatcher {
 
   @Inject ArtifactGraph artifacts;
 
-  /** When the open window ends; null when there is no window and nothing is dispatched. */
-  private final AtomicReference<Instant> windowCloses = new AtomicReference<>();
-
   /**
    * Repositories whose request was REFUSED this window, and which are therefore not asked for
    * again until the next one.
@@ -126,6 +137,12 @@ public class BumpDispatcher {
    * that row, a group that vanished between the read and the call — is picked again every fifteen
    * seconds for the length of the window, and, being the bottom of the chain, it holds up
    * everything behind it. One WARN and move on is what the loop-and-fire did too.
+   *
+   * <p><b>This one stays in memory even though the window no longer does</b>, and a restart
+   * therefore forgives it. That is the right way round: a refusal is a guess that something is
+   * wrong with one repository right now, the process it was a guess about is gone, and the cost of
+   * being wrong is one CI run rather than a night that stops. The window is the opposite — losing
+   * it costs the whole remaining chain — which is exactly why only one of the two is a row.
    */
   private final Set<String> refused = new LinkedHashSet<>();
 
@@ -135,7 +152,7 @@ public class BumpDispatcher {
     synchronized (refused) {
       refused.clear();
     }
-    windowCloses.set(closes);
+    store.openBumpWindow(now, closes);
     LOG.infof(
         "The bump dispatch window is open until %s; one bump goes at a time, from the bottom of the"
             + " chain, whenever qits-ci is idle.",
@@ -144,15 +161,15 @@ public class BumpDispatcher {
 
   /** Closes it, saying why. Idempotent — a window that is already shut logs nothing. */
   public void close(String why) {
-    if (windowCloses.getAndSet(null) != null) {
+    if (store.bumpWindow().isPresent()) {
+      store.closeBumpWindow();
       LOG.infof("The bump dispatch window is closed: %s.", why);
     }
   }
 
   /** Whether anything would be dispatched at all right now. */
   public boolean windowOpen(Instant now) {
-    Instant closes = windowCloses.get();
-    return closes != null && now.isBefore(closes);
+    return store.bumpWindow().filter(now::isBefore).isPresent();
   }
 
   /**
@@ -163,10 +180,11 @@ public class BumpDispatcher {
    */
   public Optional<UUID> tick() {
     Instant now = Instant.now();
-    if (windowCloses.get() == null) {
+    Optional<Instant> closes = store.bumpWindow();
+    if (closes.isEmpty()) {
       return Optional.empty();
     }
-    if (!windowOpen(now)) {
+    if (!now.isBefore(closes.get())) {
       close("it ended with work still owed; the next schedule opens a new one");
       return Optional.empty();
     }

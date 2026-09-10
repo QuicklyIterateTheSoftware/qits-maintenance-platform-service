@@ -224,7 +224,7 @@ uses — hands out **one bump per tick**, in this order:
 
 | gate | question | when it is not met |
 |---|---|---|
-| the window | is the night open | nothing happens, and outside a window this costs one field read |
+| the window | is the night open | nothing happens, and outside a window this costs one row read |
 | in flight | how many bumps of ours are REQUESTED or RUNNING | wait; the window stays open |
 | owed | is anything a candidate | **the window closes** — the ordinary ending |
 | qits-ci | `GET /ci/api/runs/active`, every entry counted | wait |
@@ -238,9 +238,15 @@ the whole night at the one moment qits-ci is least able to say so.
 computed on every read anyway, so the tick after a bump releases sees its consumers' new pin instead
 of the one they were already going to get.
 
-**The window is in memory and a restart drops it.** Deliberate: it is one instant that is worthless
-an hour later, a process down at 02:00 misses the night today too, and every *bump* is a row — so
-nothing in flight is lost, only the permission to start more.
+**The window is a row (`mt_bump_window`), because this service redeploys itself in the middle of
+one.** It was a field, and the argument for that was that a process down at 02:00 misses the night
+today too. The argument does not hold here: qits-maintenance is one of the fifty repositories
+qits-maintenance bumps, so a successful bump of it becomes a release and a release becomes a
+redeploy of this container — a restart mid-window is the ordinary outcome of the window working, not
+a rare accident. Measured live on 2026-09-10: nineteen bumps dispatched one at a time from 06:32,
+this service's own release deployed at 08:11, and then nothing at all, with eleven repositories owed
+and four hours of window left. Persisting it resumes the night; it does not make it eternal, since
+`closes_at` is still compared with the clock and a window slept through comes back already over.
 
 ### Bottom of the chain first
 
