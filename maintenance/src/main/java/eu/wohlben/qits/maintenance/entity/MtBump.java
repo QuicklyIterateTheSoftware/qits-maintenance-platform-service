@@ -91,4 +91,25 @@ public class MtBump extends PanacheEntityBase {
    */
   @Column(name = "release_request_id", length = 255)
   public String releaseRequestId;
+
+  /**
+   * What qits-projects last said about that request — {@code PENDING}, {@code READY}, {@code
+   * RELEASED}, {@code REJECTED}, {@code FAILED}, {@code CONFLICTED}, {@code WITHDRAWN}.
+   *
+   * <p><b>A cached observation and never a verdict.</b> The dispatcher writes it when it asks,
+   * because a person reading a bump that has been standing for hours needs to see why; nothing gates
+   * on the column, and the gate re-asks. That matters because qits-projects re-arms a rejected
+   * request the moment its fold changes, so a stored REJECTED would be a stale reason to keep a
+   * repository out of the estate's nights for ever.
+   */
+  @Column(name = "release_state", length = 32)
+  public String releaseState;
+
+  /** That service's sentence about it — the failing gating run, the conflicting paths. */
+  @Column(name = "release_detail", columnDefinition = "text")
+  public String releaseDetail;
+
+  /** When the state above was last read. Null on a bump nothing has asked about. */
+  @Column(name = "release_state_at")
+  public Instant releaseStateAt;
 }

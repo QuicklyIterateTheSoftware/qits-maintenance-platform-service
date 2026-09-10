@@ -33,6 +33,12 @@ import java.util.UUID;
  *     or {@code converged} (there was nothing to hold on to), {@code refused} (a refusal a retry
  *     cannot fix — {@code message} says which), or null while the ask is still owed. Null for ever
  *     on a bump that pushed no branch
+ * @param releaseState what qits-projects last said about that request — PENDING, READY, RELEASED,
+ *     REJECTED, FAILED, CONFLICTED, WITHDRAWN — or null on a bump nothing has asked about. <b>An
+ *     observation and not a gate</b>: the dispatcher re-asks and acts on the fresh answer, because a
+ *     rejected request is re-armed to PENDING by the next merged sha
+ * @param releaseDetail that service's sentence about it — usually the gating run that went red
+ * @param releaseStateAt when the two above were read
  * @param changes the payload's changes, verbatim
  */
 public record BumpDto(
@@ -52,4 +58,7 @@ public record BumpDto(
     Instant finishedAt,
     String message,
     String releaseRequestId,
+    String releaseState,
+    String releaseDetail,
+    Instant releaseStateAt,
     List<Change> changes) {}

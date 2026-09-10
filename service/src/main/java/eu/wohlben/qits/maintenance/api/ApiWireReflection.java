@@ -63,8 +63,11 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       PinSourceDto.ArtifactPinDto.class,
       // BumpDto grew `releaseRequestId` with the release door, and the bump detail page reads it.
       BumpDto.class,
-      // The dispatch window's three verbs on /bumps/window.
+      // The dispatch window's three verbs on /bumps/window, and the diagnosis the GET carries: the
+      // stalled entries are a nested record and are their own registration, exactly as every other
+      // nested shape here is.
       BumpWindowDto.class,
+      BumpWindowDto.StalledBumpDto.class,
       ScanDto.class,
       Change.class,
       // The ad-hoc downstream closure and the adoption journey, which replaced the release trains'

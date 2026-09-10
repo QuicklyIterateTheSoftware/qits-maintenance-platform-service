@@ -741,11 +741,20 @@ Each is a decision, not an omission:
   lines. A migration is a person's job.
 - **Workspace creation.** Pushing the branch is the whole "merge request"; it is released through a
   qits-projects release request like any other branch — this service opens that request itself.
-- **Polling the release request.** qits-projects answers an id and this service stores it and stops.
-  This service's job ends at "request opened": the gates settle it, Auto Release tags it, and two
-  mechanisms watching one fact would be two ways to disagree about it. A request that is REJECTED,
-  CONFLICTED or FAILED is therefore visible only in qits-projects today — the one thing a person
-  loses by this service not polling, and the price of the single writer.
+- **Polling the release request's PROGRESS.** qits-projects answers an id and this service stores it
+  and stops. Its job ends at "request opened": the gates settle it, Auto Release tags it, and two
+  mechanisms watching one fact would be two ways to disagree about it.
+  <br>**What the dispatcher does ask is a different question, and it had to be added
+  (2026-09-10).** Not "how far along is the release" but "is this request still one my bump can wait
+  for" — because the gated dispatcher HOLDS a repository whose branch is pushed until the release
+  lands on main, and a REJECTED request never lands. Live that day: nineteen bumps released, the
+  twentieth was rejected at 07:14 for a red gating build, and four hours later the window was still
+  open, qits-ci idle, that one repository still "owed", nothing dispatched and no line anywhere
+  saying why. So `ReleaseRequestClient.state` reads the one request the bump names, on the tick that
+  needs it: PENDING/READY/RELEASED holds, everything else makes the candidate STALLED and drops it
+  out of the night, and an unreadable answer holds. The answer is never stored as a verdict — that
+  service re-arms REJECTED, FAILED and CONFLICTED to PENDING on the next merged sha — only cached
+  for `bump.dispatch.release-state-ttl` and written onto the bump row for a reader.
 - **Automatic EXTERNAL bumps.** `qits.maintenance.bump.external.auto` exists so the deployment
   surface does not change the day they are implemented, and is read only to WARN when it is set.
   Somebody else's framework major is an opinion, and it stays a person's press.

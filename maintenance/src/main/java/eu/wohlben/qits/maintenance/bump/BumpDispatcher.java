@@ -113,6 +113,44 @@ import org.jboss.logging.Logger;
  * service was down for its whole six hours comes back already over and closes on its first tick.
  * The cost is one primary-key read every fifteen seconds; see {@link
  * eu.wohlben.qits.maintenance.persistence.MaintenanceStore#bumpWindow()}.
+ *
+ * <h2>A hold has to ask what became of the release it is waiting for</h2>
+ *
+ * <p>The hold above rests on one assumption — that the release the bump opened is on its way — and
+ * <b>the fourth live failure of this gate was that assumption being false and nothing noticing.</b>
+ * Measured on 2026-09-10: of the night's twenty bumps, nineteen released; the twentieth,
+ * {@code qits-deployments-platform-service}, had its release request REJECTED at 07:14 because its
+ * gating build does not compile. Four hours later the window was still open, qits-ci was idle, that
+ * one repository was still the only thing owed, nothing had been dispatched since 10:54, and no line
+ * anywhere said why. A dead release and a release in flight were the same state to this service, and
+ * a dead one holds for ever: nothing unwinds a hold except main moving, and main was never going to
+ * move.
+ *
+ * <p>So a held candidate's release request is read — {@link ReleaseRequestClient#state} — and there
+ * are three answers, not two:
+ *
+ * <ul>
+ *   <li><b>PENDING, READY, RELEASED</b> — HELD, exactly as before. Something is coming.
+ *   <li><b>REJECTED, FAILED, CONFLICTED, WITHDRAWN</b> — <b>STALLED</b>: dropped from the candidate
+ *       list altogether. It stops blocking its consumers (they are waiting on a version that is not
+ *       going to be cut, and building against the pin that exists is the honest answer), and it
+ *       stops keeping the window open (a night must not stay open for work that cannot be done).
+ *       It is reported, with qits-projects' own sentence, on {@code GET /bumps/window}.
+ *   <li><b>Unreadable</b> — HELD. A peer that could not be asked is never evidence, which is the
+ *       same reading the CI gate takes of an unreadable queue.
+ * </ul>
+ *
+ * <p><b>Stalled is re-asked every tick and never stored as a verdict</b>, because qits-projects
+ * re-arms REJECTED, FAILED and CONFLICTED back to PENDING on the next merged sha — a push to the
+ * branch, a sibling's release, a pending tag reaching main. A request that comes back to life is
+ * simply held again on the tick after it does, with nothing to unwind. What IS written to the row is
+ * the observation ({@code mt_bump.release_state}, V11), so a bump standing since the morning explains
+ * itself in a listing.
+ *
+ * <p><b>A stalled candidate is never re-dispatched by the clock, and that is deliberate.</b> Its
+ * branch already carries the change, so a fresh bump could only come back NOTHING_TO_DO; what the
+ * repository needs is a person, or the upstream release that re-arms the fold. Pressing Bump by hand
+ * goes through {@link BumpService#request} and is not gated here at all.
  */
 @ApplicationScoped
 public class BumpDispatcher {
@@ -126,6 +164,8 @@ public class BumpDispatcher {
   @Inject CiClient ci;
 
   @Inject BumpService bumps;
+
+  @Inject ReleaseRequestClient releases;
 
   @Inject ArtifactGraph artifacts;
 
@@ -146,12 +186,26 @@ public class BumpDispatcher {
    */
   private final Set<String> refused = new LinkedHashSet<>();
 
+  /**
+   * What qits-projects last said about a release request, and when it said it.
+   *
+   * <p>The ask is one GET per held candidate per tick, and a window whose whole remaining chain is
+   * waiting on releases would make that same call every fifteen seconds for hours. So an answer is
+   * reused for {@code qits.maintenance.bump.dispatch.release-state-ttl} — long enough to collapse
+   * the repetition, far shorter than any release takes to settle, and bounded by the number of
+   * requests this service has opened rather than by time (a window's opening clears it).
+   */
+  private record Seen(ReleaseRequestClient.ReleaseState state, Instant at) {}
+
+  private final Map<String, Seen> releaseStates = new java.util.concurrent.ConcurrentHashMap<>();
+
   /** Opens the dispatch window. The cron's whole job. */
   public void open(Instant now) {
     Instant closes = now.plus(config.bumpWindow());
     synchronized (refused) {
       refused.clear();
     }
+    releaseStates.clear();
     store.openBumpWindow(now, closes);
     LOG.infof(
         "The bump dispatch window is open until %s; one bump goes at a time, from the bottom of the"
@@ -173,28 +227,108 @@ public class BumpDispatcher {
   }
 
   /**
+   * A repository that is owed a bump and cannot be given one, because the release its last bump
+   * asked for has stopped happening.
+   *
+   * @param repository the repository, as the catalog spells it
+   * @param group the group whose branch is waiting
+   * @param requestId the release request in qits-projects
+   * @param state that request's state — REJECTED, FAILED, CONFLICTED, WITHDRAWN
+   * @param reason that service's own sentence, which is usually the failing gating run
+   */
+  public record Stalled(
+      String repository, String group, String requestId, String state, String reason) {}
+
+  /** Every repository owed a bump this tick, split into what may be sent and what is stuck. */
+  public record Assessment(List<BumpOrder.Candidate> candidates, List<Stalled> stalled) {}
+
+  /**
+   * What the gate decided and everything it decided it from — the tick's whole reasoning, so that
+   * "there are pending bumps and nothing is queued" is a question this service answers about itself
+   * rather than one somebody reconstructs from three services' logs.
+   *
+   * @param outcome the short name of the gate that answered
+   * @param summary the sentence for a person
+   * @param inFlight bumps of ours not yet ended, or null when the gate answered before asking
+   * @param allowed how many may be in flight
+   * @param ciActive what qits-ci holds, null when it was not asked or could not be read
+   * @param owed how many repositories are owed a bump and could still be sent one
+   * @param held how many of those are waiting on a release in flight
+   * @param stalled the ones waiting on a release that has stopped
+   * @param pick what would be dispatched, or null
+   */
+  public record Decision(
+      String outcome,
+      String summary,
+      Integer inFlight,
+      Integer allowed,
+      Integer ciActive,
+      int owed,
+      int held,
+      List<Stalled> stalled,
+      BumpOrder.Pick pick) {
+
+    static Decision of(String outcome, String summary) {
+      return new Decision(outcome, summary, null, null, null, 0, 0, List.of(), null);
+    }
+
+    Decision with(Integer inFlight, Integer allowed, Integer ciActive) {
+      return new Decision(
+          outcome, summary, inFlight, allowed, ciActive, owed, held, stalled, pick);
+    }
+  }
+
+  /**
    * One dispatch decision.
    *
    * @return the bump that was asked for, or empty — which is every other outcome, and none of them
    *     is a failure
    */
   public Optional<UUID> tick() {
-    Instant now = Instant.now();
+    Decision decision = decide(Instant.now(), true);
+    if (decision.pick() == null) {
+      return Optional.empty();
+    }
+    return dispatch(decision.pick(), decision.owed());
+  }
+
+  /**
+   * The same reasoning with nothing done about it — no window closed, no bump sent — for the door
+   * that answers "why is nothing happening".
+   */
+  public Decision explain(Instant now) {
+    return decide(now, false);
+  }
+
+  /**
+   * The gates, in the order they are asked.
+   *
+   * @param commit whether to act on what is decided: close a window that is over or empty, and
+   *     answer a pick that the caller will dispatch. A read-only pass changes nothing at all except
+   *     the cached release states, which are an observation either way.
+   */
+  private Decision decide(Instant now, boolean commit) {
     Optional<Instant> closes = store.bumpWindow();
     if (closes.isEmpty()) {
-      return Optional.empty();
+      return Decision.of("NO_WINDOW", "no dispatch window is open");
     }
     if (!now.isBefore(closes.get())) {
-      close("it ended with work still owed; the next schedule opens a new one");
-      return Optional.empty();
+      if (commit) {
+        close("it ended with work still owed; the next schedule opens a new one");
+      }
+      return Decision.of("WINDOW_OVER", "the window has expired and closes on this tick");
     }
     if (!config.bumpEnabled()) {
-      close("qits.maintenance.bump.enabled is false");
-      return Optional.empty();
+      if (commit) {
+        close("qits.maintenance.bump.enabled is false");
+      }
+      return Decision.of("DISABLED", "qits.maintenance.bump.enabled is false");
     }
     if (!config.bumpInternalAuto()) {
-      close("qits.maintenance.bump.internal.auto is false");
-      return Optional.empty();
+      if (commit) {
+        close("qits.maintenance.bump.internal.auto is false");
+      }
+      return Decision.of("DISABLED", "qits.maintenance.bump.internal.auto is false");
     }
 
     // THE IN-FLIGHT COUNT IS ASKED BEFORE THE CANDIDATES, and the order is what keeps the window
@@ -204,27 +338,74 @@ public class BumpDispatcher {
     int allowed = config.bumpMaxInFlight();
     int inFlight = store.activeBumps().size();
     if (inFlight >= allowed) {
-      LOG.debugf("%d bump(s) are in flight and %d are allowed; nothing is dispatched.", inFlight, allowed);
-      return Optional.empty();
+      LOG.debugf(
+          "%d bump(s) are in flight and %d are allowed; nothing is dispatched.", inFlight, allowed);
+      return Decision.of(
+              "IN_FLIGHT", inFlight + " bump(s) of ours are still running and " + allowed + " may be")
+          .with(inFlight, allowed, null);
     }
 
-    List<BumpOrder.Candidate> candidates = candidates();
+    Assessment assessment = assess();
+    List<BumpOrder.Candidate> candidates = assessment.candidates();
+    List<Stalled> stalled = assessment.stalled();
+    int heldCount = (int) candidates.stream().filter(BumpOrder.Candidate::held).count();
     if (candidates.isEmpty()) {
-      close("nothing is owed a bump");
-      return Optional.empty();
+      // NOTHING DISPATCHABLE IS OWED, and a window whose remainder is stalled closes here too. It
+      // must: staying open for work that cannot be done is a night that never ends and a gate that
+      // reports nothing. The sentence names the stalled repositories, which is the one line the
+      // fourth live failure of this gate did not have.
+      String why =
+          stalled.isEmpty()
+              ? "nothing is owed a bump"
+              : "nothing is owed a bump that can be sent; "
+                  + stalled.size()
+                  + " wait on a release that has stopped ("
+                  + stalledNames(stalled)
+                  + ")";
+      if (commit) {
+        close(why);
+      }
+      return new Decision(
+          stalled.isEmpty() ? "NOTHING_OWED" : "ALL_STALLED",
+          why,
+          inFlight,
+          allowed,
+          null,
+          0,
+          0,
+          stalled,
+          null);
     }
 
     CiClient.QueueState queue = ci.activeRuns();
     if (!queue.readable()) {
       // Unreadable is BUSY. Dispatching blind here is precisely the wavefront this gate exists for.
       LOG.debugf("qits-ci's queue could not be read (%s); nothing is dispatched.", queue.error());
-      return Optional.empty();
+      return new Decision(
+          "CI_UNREADABLE",
+          "qits-ci's queue could not be read (" + queue.error() + "), which counts as busy",
+          inFlight,
+          allowed,
+          null,
+          candidates.size(),
+          heldCount,
+          stalled,
+          null);
     }
     if (queue.active() >= allowed) {
       LOG.debugf(
           "qits-ci holds %d active run(s) and %d are allowed; nothing is dispatched.",
           queue.active(), Integer.valueOf(allowed));
-      return Optional.empty();
+      return new Decision(
+          "CI_BUSY",
+          "qits-ci holds " + queue.active() + " active run(s) and " + allowed + " may be",
+          inFlight,
+          allowed,
+          queue.active(),
+          candidates.size(),
+          heldCount,
+          stalled,
+          null);
     }
 
     Optional<BumpOrder.Pick> pick = BumpOrder.next(candidates, artifacts.producers());
@@ -234,9 +415,35 @@ public class BumpDispatcher {
       LOG.debugf(
           "All %d owed bump(s) are waiting on a release of their own branch; nothing is dispatched.",
           candidates.size());
-      return Optional.empty();
+      return new Decision(
+          "WAITING_ON_RELEASES",
+          "all " + candidates.size() + " owed bump(s) wait on a release of their own branch",
+          inFlight,
+          allowed,
+          queue.active(),
+          candidates.size(),
+          heldCount,
+          stalled,
+          null);
     }
-    return dispatch(pick.get(), candidates.size());
+    return new Decision(
+        "DISPATCH",
+        "the next bump is " + pick.get().candidate().repository(),
+        inFlight,
+        allowed,
+        queue.active(),
+        candidates.size(),
+        heldCount,
+        stalled,
+        pick.get());
+  }
+
+  private static String stalledNames(List<Stalled> stalled) {
+    List<String> names = new ArrayList<>();
+    for (Stalled one : stalled) {
+      names.add(one.repository() + " " + one.state());
+    }
+    return String.join(", ", names);
   }
 
   private Optional<UUID> dispatch(BumpOrder.Pick pick, int owed) {
@@ -285,9 +492,15 @@ public class BumpDispatcher {
    * single re-dispatch costs.
    */
   public List<BumpOrder.Candidate> candidates() {
+    return assess().candidates();
+  }
+
+  /** The same walk, keeping what it had to drop and why. */
+  public Assessment assess() {
     String group = GroupConfig.DEFAULT_GROUP;
     Map<String, MtLatest> latest = PendingChanges.index(store.allLatest());
     List<BumpOrder.Candidate> candidates = new ArrayList<>();
+    List<Stalled> stalled = new ArrayList<>();
     for (MtRepository row : store.repositories()) {
       if (!RepositoryStatus.OK.name().equals(row.status)) {
         continue;
@@ -309,29 +522,113 @@ public class BumpDispatcher {
       if (store.activeBump(row.name, group).isPresent()) {
         continue;
       }
-      candidates.add(
-          new BumpOrder.Candidate(row.name, group, changes, held(row.name, group, changes)));
+      Hold hold = hold(row, group, changes);
+      if (hold.stalled() != null) {
+        stalled.add(hold.stalled());
+        continue;
+      }
+      candidates.add(new BumpOrder.Candidate(row.name, group, changes, hold.held()));
     }
-    return List.copyOf(candidates);
+    return new Assessment(List.copyOf(candidates), List.copyOf(stalled));
+  }
+
+  /**
+   * How a candidate stands against the bump it has already had: free, held, or stalled.
+   *
+   * @param held these exact changes are on a branch whose release is on its way
+   * @param stalled …or on a branch whose release has stopped, with the reason
+   */
+  private record Hold(boolean held, Stalled stalled) {
+
+    static final Hold FREE = new Hold(false, null);
+    static final Hold HELD = new Hold(true, null);
   }
 
   /**
    * Whether this group's branch has already been bumped for exactly these changes and is waiting on
    * the release that will move main.
    */
-  private boolean held(String repository, String group, List<Change> pending) {
-    Optional<MtBump> newest = store.newestBump(repository, group);
+  private Hold hold(MtRepository row, String group, List<Change> pending) {
+    Optional<MtBump> newest = store.newestBump(row.name, group);
     if (newest.isEmpty()) {
-      return false;
+      return Hold.FREE;
     }
     MtBump bump = newest.get();
     BumpStatus status = BumpStatus.valueOf(bump.status);
     if (status != BumpStatus.SUCCEEDED && status != BumpStatus.NOTHING_TO_DO) {
       // REQUESTED and RUNNING never reach here — an active bump is a skip above — and FAILED must
       // stay retryable: the branch it was going to push is not there to be released.
-      return false;
+      return Hold.FREE;
     }
-    return sameChanges(BumpService.changes(bump), pending);
+    if (!sameChanges(BumpService.changes(bump), pending)) {
+      return Hold.FREE;
+    }
+    return releaseHold(row, group, bump);
+  }
+
+  /**
+   * Whether the release that bump asked for is still one to wait for.
+   *
+   * <p>Held on everything that is not a plain "this has stopped": a request id nothing can be asked
+   * about (the {@code converged} sentinel, an ask that has not been made yet — the sweep is still
+   * re-attempting it), a repository with no catalog id to address qits-projects with, and any answer
+   * that could not be read. <b>{@code refused} is the one sentinel that stalls</b>: qits-projects
+   * refused the ask itself, so there is no request and nothing is coming.
+   */
+  private Hold releaseHold(MtRepository row, String group, MtBump bump) {
+    String requestId = bump.releaseRequestId;
+    if (requestId == null || requestId.isBlank() || ReleaseRequestClient.CONVERGED.equals(requestId)) {
+      return Hold.HELD;
+    }
+    if (ReleaseRequestClient.REFUSED.equals(requestId)) {
+      return new Hold(
+          false,
+          new Stalled(row.name, group, null, "REFUSED", bump.message == null ? "" : bump.message));
+    }
+    if (row.catalogId == null || row.catalogId.isBlank()) {
+      return Hold.HELD;
+    }
+    ReleaseRequestClient.ReleaseState state = releaseState(row.catalogId, requestId, bump);
+    if (!state.stalled()) {
+      return Hold.HELD;
+    }
+    return new Hold(
+        false,
+        new Stalled(
+            row.name,
+            group,
+            requestId,
+            state.state(),
+            state.detail() == null ? "" : state.detail()));
+  }
+
+  /**
+   * qits-projects' answer about one request, reused within the ttl and written onto the bump row
+   * whenever it is freshly read.
+   */
+  private ReleaseRequestClient.ReleaseState releaseState(
+      String catalogId, String requestId, MtBump bump) {
+    Instant now = Instant.now();
+    Seen seen = releaseStates.get(requestId);
+    if (seen != null && seen.at().plus(config.bumpReleaseStateTtl()).isAfter(now)) {
+      return seen.state();
+    }
+    ReleaseRequestClient.ReleaseState state = releases.state(catalogId, requestId);
+    releaseStates.put(requestId, new Seen(state, now));
+    if (state.readable()) {
+      String before = bump.releaseState;
+      store.bumpReleaseState(bump.id, state.state(), state.detail(), now);
+      if (state.stalled() && !state.state().equals(before)) {
+        // ONE WARN WHEN IT TURNS, and none while it stays that way. This is the line whose absence
+        // made the estate look idle for four hours.
+        LOG.warnf(
+            "The release request %s of %s is %s, so its bump is not waited on any longer: %s",
+            requestId, bump.repository, state.state(), state.sentence());
+      }
+    } else {
+      LOG.debugf("The release request %s could not be read: %s", requestId, state.error());
+    }
+    return state;
   }
 
   /**
