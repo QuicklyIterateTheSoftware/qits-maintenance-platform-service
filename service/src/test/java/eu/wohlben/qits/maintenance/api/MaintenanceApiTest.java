@@ -1030,6 +1030,40 @@ class MaintenanceApiTest {
         "a branch somebody rewrote by hand is not this service's to release");
   }
 
+  /**
+   * <b>The window has a door, and the door is the reason the row is worth having.</b> Before it, the
+   * only way to make the estate bump outside 02:00 was to override the cron in the deployment config
+   * and redeploy — which restarts the very service whose window you are opening.
+   *
+   * <p>The three verbs in one method because they are one fact's lifecycle: none, opened, none
+   * again. The DELETE is asserted twice on purpose — closing a window that is not there is the
+   * caller asking for a state, not for a transition.
+   */
+  @Test
+  void theDispatchWindowIsOpenedClosedAndReadThroughItsOwnDoor() {
+    given().when().delete(BASE + "/bumps/window").then().statusCode(204);
+    given()
+        .when()
+        .get(BASE + "/bumps/window")
+        .then()
+        .statusCode(404)
+        .body("message", notNullValue());
+
+    given()
+        .when()
+        .post(BASE + "/bumps/window")
+        .then()
+        .statusCode(200)
+        .body("open", equalTo(true))
+        .body("openedAt", notNullValue())
+        .body("closesAt", notNullValue());
+    given().when().get(BASE + "/bumps/window").then().statusCode(200).body("open", equalTo(true));
+
+    given().when().delete(BASE + "/bumps/window").then().statusCode(204);
+    given().when().delete(BASE + "/bumps/window").then().statusCode(204);
+    given().when().get(BASE + "/bumps/window").then().statusCode(404);
+  }
+
   @Test
   void anIdThatIsNotAUuidIsAnUnknownRowRatherThanAnError() {
     given().when().get(BASE + "/bumps/not-a-uuid").then().statusCode(404).body("message", notNullValue());

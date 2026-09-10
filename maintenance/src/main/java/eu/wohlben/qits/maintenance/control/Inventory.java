@@ -2,6 +2,7 @@ package eu.wohlben.qits.maintenance.control;
 
 import eu.wohlben.qits.maintenance.bump.BumpService;
 import eu.wohlben.qits.maintenance.dto.BumpDto;
+import eu.wohlben.qits.maintenance.dto.BumpWindowDto;
 import eu.wohlben.qits.maintenance.dto.DependencyDto;
 import eu.wohlben.qits.maintenance.dto.GroupDto;
 import eu.wohlben.qits.maintenance.dto.PinDto;
@@ -255,6 +256,19 @@ public class Inventory {
   }
 
   /** One scan, which is what a client polls after a 202. */
+  /**
+   * The dispatch window as it stands, or empty when there is none.
+   *
+   * <p>{@code open} is computed here rather than stored: a row whose {@code closesAt} has passed but
+   * which no tick has reached yet is a real state, and reporting it as open would be a lie a reader
+   * could act on.
+   */
+  public Optional<BumpWindowDto> bumpWindow(Instant now) {
+    return store
+        .bumpWindowRow()
+        .map(row -> new BumpWindowDto(row.openedAt, row.closesAt, now.isBefore(row.closesAt)));
+  }
+
   public ScanDto scan(UUID id) {
     MtScan row = store.scan(id).orElseThrow(() -> new NoSuchScanException(id));
     return new ScanDto(

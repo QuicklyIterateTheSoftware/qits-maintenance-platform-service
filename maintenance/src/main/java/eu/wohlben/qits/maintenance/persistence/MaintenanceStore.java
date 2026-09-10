@@ -901,11 +901,15 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
    */
   @ActivateRequestContext
   public Optional<Instant> bumpWindow() {
+    return bumpWindowRow().map(row -> row.closesAt);
+  }
+
+  /** The same row whole, for the API — {@code openedAt} is for people rather than for the gate. */
+  @ActivateRequestContext
+  public Optional<MtBumpWindow> bumpWindowRow() {
     return DbRetry.inNewTx(
         "read the bump dispatch window",
-        () ->
-            Optional.ofNullable((MtBumpWindow) MtBumpWindow.findById(MtBumpWindow.INTERNAL))
-                .map(row -> row.closesAt));
+        () -> Optional.ofNullable((MtBumpWindow) MtBumpWindow.findById(MtBumpWindow.INTERNAL)));
   }
 
   /** Opens the window, or replaces the one that is open. An upsert on the singleton key. */
