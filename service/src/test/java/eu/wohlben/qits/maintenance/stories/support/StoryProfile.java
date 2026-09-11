@@ -77,10 +77,15 @@ import java.util.Map;
  *   <li>{@code bump.poll-interval} is a second rather than the shipped fifteen. The sweep is a no-op
  *       whenever no bump is active — it reads the store and queues nothing — so the only stories it
  *       can reach are the two that are holding a bump open on purpose.
+ *   <li>{@code bump.internal.auto} is false, which is what silences the DISPATCHER sharing that
+ *       interval. It was silent here by accident until 2026-09-11: it did nothing until a cron
+ *       opened a window and this profile removes every cron. Now that it arms itself on debt, a
+ *       tick landing mid-story would ask qits-ci for its queue and qits-projects about a held
+ *       bump's release, and those arrows would be recorded against whichever story was draining.
  * </ul>
  *
  * <p><b>Two paths are therefore NOT covered by any story here, and that is a stated gap.</b> The
- * nightly internal bump ({@code BumpSchedule}) needs the cron this profile removes, and {@code
+ * clock's own bumping ({@code BumpDispatcher}) is switched off just above, and {@code
  * RestartRecovery} resuming a bump across a restart needs a second boot of one process. Both keep their coverage in {@code MaintenanceApiTest}, which drives the sweep by hand.
  * A story that waited out a six-hour cron would be indistinguishable from a story that hung.
  */
@@ -156,6 +161,13 @@ public class StoryProfile extends PackagedSurfaceIT.PackagedUnderTarget {
     // whichever story happened to be draining.
     overrides.put("qits.maintenance.sbom.sweep-cron", "off");
     overrides.put("qits.maintenance.bump.poll-interval", "1s");
+    // AND THE DISPATCHER IS OFF, at the shipped key that turns the clock's half of bumping off.
+    // It used to be silent here by accident: it did nothing at all until a 02:00 cron opened a
+    // window, and this profile removes every cron. Since the dispatch arms itself on DEBT, a tick
+    // landing mid-story asks qits-ci for its queue and qits-projects about a held bump's release —
+    // arrows into whichever story happened to be draining, which is the same reason the scans and
+    // the sbom sweep are off. No story drives a dispatch; the gate has its own tests.
+    overrides.put("qits.maintenance.bump.internal.auto", "false");
 
     overrides.put("qits.auth.machine.required", "true");
     overrides.put("quarkus.oidc.auth-server-url", idp.baseUrl());
