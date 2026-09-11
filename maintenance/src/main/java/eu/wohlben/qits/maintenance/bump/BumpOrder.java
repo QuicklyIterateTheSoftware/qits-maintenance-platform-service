@@ -3,6 +3,8 @@ package eu.wohlben.qits.maintenance.bump;
 import eu.wohlben.qits.maintenance.control.ArtifactGraph;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
 import eu.wohlben.qits.maintenance.pending.Change;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -159,6 +161,60 @@ public final class BumpOrder {
     }
     // Every free one waits on another free one: a cycle, and somebody has to move first.
     return Optional.of(new Pick(leastBlocked, Set.copyOf(leastBlockedBy), true));
+  }
+
+  /**
+   * Where one owed repository stands in the queue.
+   *
+   * @param candidate the repository and the changes its bump would carry
+   * @param reason {@code READY} (nothing owed sits below it — the first one is the pick), {@code
+   *     BLOCKED} (it waits on other owed repositories) or {@code HELD} (its branch is pushed and it
+   *     waits on its own release)
+   * @param blockedBy the owed upstreams it waits on, empty unless BLOCKED
+   */
+  public record Standing(Candidate candidate, String reason, Set<String> blockedBy) {}
+
+  /**
+   * THE WHOLE OWED SET IN THE ORDER IT WILL BE HANDED OUT, each entry saying why it is where it is.
+   *
+   * <p>{@link #next} answers one question — what goes now — and that was the only thing anybody
+   * could ask. "Fifteen repositories are owed and nothing has been sent" and "the scheduler is
+   * dead" were therefore the same picture from every surface, which is what let this class's
+   * arming bug sit unnoticed for a day. This is the same reasoning laid out for a reader rather
+   * than collapsed to a pick: READY first in listing order (so the head of this list IS what {@link
+   * #next} returns), then BLOCKED by fewest owed upstreams, then HELD.
+   *
+   * <p>It decides nothing. A caller that dispatched the head of this list instead of calling {@link
+   * #next} would skip the cycle rule, which is the one place the two differ.
+   */
+  public static List<Standing> standing(List<Candidate> candidates, Map<String, String> producers) {
+    if (candidates == null || candidates.isEmpty()) {
+      return List.of();
+    }
+    Set<String> owed = new LinkedHashSet<>();
+    for (Candidate candidate : candidates) {
+      owed.add(candidate.repository());
+    }
+    List<Standing> ready = new ArrayList<>();
+    List<Standing> blocked = new ArrayList<>();
+    List<Standing> held = new ArrayList<>();
+    for (Candidate candidate : candidates) {
+      if (candidate.held()) {
+        held.add(new Standing(candidate, "HELD", Set.of()));
+        continue;
+      }
+      Set<String> upstreams = owedUpstreams(candidate, producers, owed);
+      if (upstreams.isEmpty()) {
+        ready.add(new Standing(candidate, "READY", Set.of()));
+      } else {
+        blocked.add(new Standing(candidate, "BLOCKED", upstreams));
+      }
+    }
+    blocked.sort(Comparator.comparingInt(one -> one.blockedBy().size()));
+    List<Standing> all = new ArrayList<>(ready);
+    all.addAll(blocked);
+    all.addAll(held);
+    return List.copyOf(all);
   }
 
   /**

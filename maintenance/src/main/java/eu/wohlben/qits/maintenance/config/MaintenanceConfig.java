@@ -4,8 +4,11 @@ import eu.wohlben.qits.maintenance.manifest.ParsedPin;
 import eu.wohlben.qits.maintenance.model.PinKind;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.time.Duration;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -45,6 +48,17 @@ public class MaintenanceConfig {
 
   @ConfigProperty(name = "qits.maintenance.bump.dispatch.release-state-ttl")
   Duration bumpReleaseStateTtl;
+
+  // OPTIONAL BECAUSE THE DEFAULT IS THE EMPTY STRING, and SmallRye converts an empty value to a
+  // missing one: declared as a plain String this refuses to boot on the shipped default.
+  @ConfigProperty(name = "qits.maintenance.bump.dispatch.quiet-hours")
+  Optional<String> bumpQuietHours;
+
+  @ConfigProperty(name = "qits.maintenance.time-zone")
+  String timeZone;
+
+  /** {@link #bumpQuietHours()}, parsed once. */
+  private volatile QuietHours quietHours;
 
   @ConfigProperty(name = "qits.maintenance.internal.maven-groups")
   List<String> internalMavenGroups;
@@ -153,6 +167,45 @@ public class MaintenanceConfig {
       return Duration.ofMinutes(1);
     }
     return bumpReleaseStateTtl;
+  }
+
+  /**
+   * The hours in which a bump may NOT be dispatched — <b>the only thing that says "not now"</b>.
+   *
+   * <p>Dispatch arms itself on debt (see {@code BumpDispatcher}),
+   * so the hour no longer decides whether the work may start. What an hour can still decide is
+   * whether a {@code maintenance/dependencies} branch is welcome to arrive in somebody's working
+   * afternoon, and that is this key rather than an implication of a cron. Empty by default: a
+   * platform that never asked for a quiet period does not silently have one.
+   *
+   * <p><b>Parsed once and kept</b>, because the tick asks for it every fifteen seconds and an
+   * injected config field does not move under a running process anyway. Parsing it per read would
+   * also repeat the typo WARN four thousand times a day, which is how a line worth reading becomes
+   * one nobody does.
+   */
+  public QuietHours bumpQuietHours() {
+    QuietHours parsed = quietHours;
+    if (parsed == null) {
+      parsed = QuietHours.parse(bumpQuietHours.orElse(null));
+      quietHours = parsed;
+    }
+    return parsed;
+  }
+
+  /**
+   * The zone every clock here is read in — the crons already declare it, and quiet hours are the
+   * same fact from the other side. UTC is the platform's convention, so "18:00" in a config value
+   * is the 18:00 a reader sees on a row.
+   */
+  public ZoneId timeZone() {
+    if (timeZone == null || timeZone.isBlank()) {
+      return ZoneOffset.UTC;
+    }
+    try {
+      return ZoneId.of(timeZone.trim());
+    } catch (RuntimeException e) {
+      return ZoneOffset.UTC;
+    }
   }
 
   /**

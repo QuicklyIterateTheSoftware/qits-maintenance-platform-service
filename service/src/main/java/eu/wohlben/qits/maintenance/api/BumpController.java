@@ -4,7 +4,6 @@ import eu.wohlben.qits.maintenance.bump.BumpDispatcher;
 import eu.wohlben.qits.maintenance.control.Inventory;
 import eu.wohlben.qits.maintenance.dto.BumpDto;
 import eu.wohlben.qits.maintenance.dto.BumpWindowDto;
-import eu.wohlben.qits.maintenance.error.NoBumpWindowException;
 import eu.wohlben.qits.maintenance.error.NoSuchBumpException;
 import jakarta.annotation.security.RolesAllowed;
 import jakarta.inject.Inject;
@@ -44,29 +43,32 @@ public class BumpController {
   @Inject BumpDispatcher dispatcher;
 
   /**
-   * The dispatch window: what the 02:00 cron opens and what the tick hands bumps out inside.
+   * The dispatch window, and <b>what is owed whether or not one is open</b>.
    *
    * <p><b>Its own three verbs rather than a field on some settings object</b>, because the window is
-   * one fact with one lifecycle and the three things anybody wants to do to it are: see whether
-   * tonight is running, start one now, and stop one that is running away.
+   * one fact with one lifecycle and the three things anybody wants to do to it are: see what the
+   * dispatcher is doing, start one now, and stop one that is running away.
    *
-   * <p><b>Why a door exists at all.</b> Before it, the only way to make the estate bump outside
+   * <p><b>It used to 404 when there was no window, and that 404 was a real cost.</b> The question
+   * this door is opened with is "why has nothing been dispatched"; answering it with "there is no
+   * window" said only that the first gate was shut, and the bump listing beside it holds only bumps
+   * that were dispatched — so fifteen repositories owed since the morning and a dead scheduler
+   * looked identical from every surface. It is 200 always now: the row's two timestamps are null
+   * when there is no window, and {@code queue} carries the whole owed set with each entry's reason.
+   *
+   * <p><b>Why the POST exists at all.</b> Before it, the only way to make the estate bump outside
    * 02:00 was to override {@code bump.internal.cron} in the deployment config and redeploy — which
    * restarts the very service whose window you are trying to open, and leaves an override behind
-   * that somebody has to remember to delete. Both live incidents on this ticket were investigated
-   * that way and it is not a thing to do twice. Pressing Bump on every repository by hand is the
-   * other option, and that is the 02:00 stampede this whole change exists to stop.
+   * that somebody has to remember to delete. It matters less now that debt opens the window by
+   * itself, and it is still the way to say "now" inside a configured quiet hour.
    */
   @GET
   @jakarta.ws.rs.Path("/window")
-  @Operation(summary = "The bump dispatch window, if one is open")
-  @APIResponse(responseCode = "200", description = "The window")
-  @APIResponse(responseCode = "404", description = "There is no window")
+  @Operation(summary = "The bump dispatch window and everything owed a bump")
+  @APIResponse(responseCode = "200", description = "The window, or the reason there is none")
   @RolesAllowed({"qits:admin", "qits:system"})
   public BumpWindowDto window() {
-    return inventory
-        .bumpWindow(Instant.now())
-        .orElseThrow(NoBumpWindowException::new);
+    return inventory.bumpWindow(Instant.now());
   }
 
   /**
@@ -84,9 +86,7 @@ public class BumpController {
   public BumpWindowDto openWindow() {
     Instant now = Instant.now();
     dispatcher.open(now);
-    return inventory
-        .bumpWindow(now)
-        .orElseThrow(() -> new IllegalStateException("the window was opened and is not there"));
+    return inventory.bumpWindow(now);
   }
 
   /**

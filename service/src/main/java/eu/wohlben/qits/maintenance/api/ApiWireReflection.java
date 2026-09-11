@@ -72,6 +72,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       // nested shape here is.
       BumpWindowDto.class,
       BumpWindowDto.StalledBumpDto.class,
+      BumpWindowDto.OwedBumpDto.class,
       ScanDto.class,
       Change.class,
       // The ad-hoc downstream closure and the adoption journey, which replaced the release trains'

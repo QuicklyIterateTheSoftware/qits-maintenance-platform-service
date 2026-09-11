@@ -72,23 +72,48 @@ class BumpDispatchTest {
     return !store.bumps(Fixture.REPOSITORY, 50).isEmpty();
   }
 
-  /** No window, no dispatch — and the pending changes are there the whole time. */
+  /**
+   * <b>THE FIFTH LIVE FAILURE, AND THE WHOLE OF THIS FIX: DEBT ARMS THE DISPATCH, NOT THE HOUR.</b>
+   * On 2026-09-11 {@code @qits/ui-components} was cut at 10:44, fifteen repositories were owed by
+   * 10:45 and at 17:20 none of them had been sent: every gate would have passed, but the first one
+   * could only be opened by a 02:00 cron. The intended primary upgrade path — something becomes
+   * owed, qits-ci goes idle, the bump is dispatched — had never once run on its own.
+   *
+   * <p><b>So this test never calls {@link BumpDispatcher#open}</b>, and it is the exact scenario of
+   * the ticket: no window row, an owed repository, an idle queue. The tick sends, and the window it
+   * opened for itself is there afterwards.
+   */
   @Test
-  void nothingIsDispatchedOutsideAWindow() {
+  void anOwedBumpAndAnIdleQueueDispatchWithNoWindowAndNoCron() {
     Fixture.scriptCiQueueEmpty(peers);
+    assertTrue(store.bumpWindow().isEmpty(), "no cron has run and nobody pressed the door");
 
-    assertTrue(dispatcher.tick().isEmpty(), "the cron has not opened one");
-    assertFalse(bumped());
-    assertFalse(
-        peers.called(PeerTarget.CI, CiClient.ACTIVE_RUNS_PATH),
-        "and nothing was asked of qits-ci: outside a window this costs one row read");
+    assertTrue(dispatcher.tick().isPresent(), "the debt is the reason, and it is enough");
+    assertTrue(bumped());
+    assertTrue(
+        store.bumpWindow().isPresent(),
+        "and the window is a consequence of the debt rather than of an hour");
   }
 
-  /** The whole point: a busy qits-ci is not handed another build. */
+  /** Nothing owed is still nothing dispatched, and it opens no window to find that out. */
+  @Test
+  void nothingIsDispatchedWhenNothingIsOwed() {
+    Fixture.scriptCiQueueEmpty(peers);
+    inventory.clearLatest();
+
+    assertTrue(dispatcher.tick().isEmpty());
+    assertFalse(bumped());
+    assertTrue(store.bumpWindow().isEmpty(), "a window with nothing to hand out is not opened");
+  }
+
+  /**
+   * The whole point: a busy qits-ci is not handed another build. <b>And it is asked without a
+   * window row</b>, because debt is what arms this now — the capacity gate is the one that decides
+   * whether the owed work goes, and it is unchanged.
+   */
   @Test
   void aBusyQueueDispatchesNothingAndAnEmptyOneDispatchesOne() {
     Fixture.scriptCiQueue(peers, 2);
-    dispatcher.open(Instant.now());
 
     assertTrue(dispatcher.tick().isEmpty(), "two runs are active and one is allowed");
     assertFalse(bumped());
@@ -238,20 +263,26 @@ class BumpDispatchTest {
   }
 
   /**
-   * <b>And resuming is not the same as never ending.</b> A service that was down for the whole six
-   * hours comes back to a window that is already over, and the first tick shuts it rather than
-   * dispatching a night's worth of bumps at whatever hour it happened to start.
+   * <b>AN EXPIRY IS A RESET, NOT A GUILLOTINE.</b> An expired row is closed — it is never read as a
+   * window that is still running — and then the same tick asks the only question that decides
+   * anything now: is something owed. It is, so a fresh window opens and the chain carries on, which
+   * is the half the old behaviour got wrong: what a window did not reach by its sixth hour was
+   * silently dropped until the next night, and one {@code @qits/ui-components} release is roughly
+   * twenty-eight dispatches deep.
    */
   @Test
-  void aWindowThatExpiredWhileTheServiceWasDownIsClosedOnTheFirstTick() {
+  void anExpiredWindowIsReplacedRatherThanDroppingTheWorkItDidNotReach() {
     Fixture.scriptCiQueueEmpty(peers);
     Instant now = Instant.now();
-    store.openBumpWindow(now.minus(Duration.ofHours(7)), now.minus(Duration.ofHours(1)));
+    Instant stale = now.minus(Duration.ofHours(1));
+    store.openBumpWindow(now.minus(Duration.ofHours(7)), stale);
 
-    assertFalse(dispatcher.windowOpen(now));
-    assertTrue(dispatcher.tick().isEmpty());
-    assertFalse(bumped(), "02:00's window does not get to fire at 09:00");
-    assertTrue(store.bumpWindow().isEmpty(), "and the row is gone rather than re-read every tick");
+    assertFalse(dispatcher.windowOpen(now), "the row is over and is not treated as open");
+    assertTrue(dispatcher.tick().isPresent(), "the work is still owed, so it still goes");
+    assertTrue(bumped());
+    assertTrue(
+        store.bumpWindow().orElseThrow().isAfter(stale),
+        "and the expired row was replaced rather than re-read every tick");
   }
 
   /**
@@ -369,6 +400,43 @@ class BumpDispatchTest {
     BumpDispatcher.Decision decision = dispatcher.explain(Instant.now());
     assertTrue(decision.stalled().isEmpty());
     assertEquals(1, decision.held(), "held again, with no state of ours to undo");
+  }
+
+  /**
+   * <b>"FIFTEEN OWED, NOTHING SENT" AND "THE SCHEDULER IS DEAD" MUST NOT LOOK THE SAME.</b> The
+   * bump listing holds only bumps that were dispatched and the window door used to 404 with no
+   * window open, so between two dispatches this service said nothing at all about the work it was
+   * holding. The owed set is answered in dispatch order with each entry's reason — here, from
+   * behind a busy queue and with no window row anywhere.
+   */
+  @Test
+  void theOwedSetIsReportedWithItsReasonsWhileNothingIsBeingDispatched() {
+    Fixture.scriptCiQueue(peers, 2);
+
+    BumpDispatcher.Decision decision = dispatcher.explain(Instant.now());
+    assertEquals("CI_BUSY", decision.outcome());
+    assertEquals(1, decision.owed());
+    assertEquals(1, decision.queue().size());
+    assertEquals(Fixture.REPOSITORY, decision.queue().get(0).repository());
+    assertEquals("READY", decision.queue().get(0).reason());
+    assertTrue(store.bumpWindow().isEmpty(), "and reading changed nothing");
+  }
+
+  /** The same answer at the door, which is where an operator asks it — 200, not a 404. */
+  @Test
+  void theWindowDoorAnswersTheOwedSetWithNoWindowOpen() {
+    Fixture.scriptCiQueue(peers, 2);
+
+    io.restassured.RestAssured.given()
+        .get("/maintenance/api/bumps/window")
+        .then()
+        .statusCode(200)
+        .body("open", org.hamcrest.Matchers.equalTo(false))
+        .body("openedAt", org.hamcrest.Matchers.nullValue())
+        .body("outcome", org.hamcrest.Matchers.equalTo("CI_BUSY"))
+        .body("owed", org.hamcrest.Matchers.equalTo(1))
+        .body("queue[0].repository", org.hamcrest.Matchers.equalTo(Fixture.REPOSITORY))
+        .body("queue[0].reason", org.hamcrest.Matchers.equalTo("READY"));
   }
 
   /**

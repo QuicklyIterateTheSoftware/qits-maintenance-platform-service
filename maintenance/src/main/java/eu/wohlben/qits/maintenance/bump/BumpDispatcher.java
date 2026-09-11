@@ -1,6 +1,7 @@
 package eu.wohlben.qits.maintenance.bump;
 
 import eu.wohlben.qits.maintenance.config.MaintenanceConfig;
+import eu.wohlben.qits.maintenance.config.QuietHours;
 import eu.wohlben.qits.maintenance.control.ArtifactGraph;
 import eu.wohlben.qits.maintenance.entity.MtBump;
 import eu.wohlben.qits.maintenance.entity.MtBumpWindow;
@@ -19,6 +20,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -45,12 +47,39 @@ import org.jboss.logging.Logger;
  * property of qits-ci at that instant. {@link #open} is the first; {@link #tick} is the second, and
  * it runs on the same short interval the bump poller does.
  *
+ * <h2>DEBT ARMS THIS, NOT THE HOUR — the fifth live failure</h2>
+ *
+ * <p><b>And then the window became the thing it was built to replace.</b> Splitting the two
+ * decisions left {@link #open} with exactly two callers: the 02:00 cron and the by-hand door. So
+ * every gate below could pass — an idle qits-ci, nothing of ours in flight, a chain of owed
+ * repositories sitting there — and nothing was dispatched, because the first gate could only be
+ * opened by a timestamp. Measured on 2026-09-11: {@code @qits/ui-components} was cut at 10:44,
+ * fifteen repositories were owed by 10:45, thirteen of them with no branch and nothing in flight,
+ * and at 17:20 the window door still answered "no bump dispatch window is open" with qits-ci idle
+ * the whole time. The intended primary upgrade path — something becomes owed, qits-ci goes idle,
+ * the bump is dispatched — had never once run on its own.
+ *
+ * <p>It also cannot be recovered by a wider window: one {@code @qits/ui-components} release is
+ * roughly twenty-eight dispatches, because every frontend ships inside its service as a gitlink and
+ * the service's own bump cannot even begin until the frontend's release has landed and been
+ * rescanned. Squeezed into one six-hour wavefront that does not finish, and what does not finish
+ * does not carry.
+ *
+ * <p><b>So the window is now a CONSEQUENCE OF DEBT.</b> The tick asks the same questions in the same
+ * order with or without a window row, and when it finds something dispatchable owed it opens the
+ * window itself. Nothing else about the gate moves: one at a time, bottom of the chain first, holds,
+ * stalls and the refusal set are all exactly as they were. What is left of the clock is {@link
+ * MaintenanceConfig#bumpQuietHours()}, which says "not now" out loud instead of leaving it as an
+ * implication of a cron, and which suppresses this arming only — {@code POST /bumps/window} is the
+ * explicit override and is not quiet-hours gated, because a person pressing it has said so.
+ *
  * <h2>The three gates, in the order they are asked</h2>
  *
  * <ol>
- *   <li><b>Is the window open</b> — and it closes by itself: when it expires, when the switches say
- *       no, and, the one that matters most, <b>as soon as nothing is owed</b>. A window that closed
- *       because the work is done is the ordinary ending.
+ *   <li><b>Is the window open — or is one owed</b>. It closes by itself: when it expires, when the
+ *       switches say no, and, the one that matters most, <b>as soon as nothing is owed</b>. A window
+ *       that closed because the work is done is the ordinary ending, and a window that closed with
+ *       work still owed is re-opened by the next tick that finds that work.
  *   <li><b>Is anything of ours in flight</b> — {@code activeBumps}, which counts a person's press
  *       as well as the clock's. A bump that is REQUESTED or RUNNING is a build this service asked
  *       for and has not seen the end of.
@@ -89,8 +118,8 @@ import org.jboss.logging.Logger;
  *
  * <p><b>Nothing unwinds a hold, because nothing has to.</b> The release lands, a scan re-reads main,
  * the pending set empties and the repository stops being a candidate at all — there is no expiry, no
- * timer and no state to reconcile. If the release never lands, the six-hour window expiring is the
- * backstop, and the next night starts from whatever main actually says. A FAILED bump holds nothing:
+ * timer and no state to reconcile. If the release never lands, the release-state read below is what
+ * ends the wait. A FAILED bump holds nothing:
  * a failure has to be retryable, and a changed pending set holds nothing either — a new upstream
  * release arrived, and that is a different bump.
  *
@@ -113,6 +142,15 @@ import org.jboss.logging.Logger;
  * service was down for its whole six hours comes back already over and closes on its first tick.
  * The cost is one primary-key read every fifteen seconds; see {@link
  * eu.wohlben.qits.maintenance.persistence.MaintenanceStore#bumpWindow()}.
+ *
+ * <p><b>What {@code closesAt} MEANS once debt opens the window: a safety valve and a reset, never a
+ * guillotine.</b> It used to be the end of the night, and the end of the night silently dropped
+ * whatever the chain had not reached — which is exactly what makes this class of failure invisible.
+ * Now the expiry closes the row <b>saying how many it cut short and which they are</b>, and the same
+ * tick goes on to ask the debt question again: if the work is still owed and the hour is not a quiet
+ * one, a fresh window opens and the queue keeps draining. What expiring still buys is the periodic
+ * reset it always was — the refusal set and the cached release states start clean — and a real stop
+ * the moment a quiet hour is configured and reached.
  *
  * <h2>A hold has to ask what became of the release it is waiting for</h2>
  *
@@ -183,8 +221,14 @@ public class BumpDispatcher {
    * wrong with one repository right now, the process it was a guess about is gone, and the cost of
    * being wrong is one CI run rather than a night that stops. The window is the opposite — losing
    * it costs the whole remaining chain — which is exactly why only one of the two is a row.
+   *
+   * <p><b>And it forgives by itself after {@code bump.internal.window}</b>, which is what it used to
+   * get from the next cron clearing it. With the window opened by debt, a refusal that outlived its
+   * cause could otherwise be permanent: a repository nothing can request is not a candidate, so
+   * nothing is owed, so no window opens, so nothing ever clears the entry. One window's length later
+   * it is asked again, and the worst case is still one CI run.
    */
-  private final Set<String> refused = new LinkedHashSet<>();
+  private final Map<String, Instant> refused = new LinkedHashMap<>();
 
   /**
    * What qits-projects last said about a release request, and when it said it.
@@ -199,8 +243,18 @@ public class BumpDispatcher {
 
   private final Map<String, Seen> releaseStates = new java.util.concurrent.ConcurrentHashMap<>();
 
-  /** Opens the dispatch window. The cron's whole job. */
+  /**
+   * Opens the dispatch window by hand — {@code POST /bumps/window}, and the ungated cron.
+   *
+   * <p><b>It is no longer how the ordinary window opens.</b> Debt opens that one, on the tick that
+   * finds it; this is the override, and it is deliberately not quiet-hours gated, because a person
+   * pressing the door has already said "now".
+   */
   public void open(Instant now) {
+    open(now, "it was opened by hand");
+  }
+
+  private void open(Instant now, String why) {
     Instant closes = now.plus(config.bumpWindow());
     synchronized (refused) {
       refused.clear();
@@ -208,9 +262,9 @@ public class BumpDispatcher {
     releaseStates.clear();
     store.openBumpWindow(now, closes);
     LOG.infof(
-        "The bump dispatch window is open until %s; one bump goes at a time, from the bottom of the"
-            + " chain, whenever qits-ci is idle.",
-        closes);
+        "The bump dispatch window is open until %s (%s); one bump goes at a time, from the bottom of"
+            + " the chain, whenever qits-ci is idle.",
+        closes, why);
   }
 
   /** Closes it, saying why. Idempotent — a window that is already shut logs nothing. */
@@ -239,8 +293,37 @@ public class BumpDispatcher {
   public record Stalled(
       String repository, String group, String requestId, String state, String reason) {}
 
+  /**
+   * A repository owed a bump that this gate declined to ask for, and is not asking for again until
+   * the refusal is forgiven.
+   *
+   * @param repository the repository
+   * @param group the group whose branch it would be
+   * @param changes how many changes that bump would carry
+   */
+  public record Refused(String repository, String group, int changes) {}
+
   /** Every repository owed a bump this tick, split into what may be sent and what is stuck. */
-  public record Assessment(List<BumpOrder.Candidate> candidates, List<Stalled> stalled) {}
+  public record Assessment(
+      List<BumpOrder.Candidate> candidates, List<Stalled> stalled, List<Refused> refused) {}
+
+  /**
+   * ONE LINE OF THE OWED SET, in the order the queue will be drained.
+   *
+   * <p>The listing on {@code GET /bumps} only holds bumps that were <b>dispatched</b>, and the
+   * window door 404'd whenever no window was open — so "fifteen owed, nothing sent" and "the
+   * scheduler is dead" were the same picture from every surface this service has. This is the
+   * missing one: everything owed, why each entry is where it is, computed by the same walk the tick
+   * makes.
+   *
+   * @param repository the repository, as the catalog spells it
+   * @param group the group whose branch is owed
+   * @param changes how many changes the bump would carry
+   * @param reason {@code READY}, {@code BLOCKED}, {@code HELD}, {@code STALLED} or {@code REFUSED}
+   * @param detail the sentence for that reason — what it waits on, or what said no
+   */
+  public record Owed(
+      String repository, String group, int changes, String reason, String detail) {}
 
   /**
    * What the gate decided and everything it decided it from — the tick's whole reasoning, so that
@@ -255,6 +338,7 @@ public class BumpDispatcher {
    * @param owed how many repositories are owed a bump and could still be sent one
    * @param held how many of those are waiting on a release in flight
    * @param stalled the ones waiting on a release that has stopped
+   * @param queue the whole owed set in dispatch order, each entry with its reason
    * @param pick what would be dispatched, or null
    */
   public record Decision(
@@ -266,15 +350,16 @@ public class BumpDispatcher {
       int owed,
       int held,
       List<Stalled> stalled,
+      List<Owed> queue,
       BumpOrder.Pick pick) {
 
     static Decision of(String outcome, String summary) {
-      return new Decision(outcome, summary, null, null, null, 0, 0, List.of(), null);
+      return new Decision(outcome, summary, null, null, null, 0, 0, List.of(), List.of(), null);
     }
 
     Decision with(Integer inFlight, Integer allowed, Integer ciActive) {
       return new Decision(
-          outcome, summary, inFlight, allowed, ciActive, owed, held, stalled, pick);
+          outcome, summary, inFlight, allowed, ciActive, owed, held, stalled, queue, pick);
     }
   }
 
@@ -309,14 +394,13 @@ public class BumpDispatcher {
    */
   private Decision decide(Instant now, boolean commit) {
     Optional<Instant> closes = store.bumpWindow();
-    if (closes.isEmpty()) {
-      return Decision.of("NO_WINDOW", "no dispatch window is open");
-    }
-    if (!now.isBefore(closes.get())) {
-      if (commit) {
-        close("it ended with work still owed; the next schedule opens a new one");
-      }
-      return Decision.of("WINDOW_OVER", "the window has expired and closes on this tick");
+    boolean open = closes.isPresent() && now.isBefore(closes.get());
+    if (closes.isPresent() && !open && commit) {
+      // THE EXPIRY SAYS WHAT IT CUT SHORT and then gets out of the way: the debt question below is
+      // asked on this same tick, so a chain that is still owed simply carries on under a fresh
+      // window. Silently dropping the rest of a chain is what made this class of failure invisible.
+      closeExpired();
+      open = false;
     }
     if (!config.bumpEnabled()) {
       if (commit) {
@@ -331,30 +415,45 @@ public class BumpDispatcher {
       return Decision.of("DISABLED", "qits.maintenance.bump.internal.auto is false");
     }
 
-    // THE IN-FLIGHT COUNT IS ASKED BEFORE THE CANDIDATES, and the order is what keeps the window
-    // from shutting on its own work: the repository being bumped right now is not a candidate — an
-    // active bump is a skip — so a check the other way round would read "nothing is owed" while the
-    // night's last bump is still running.
+    int allowed = config.bumpMaxInFlight();
+    int inFlight = store.activeBumps().size();
+
+    // THE WALK RUNS EVEN WHEN THE ANSWER IS ALREADY NO, because "what is owed" is the question this
+    // service could not answer about itself. `GET /bumps` holds only bumps that were dispatched, so
+    // between two dispatches — which is most of the time — a reader had nothing at all to look at.
+    // It costs one inventory walk per fifteen seconds; a single needless CI run costs more.
+    Assessment assessment = assess();
+    List<BumpOrder.Candidate> candidates = assessment.candidates();
+    List<Stalled> stalled = assessment.stalled();
+    List<Owed> owedList = queueOf(assessment);
+    int heldCount = (int) candidates.stream().filter(BumpOrder.Candidate::held).count();
+
+    // ASKED BEFORE THE WINDOW IS CLOSED ON AN EMPTY CANDIDATE LIST, and the order is what keeps the
+    // window from shutting on its own work: the repository being bumped right now is not a candidate
+    // — an active bump is a skip — so a check the other way round would read "nothing is owed" while
+    // the night's last bump is still running.
     //
     // AND IT COUNTS TARGETED BUMPS TOO, deliberately. Everything else about a targeted bump is
     // outside this gate — it is not a candidate, it holds no group's lock and it waits on no release
     // — but it IS a CI run this service asked for, and the whole of what this number is for is not
     // handing qits-ci more than it can take. A count that saw only the nightly half would open the
     // valve at exactly the moment somebody's release request had a build going.
-    int allowed = config.bumpMaxInFlight();
-    int inFlight = store.activeBumps().size();
     if (inFlight >= allowed) {
       LOG.debugf(
           "%d bump(s) are in flight and %d are allowed; nothing is dispatched.", inFlight, allowed);
-      return Decision.of(
-              "IN_FLIGHT", inFlight + " bump(s) of ours are still running and " + allowed + " may be")
-          .with(inFlight, allowed, null);
+      return new Decision(
+          "IN_FLIGHT",
+          inFlight + " bump(s) of ours are still running and " + allowed + " may be",
+          inFlight,
+          allowed,
+          null,
+          candidates.size(),
+          heldCount,
+          stalled,
+          owedList,
+          null);
     }
 
-    Assessment assessment = assess();
-    List<BumpOrder.Candidate> candidates = assessment.candidates();
-    List<Stalled> stalled = assessment.stalled();
-    int heldCount = (int) candidates.stream().filter(BumpOrder.Candidate::held).count();
     if (candidates.isEmpty()) {
       // NOTHING DISPATCHABLE IS OWED, and a window whose remainder is stalled closes here too. It
       // must: staying open for work that cannot be done is a night that never ends and a gate that
@@ -380,7 +479,38 @@ public class BumpDispatcher {
           0,
           0,
           stalled,
+          owedList,
           null);
+    }
+
+    // SOMETHING DISPATCHABLE IS OWED — which, with no window row, is the whole of the reason to open
+    // one. This is the arming the design always described and never had: no hour is consulted, and
+    // the only thing that can still say "not now" says so by name.
+    if (!open) {
+      QuietHours quiet = config.bumpQuietHours();
+      if (quiet.covers(now, config.timeZone())) {
+        LOG.debugf(
+            "%d bump(s) are owed but %s is a quiet hour; nothing is dispatched.",
+            candidates.size(), now);
+        return new Decision(
+            "QUIET_HOURS",
+            candidates.size()
+                + " bump(s) are owed, and this hour is quiet"
+                + " (qits.maintenance.bump.dispatch.quiet-hours="
+                + quiet
+                + ")",
+            inFlight,
+            allowed,
+            null,
+            candidates.size(),
+            heldCount,
+            stalled,
+            owedList,
+            null);
+      }
+      if (commit) {
+        open(now, candidates.size() + " repositor(ies) are owed a bump");
+      }
     }
 
     CiClient.QueueState queue = ci.activeRuns();
@@ -396,6 +526,7 @@ public class BumpDispatcher {
           candidates.size(),
           heldCount,
           stalled,
+          owedList,
           null);
     }
     if (queue.active() >= allowed) {
@@ -411,6 +542,7 @@ public class BumpDispatcher {
           candidates.size(),
           heldCount,
           stalled,
+          owedList,
           null);
     }
 
@@ -430,6 +562,7 @@ public class BumpDispatcher {
           candidates.size(),
           heldCount,
           stalled,
+          owedList,
           null);
     }
     return new Decision(
@@ -441,6 +574,7 @@ public class BumpDispatcher {
         candidates.size(),
         heldCount,
         stalled,
+        owedList,
         pick.get());
   }
 
@@ -471,13 +605,102 @@ public class BumpDispatcher {
       return Optional.of(id);
     } catch (RuntimeException e) {
       synchronized (refused) {
-        refused.add(candidate.repository());
+        refused.put(candidate.repository(), Instant.now());
       }
       LOG.warnf(
-          "Could not dispatch the scheduled bump of %s/%s: %s; it is left for the next window.",
-          candidate.repository(), candidate.group(), e.getMessage());
+          "Could not dispatch the scheduled bump of %s/%s: %s; it is not asked for again for %s.",
+          candidate.repository(), candidate.group(), e.getMessage(), config.bumpWindow());
       return Optional.empty();
     }
+  }
+
+  /** Whether this repository's refusal is still standing, forgiving the ones that have aged out. */
+  private boolean isRefused(String repository, Instant now) {
+    synchronized (refused) {
+      Instant at = refused.get(repository);
+      if (at == null) {
+        return false;
+      }
+      if (at.plus(config.bumpWindow()).isAfter(now)) {
+        return true;
+      }
+      refused.remove(repository);
+      return false;
+    }
+  }
+
+  /**
+   * The window's expiry, said out loud.
+   *
+   * <p>It closes the row and names what was still owed when it did. The tick then asks the debt
+   * question again, so this is a reset and a line in the log rather than an ending — but the line
+   * has to exist: a window that expired mid-chain used to take the rest of the chain with it and say
+   * nothing at all, which is exactly what makes this class of failure invisible.
+   */
+  private void closeExpired() {
+    Assessment assessment = assess();
+    int owed = assessment.candidates().size();
+    if (owed == 0) {
+      close("it reached the end of " + config.bumpWindow() + " with nothing owed");
+      return;
+    }
+    List<String> names = new ArrayList<>();
+    for (BumpOrder.Candidate candidate : assessment.candidates()) {
+      names.add(candidate.repository());
+    }
+    LOG.infof(
+        "The bump dispatch window reached the end of %s with %d repositor(ies) still owed a bump"
+            + " (%s); it is closed and this tick opens a fresh one unless the hour is quiet.",
+        config.bumpWindow(), owed, String.join(", ", names));
+    close("it reached the end of " + config.bumpWindow() + " with " + owed + " still owed");
+  }
+
+  /**
+   * The owed set as a reader gets it: dispatchable ones in {@link BumpOrder}'s order, then the ones
+   * waiting on a release that has stopped, then the ones this gate refused to ask for.
+   *
+   * <p>The three groups are one listing rather than three fields because the question behind the
+   * door is one question — "what is owed, and why has none of it gone" — and answering it out of
+   * three shapes is how the previous four investigations of this gate went.
+   */
+  private List<Owed> queueOf(Assessment assessment) {
+    List<Owed> owed = new ArrayList<>();
+    for (BumpOrder.Standing standing :
+        BumpOrder.standing(assessment.candidates(), artifacts.producers())) {
+      BumpOrder.Candidate candidate = standing.candidate();
+      String detail =
+          switch (standing.reason()) {
+            case "READY" -> "nothing owed sits below it";
+            case "BLOCKED" -> "it waits on " + String.join(", ", standing.blockedBy());
+            default -> "its branch is pushed and it waits on its own release";
+          };
+      owed.add(
+          new Owed(
+              candidate.repository(),
+              candidate.group(),
+              candidate.changes().size(),
+              standing.reason(),
+              detail));
+    }
+    for (Stalled one : assessment.stalled()) {
+      owed.add(
+          new Owed(
+              one.repository(),
+              one.group(),
+              0,
+              "STALLED",
+              "its release request " + one.requestId() + " is " + one.state() + ": " + one.reason()));
+    }
+    for (Refused one : assessment.refused()) {
+      owed.add(
+          new Owed(
+              one.repository(),
+              one.group(),
+              one.changes(),
+              "REFUSED",
+              "this gate could not ask for it and is not asking again for " + config.bumpWindow()));
+    }
+    return List.copyOf(owed);
   }
 
   /**
@@ -504,17 +727,14 @@ public class BumpDispatcher {
   /** The same walk, keeping what it had to drop and why. */
   public Assessment assess() {
     String group = GroupConfig.DEFAULT_GROUP;
+    Instant now = Instant.now();
     Map<String, MtLatest> latest = PendingChanges.index(store.allLatest());
     List<BumpOrder.Candidate> candidates = new ArrayList<>();
     List<Stalled> stalled = new ArrayList<>();
+    List<Refused> refusals = new ArrayList<>();
     for (MtRepository row : store.repositories()) {
       if (!RepositoryStatus.OK.name().equals(row.status)) {
         continue;
-      }
-      synchronized (refused) {
-        if (refused.contains(row.name)) {
-          continue;
-        }
       }
       List<MtGroup> groups = store.groups(row.name);
       if (groups.stream().noneMatch(candidate -> candidate.name.equals(group))) {
@@ -528,6 +748,14 @@ public class BumpDispatcher {
       if (store.activeBump(row.name, group).isPresent()) {
         continue;
       }
+      // THE REFUSAL IS ASKED HERE RATHER THAN AT THE TOP OF THE LOOP, one read later than it used
+      // to be, so that a refused repository is still REPORTED as owed. Skipping it before its
+      // pending set was computed made it vanish from every surface at once — which is the same
+      // silence this ticket is about, one repository at a time.
+      if (isRefused(row.name, now)) {
+        refusals.add(new Refused(row.name, group, changes.size()));
+        continue;
+      }
       Hold hold = hold(row, group, changes);
       if (hold.stalled() != null) {
         stalled.add(hold.stalled());
@@ -535,7 +763,7 @@ public class BumpDispatcher {
       }
       candidates.add(new BumpOrder.Candidate(row.name, group, changes, hold.held()));
     }
-    return new Assessment(List.copyOf(candidates), List.copyOf(stalled));
+    return new Assessment(List.copyOf(candidates), List.copyOf(stalled), List.copyOf(refusals));
   }
 
   /**

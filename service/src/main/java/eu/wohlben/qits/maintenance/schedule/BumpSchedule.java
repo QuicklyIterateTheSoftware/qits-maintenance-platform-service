@@ -25,14 +25,20 @@ import org.jboss.logging.Logger;
 /**
  * The nightly internal bump: one branch per repository whose own releases have moved on.
  *
- * <h2>It no longer dispatches — it opens a window</h2>
+ * <h2>It no longer dispatches, and it no longer opens a window either</h2>
  *
  * <p>This cron used to walk the inventory and ask for every eligible bump in one tight loop. That
  * put the whole night's builds into qits-ci as one wavefront and it put a library's bump and its
  * consumer's in the same breath, so the consumer built against the pin it was about to be handed
- * anyway. Both are fixed by moving the DISPATCH somewhere else: this cron now decides only that the
- * night is open for business ({@link BumpDispatcher#open}), and {@link BumpDispatchSchedule} hands
- * out one bump at a time, from the bottom of the dependency chain, while qits-ci is idle.
+ * anyway. Both were fixed by moving the DISPATCH somewhere else: the cron opened a window and
+ * {@link BumpDispatchSchedule} handed out one bump at a time, from the bottom of the dependency
+ * chain, while qits-ci was idle.
+ *
+ * <p><b>Which left the hour as the only thing that could arm any of it, and that was the next
+ * defect.</b> {@link BumpDispatcher} now opens its own window the moment something dispatchable is
+ * owed — see its javadoc for the day fifteen repositories waited for a timestamp — so in gated
+ * mode this cron does nothing at all. It is kept because {@code bump.dispatch.gated=false} still
+ * fires from here, and because a line at 02:00 is where somebody goes looking.
  *
  * <p><b>{@code qits.maintenance.bump.dispatch.gated=false} brings the old loop back</b>, unchanged,
  * in {@link #requestInternalBumps()}. It is kept reachable rather than deleted because how much a
@@ -134,26 +140,23 @@ public class BumpSchedule {
   }
 
   /**
-   * The gated night: the window opens and nothing is asked for here.
+   * The gated night: <b>nothing at all, because the dispatcher arms itself on debt.</b>
    *
-   * <p>The two switches are read again by every tick, so a deployment that flips one at 03:00 is
-   * obeyed at 03:00 — but reading them here too keeps the ordinary "it is off" line in the log at
-   * the hour somebody looks for it, rather than as a window that opens and shuts a tick later.
+   * <p>This used to open the window, and that was the whole of the defect it is now free of: {@link
+   * BumpDispatcher#open} had two callers — this hour and the by-hand door — so a release cut at
+   * 10:44 waited until 02:00 with an idle qits-ci in front of it. The tick asks the debt question
+   * every fifteen seconds and opens its own window when something dispatchable is owed, so an hour
+   * that opened one as well could only mean one thing: a way around {@code
+   * qits.maintenance.bump.dispatch.quiet-hours}, which is now where "not now" is said.
+   *
+   * <p><b>The cron is kept for the ungated mode</b> ({@code bump.dispatch.gated=false}), where it
+   * still is the thing that fires, and as the line in the log at the hour somebody looks for it.
    */
   private void openTheDispatchWindow() {
-    if (!config.bumpEnabled()) {
-      LOG.infof(
-          "Bumping is disabled (qits.maintenance.bump.enabled=false); no dispatch window is"
-              + " opened.");
-      return;
-    }
-    if (!config.bumpInternalAuto()) {
-      LOG.infof(
-          "The nightly internal bump is off (qits.maintenance.bump.internal.auto=false); the"
-              + " buttons still work.");
-      return;
-    }
-    dispatcher.open(Instant.now());
+    LOG.infof(
+        "Bump dispatch is gated and arms itself on debt — nothing is opened by the clock. Quiet"
+            + " hours are qits.maintenance.bump.dispatch.quiet-hours; POST /bumps/window is the"
+            + " override.");
   }
 
   /** One bump per OK repository whose INTERNAL group has something pending and no writer. */

@@ -1038,6 +1038,13 @@ class MaintenanceApiTest {
    * <p>The three verbs in one method because they are one fact's lifecycle: none, opened, none
    * again. The DELETE is asserted twice on purpose — closing a window that is not there is the
    * caller asking for a state, not for a transition.
+   *
+   * <p><b>The GET is 200 in all three states, and the 404 it used to give with no window open was a
+   * real cost.</b> The question this door is opened with is "why has nothing been dispatched", and
+   * answering it with "there is no window" said only that the first gate was shut — while the bump
+   * listing beside it holds only bumps that were dispatched. Fifteen repositories owed since the
+   * morning and a dead scheduler were the same picture from every surface. With no window the two
+   * timestamps are null and the reasoning is answered anyway.
    */
   @Test
   void theDispatchWindowIsOpenedClosedAndReadThroughItsOwnDoor() {
@@ -1046,8 +1053,12 @@ class MaintenanceApiTest {
         .when()
         .get(BASE + "/bumps/window")
         .then()
-        .statusCode(404)
-        .body("message", notNullValue());
+        .statusCode(200)
+        .body("open", equalTo(false))
+        .body("openedAt", nullValue())
+        .body("closesAt", nullValue())
+        .body("outcome", notNullValue())
+        .body("summary", notNullValue());
 
     given()
         .when()
@@ -1061,7 +1072,12 @@ class MaintenanceApiTest {
 
     given().when().delete(BASE + "/bumps/window").then().statusCode(204);
     given().when().delete(BASE + "/bumps/window").then().statusCode(204);
-    given().when().get(BASE + "/bumps/window").then().statusCode(404);
+    given()
+        .when()
+        .get(BASE + "/bumps/window")
+        .then()
+        .statusCode(200)
+        .body("open", equalTo(false));
   }
 
   @Test

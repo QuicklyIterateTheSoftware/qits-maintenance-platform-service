@@ -9,11 +9,17 @@ import org.jboss.logging.Logger;
 /**
  * What hands the night's bumps out, one at a time.
  *
- * <p><b>The tick is short and the decision is small</b>: while {@link BumpSchedule}'s window is
- * open, ask whether qits-ci is idle and, if it is, send the deepest owed bump. Everything about why
- * — the gates, the ordering, the cycle rule — is {@link BumpDispatcher}'s; what lives here is the
+ * <p><b>The tick is short and the decision is small</b>: ask whether anything is owed and qits-ci is
+ * idle and, if so, send the deepest owed bump. Everything about why — the gates, the ordering, the
+ * cycle rule, the window it opens for itself — is {@link BumpDispatcher}'s; what lives here is the
  * clock and the one guarantee a schedule owes: a failure is a line in the log and a retry fifteen
  * seconds later, never a dead scheduler thread.
+ *
+ * <p><b>THIS IS NOW THE ONLY THING THAT ARMS A DISPATCH.</b> It used to wait for {@link
+ * BumpSchedule} to open a window at 02:00, which meant the primary upgrade path — something becomes
+ * owed, qits-ci goes idle, the bump goes — could not happen at any other hour: on 2026-09-11
+ * fifteen repositories sat owed from 10:44 to 17:20 with an empty CI queue in front of them. The
+ * dispatcher opens the window itself now, and this tick is what asks it to.
  *
  * <p><b>It shares {@code bump.poll-interval} with {@link BumpPollSchedule} on purpose.</b> That
  * interval is already sized as "far below the length of any pipeline and far above the cost of the
@@ -25,8 +31,10 @@ import org.jboss.logging.Logger;
  * jobs with different failure modes — the sweep moves work this service already started, and this
  * decides whether to start any — and {@code SKIP} on one must not delay the other.
  *
- * <p><b>Outside a window this costs nothing at all.</b> The dispatcher answers on a null window
- * before it reads anything, so for twenty-three hours of the day this is a field read.
+ * <p><b>What it costs when nothing is owed is one inventory walk.</b> The dispatcher used to answer
+ * on a null window before reading anything, which is precisely how it never noticed the work; the
+ * walk it does instead is the same three-table read {@code PendingChanges} does on every page load,
+ * and a single needless CI run costs more than a day of it.
  */
 @ApplicationScoped
 public class BumpDispatchSchedule {

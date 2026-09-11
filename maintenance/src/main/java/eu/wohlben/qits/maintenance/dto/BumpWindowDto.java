@@ -18,12 +18,19 @@ import java.util.List;
  * release requests, and the fourth was a stalled release nothing reported at all. The gate knows
  * why it is not dispatching at the moment it decides not to; this is that answer, said out loud.
  *
- * @param openedAt when the cron — or the button — opened it
- * @param closesAt when it ends
+ * <p><b>It is answered whether or not a window is open, and that is the point of the fourth field
+ * down.</b> This door used to 404 when there was no window row, and {@code GET /bumps} only holds
+ * bumps that were <i>dispatched</i> — so "fifteen repositories are owed and nothing has been sent"
+ * and "the scheduler is dead" were the same picture from every surface this service has, which is
+ * how a dispatch path that never armed itself sat unnoticed for a day. With no window the row
+ * fields are null, {@code open} is false, and {@code queue} still carries everything owed.
+ *
+ * @param openedAt when the debt — or the button — opened it, null when no window is open
+ * @param closesAt when it ends, null when no window is open
  * @param open whether anything would be dispatched right now
- * @param outcome which gate answered: {@code NO_WINDOW}, {@code WINDOW_OVER}, {@code DISABLED},
- *     {@code IN_FLIGHT}, {@code NOTHING_OWED}, {@code ALL_STALLED}, {@code CI_UNREADABLE}, {@code
- *     CI_BUSY}, {@code WAITING_ON_RELEASES} or {@code DISPATCH}
+ * @param outcome which gate answered: {@code DISABLED}, {@code IN_FLIGHT}, {@code NOTHING_OWED},
+ *     {@code ALL_STALLED}, {@code QUIET_HOURS}, {@code CI_UNREADABLE}, {@code CI_BUSY}, {@code
+ *     WAITING_ON_RELEASES} or {@code DISPATCH}
  * @param summary the same thing as a sentence
  * @param inFlight bumps of this service's that have not ended, null when the gate answered before
  *     asking
@@ -34,6 +41,7 @@ import java.util.List;
  * @param held how many of those are waiting on a release of their own branch
  * @param stalled the ones waiting on a release that has STOPPED — these are not owed any more as
  *     far as the dispatcher is concerned, and each one names the request and what qits-projects said
+ * @param queue THE WHOLE OWED SET, in the order it will be handed out, each entry with its reason
  * @param next what would be dispatched right now, null when nothing would be
  */
 public record BumpWindowDto(
@@ -48,7 +56,23 @@ public record BumpWindowDto(
     int owed,
     int held,
     List<StalledBumpDto> stalled,
+    List<OwedBumpDto> queue,
     String next) {
+
+  /**
+   * One repository owed a bump, and why it is where it is in the queue.
+   *
+   * @param repository the repository
+   * @param group the group whose branch is owed
+   * @param changes how many changes that bump would carry
+   * @param reason {@code READY} (the head of the list is what goes next), {@code BLOCKED} (owed
+   *     repositories sit below it), {@code HELD} (its branch is pushed and it waits on its own
+   *     release), {@code STALLED} (that release has stopped) or {@code REFUSED} (this gate could not
+   *     ask for it)
+   * @param detail the sentence for that reason — what it waits on, or what said no
+   */
+  public record OwedBumpDto(
+      String repository, String group, int changes, String reason, String detail) {}
 
   /**
    * One repository owed a bump whose release has stopped.
