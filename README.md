@@ -591,7 +591,8 @@ than the run's.
 ## API
 
 Under `/maintenance/api`, path-routed on every vhost. Every route takes `qits:admin` (a person, via
-the edge's `X-Qits-User` / `X-Qits-Roles`) or `qits:system` (a machine, via a bearer). There is no anonymous route. Every
+the edge's `X-Qits-User` / `X-Qits-Roles`) or `qits:system` (a machine, via a bearer). Every `GET`
+also takes `qits:agent` (a commissioned agent); no write does. There is no anonymous route. Every
 error body is `{"message": "..."}`.
 
 ```

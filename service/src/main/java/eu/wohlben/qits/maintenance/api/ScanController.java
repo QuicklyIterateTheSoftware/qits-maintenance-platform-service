@@ -94,7 +94,7 @@ public class ScanController {
   @Operation(summary = "One scan and its status")
   @APIResponse(responseCode = "200", description = "The scan")
   @APIResponse(responseCode = "404", description = "No such scan")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public ScanDto scan(@PathParam("id") String id) {
     UUID scanId;
     try {

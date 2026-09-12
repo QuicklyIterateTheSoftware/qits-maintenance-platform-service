@@ -37,7 +37,8 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * gateway's forward-auth headers) and {@code qits:system} (a machine, through a bearer validated
  * against qits-platform-idp). A bump is asked for by an operator in a browser and could as well be
  * asked for by a machine; a machine-only guard would lock the operator out of the button this
- * service exists to offer. There is no anonymous route here.
+ * service exists to offer. There is no anonymous route here. The reads also take {@code
+ * qits:agent} (a commissioned agent); the bumps do not.
  */
 @Path("/repositories")
 @Produces(MediaType.APPLICATION_JSON)
@@ -80,7 +81,7 @@ public class RepositoryController {
   @GET
   @Operation(summary = "Every repository in the inventory, with its groups and what is pending")
   @APIResponse(responseCode = "200", description = "The repositories")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public List<RepositoryDto> repositories() {
     return inventory.repositories();
   }
@@ -96,7 +97,7 @@ public class RepositoryController {
   @Operation(summary = "One repository with every pin it holds")
   @APIResponse(responseCode = "200", description = "The repository")
   @APIResponse(responseCode = "404", description = "No such repository in the inventory")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public RepositoryDetailDto repository(@PathParam("name") String name) {
     return inventory.repository(name);
   }
@@ -119,7 +120,7 @@ public class RepositoryController {
   @jakarta.ws.rs.Path("/{name}/dependents")
   @Operation(summary = "Who embeds the artifacts this repository publishes")
   @APIResponse(responseCode = "200", description = "The dependents, per published artifact")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public RepositoryDependentsDto dependents(@PathParam("name") String name) {
     return graph.repositoryDependents(name);
   }
@@ -151,7 +152,7 @@ public class RepositoryController {
   @jakarta.ws.rs.Path("/{name}/downstream")
   @Operation(summary = "Everything downstream of this repository, ordered upstream first")
   @APIResponse(responseCode = "200", description = "The closure, depth ascending then name")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public DownstreamDto downstream(@PathParam("name") String name) {
     return adoption.downstream(name);
   }

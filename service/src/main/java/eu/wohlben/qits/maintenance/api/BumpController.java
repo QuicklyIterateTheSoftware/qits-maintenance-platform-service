@@ -66,7 +66,7 @@ public class BumpController {
   @jakarta.ws.rs.Path("/window")
   @Operation(summary = "The bump dispatch window and everything owed a bump")
   @APIResponse(responseCode = "200", description = "The window, or the reason there is none")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public BumpWindowDto window() {
     return inventory.bumpWindow(Instant.now());
   }
@@ -105,7 +105,7 @@ public class BumpController {
   @GET
   @Operation(summary = "The newest bumps, of one repository or of all of them")
   @APIResponse(responseCode = "200", description = "The bumps")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public List<BumpDto> bumps(
       @QueryParam("repository") String repository,
       @QueryParam("limit") @DefaultValue("" + DEFAULT_LIMIT) int limit) {
@@ -123,7 +123,7 @@ public class BumpController {
   @Operation(summary = "One bump with the changes it sent")
   @APIResponse(responseCode = "200", description = "The bump")
   @APIResponse(responseCode = "404", description = "No such bump")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public BumpDto bump(@PathParam("id") String id) {
     UUID bumpId;
     try {

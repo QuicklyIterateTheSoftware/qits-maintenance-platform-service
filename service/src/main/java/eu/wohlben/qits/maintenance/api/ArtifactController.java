@@ -55,7 +55,7 @@ public class ArtifactController {
   @GET
   @Operation(summary = "Every artifact this platform publishes, with its reach")
   @APIResponse(responseCode = "200", description = "The artifacts")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public List<ArtifactDto> artifacts() {
     return graph.artifacts();
   }
