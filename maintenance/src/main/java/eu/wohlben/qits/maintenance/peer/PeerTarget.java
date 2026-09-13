@@ -1,20 +1,20 @@
 package eu.wohlben.qits.maintenance.peer;
 
 /**
- * Every address this service reads or writes, and the credential each one takes.
+ * Every address this service reads or writes.
  *
- * <p><b>Nine targets, five credentials.</b> A target is an ADDRESS — a configured base url a path
- * is appended to — while a credential is an oidc client, and a token is cut for one SERVICE. The
- * three registry targets on qits-artifacts share one client because they are one service behind
- * three path prefixes; splitting them would be three tokens for one audience.
+ * <p><b>Nine targets, one credential.</b> A target is an ADDRESS — a configured base url a path is
+ * appended to. There used to be five oidc clients, one per peer SERVICE, because a token used to be
+ * cut FOR one service's own audience; service-client-identity-plan.md's C4 replaced all five with
+ * one named client, {@code qits}, addressed to the one platform audience every receiver now accepts.
+ * {@link PeerTokens} mints through it for every target below — the three registry targets on
+ * qits-artifacts already shared one client because they are one service behind three path prefixes,
+ * and now every target does.
  *
  * <p><b>There was a tenth, qits-configuration, and it went with the release trains.</b> It answered
  * "who runs which image version" for a train end that was POLLED because no event covers it —
  * re-read inside a human GET, every ten minutes, for a fact qits-configuration owns and shows one
  * click away. The ad-hoc adoption routes ask nothing over the wire at all.
- *
- * <p>Constants rather than an enum for the credential name, because the same string is two things:
- * the middle of {@code quarkus.oidc-client.<name>.*} and the key {@link PeerTokens} switches on.
  */
 public enum PeerTarget {
 
@@ -28,22 +28,22 @@ public enum PeerTarget {
    * credential every catalog read already mints — the route admits {@code qits:system}, which is what
    * {@link PeerClient} presents — so the write cost this service nothing a read did not already have.
    */
-  PROJECTS("qits.maintenance.targets.projects-url", Credential.PROJECTS),
+  PROJECTS("qits.maintenance.targets.projects-url"),
 
   /** qits-githost — the manifests, read at one revision per repository. */
-  GITHOST("qits.maintenance.targets.githost-url", Credential.GITHOST),
+  GITHOST("qits.maintenance.targets.githost-url"),
 
   /** qits-ci — the trigger that applies a bump, and the run it names. */
-  CI("qits.maintenance.targets.ci-url", Credential.CI),
+  CI("qits.maintenance.targets.ci-url"),
 
   /** qits-artifacts' hosted maven repository: {@code maven-metadata.xml} for internal artifacts. */
-  MAVEN_REGISTRY("qits.maintenance.registries.maven-url", Credential.ARTIFACTS),
+  MAVEN_REGISTRY("qits.maintenance.registries.maven-url"),
 
   /** qits-artifacts' hosted npm repository: the packument's {@code dist-tags.latest}. */
-  NPM_REGISTRY("qits.maintenance.registries.npm-url", Credential.ARTIFACTS),
+  NPM_REGISTRY("qits.maintenance.registries.npm-url"),
 
   /** qits-artifacts' OCI registry: {@code /<name>/tags/list}. */
-  OCI_REGISTRY("qits.maintenance.registries.oci-url", Credential.ARTIFACTS),
+  OCI_REGISTRY("qits.maintenance.registries.oci-url"),
 
   /**
    * qits-artifacts' SBOM store: {@code /artifacts/sboms/<type>/<name>/-/<version>}.
@@ -53,40 +53,22 @@ public enum PeerTarget {
    * and moving it is a deployment's decision — while the SBOM route is qits-artifacts' own API and
    * its whole path belongs to the caller. So the key is a bare host and the prefix is in the code.
    */
-  ARTIFACTS_SBOM("qits.maintenance.targets.artifacts-url", Credential.ARTIFACTS),
+  ARTIFACTS_SBOM("qits.maintenance.targets.artifacts-url"),
 
   /** qits-platform-mirror's Maven Central pull-through. */
-  MAVEN_MIRROR("qits.maintenance.mirror.maven-url", Credential.MIRROR),
+  MAVEN_MIRROR("qits.maintenance.mirror.maven-url"),
 
   /** qits-platform-mirror's npmjs pull-through. */
-  NPM_MIRROR("qits.maintenance.mirror.npm-url", Credential.MIRROR);
-
-  /** The five oidc client names — one per SERVICE, because a token is cut for one service. */
-  public static final class Credential {
-    public static final String PROJECTS = "projects";
-    public static final String GITHOST = "githost";
-    public static final String CI = "ci";
-    public static final String ARTIFACTS = "artifacts";
-    public static final String MIRROR = "mirror";
-
-    private Credential() {}
-  }
+  NPM_MIRROR("qits.maintenance.mirror.npm-url");
 
   private final String urlKey;
-  private final String credential;
 
-  PeerTarget(String urlKey, String credential) {
+  PeerTarget(String urlKey) {
     this.urlKey = urlKey;
-    this.credential = credential;
   }
 
   /** The config key holding this target's base url. */
   public String urlKey() {
     return urlKey;
-  }
-
-  /** The oidc client that mints for the service behind this address. */
-  public String credential() {
-    return credential;
   }
 }

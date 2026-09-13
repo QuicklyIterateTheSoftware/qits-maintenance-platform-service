@@ -6,37 +6,27 @@ import io.quarkus.oidc.client.runtime.TokensHelper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Duration;
-import java.util.Map;
 import java.util.Optional;
 import org.eclipse.microprofile.config.ConfigProvider;
 import org.jboss.logging.Logger;
 
 /**
- * The five named oidc clients — one per peer SERVICE — and the reason there are five.
+ * The one named oidc client, {@code qits}, and the bearer it mints for every peer.
  *
- * <p><b>A token is cut FOR one service.</b> qits-githost refuses a bearer whose audience names
- * qits-ci, so a single client could talk to one peer only. The client id is the same everywhere
- * (this service) and only {@code grant-options.client.audience} differs, which is also the one
- * setting the shipped defaults deliberately leave unset: it is environment-qualified
- * ({@code dev-qits-ci}) and an image every environment shares must not name a tier it may not be
- * running in.
+ * <p><b>One client now, where there used to be five.</b> A token used to be cut FOR one service's
+ * own audience — qits-githost refused a bearer whose audience named qits-ci — so a peer-scoped call
+ * needed a peer-scoped client. service-client-identity-plan.md's C4 gave every token one platform
+ * audience instead, {@code qits-platform}, which every receiver now accepts; one client mints it for
+ * every peer this service calls.
  *
- * <p><b>The switch is the extension's own</b>, {@code quarkus.oidc-client.<peer>.client-enabled},
- * false in the shipped properties. There is no key of ours beside it — one switch cannot disagree
- * with itself. Off, this answers empty and the call goes out with the forward-auth headers alone.
+ * <p><b>The switch is the extension's own</b>, {@code quarkus.oidc-client.qits.client-enabled}. Its
+ * shipped fallback reads the OLD {@code projects} client's toggle, so a deployment that has not
+ * touched its extras yet keeps behaving as it did before this commit. There is no key of ours beside
+ * it — one switch cannot disagree with itself. Off, this answers empty and a call goes out with the
+ * forward-auth headers alone.
  *
  * <p><b>The release ask needs no client of its own.</b> It goes to qits-projects, on the credential
- * every catalog read already mints — which is why the qits-workspaces release door's client went
- * with the door.
- *
- * <p><b>And a second one has gone the same way</b>: audience qits-configuration, minted for the
- * release trains' config-pin sweep. The trains are retired and so is the poll — an adoption question
- * is answered out of this service's own tables now and dials nobody.
- *
- * <p><b>Two of the five are for reads that are anonymous on qits-net today.</b> qits-artifacts'
- * registry routes and qits-platform-mirror's proxies take no credential in network, so those
- * clients exist for the day the edge's rule reaches the inside — turning one on is three
- * environment variables, not a code change.
+ * every catalog read already mints.
  *
  * <p><b>A token this cannot mint is empty rather than an exception</b>, the orchestrator's stance:
  * the refusal that matters belongs to the call itself. An anonymous call to a guarded peer comes
@@ -52,73 +42,30 @@ public class PeerTokens {
   private static final Duration TOKEN_TIMEOUT = Duration.ofSeconds(5);
 
   @Inject
-  @NamedOidcClient("projects")
-  OidcClient projects;
+  @NamedOidcClient("qits")
+  OidcClient qits;
 
-  @Inject
-  @NamedOidcClient("githost")
-  OidcClient githost;
+  /** Caches and refreshes the token, so a scan of seventy repositories is not seventy token
+   * requests. */
+  private final TokensHelper helper = new TokensHelper();
 
-  @Inject
-  @NamedOidcClient("ci")
-  OidcClient ci;
-
-  @Inject
-  @NamedOidcClient("artifacts")
-  OidcClient artifacts;
-
-  @Inject
-  @NamedOidcClient("mirror")
-  OidcClient mirror;
-
-  /** Caches and refreshes each peer's token, so a scan of seventy repositories is not seventy
-   * token requests. */
-  private final Map<String, TokensHelper> helpers =
-      Map.of(
-          PeerTarget.Credential.PROJECTS, new TokensHelper(),
-          PeerTarget.Credential.GITHOST, new TokensHelper(),
-          PeerTarget.Credential.CI, new TokensHelper(),
-          PeerTarget.Credential.ARTIFACTS, new TokensHelper(),
-          PeerTarget.Credential.MIRROR, new TokensHelper());
-
-  /** The bearer for one peer, or empty when its client is disabled or cannot mint. */
-  public Optional<String> token(String credential) {
-    if (!enabled(credential)) {
-      return Optional.empty();
-    }
-    OidcClient client = client(credential);
-    TokensHelper helper = helpers.get(credential);
-    if (client == null || helper == null) {
+  /** The bearer for every peer, or empty when the client is disabled or cannot mint. */
+  public Optional<String> token() {
+    if (!enabled()) {
       return Optional.empty();
     }
     try {
-      return Optional.ofNullable(
-              helper.getTokens(client).await().atMost(TOKEN_TIMEOUT).getAccessToken())
+      return Optional.ofNullable(helper.getTokens(qits).await().atMost(TOKEN_TIMEOUT).getAccessToken())
           .filter(value -> !value.isBlank());
     } catch (RuntimeException e) {
-      LOG.warnf("Could not get a machine token for %s: %s", credential, e.toString());
+      LOG.warnf("Could not get a machine token for a peer: %s", e.toString());
       return Optional.empty();
     }
   }
 
-  /**
-   * Read per call rather than injected as five booleans: the key name carries the peer, and one
-   * lookup keeps this class from growing a field per peer twice over.
-   */
-  private boolean enabled(String credential) {
+  private boolean enabled() {
     return ConfigProvider.getConfig()
-        .getOptionalValue("quarkus.oidc-client." + credential + ".client-enabled", Boolean.class)
+        .getOptionalValue("quarkus.oidc-client.qits.client-enabled", Boolean.class)
         .orElse(false);
-  }
-
-  private OidcClient client(String credential) {
-    return switch (credential) {
-      case PeerTarget.Credential.PROJECTS -> projects;
-      case PeerTarget.Credential.GITHOST -> githost;
-      case PeerTarget.Credential.CI -> ci;
-      case PeerTarget.Credential.ARTIFACTS -> artifacts;
-      case PeerTarget.Credential.MIRROR -> mirror;
-      default -> null;
-    };
   }
 }

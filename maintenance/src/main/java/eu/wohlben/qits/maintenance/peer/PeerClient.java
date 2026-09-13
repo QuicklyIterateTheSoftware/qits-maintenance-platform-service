@@ -70,17 +70,22 @@ public class PeerClient {
    */
   public PeerExchange get(PeerTarget target, String path) {
     PeerCall call = new PeerCall("GET", url(target, path), null);
-    return new PeerExchange(call, send(target, call));
+    return new PeerExchange(call, send(call));
   }
 
   /** A POST with a JSON body, as the same pair. */
   public PeerExchange post(PeerTarget target, String path, String body) {
     PeerCall call = new PeerCall("POST", url(target, path), body);
-    return new PeerExchange(call, send(target, call));
+    return new PeerExchange(call, send(call));
   }
 
-  /** Sends one call and turns everything that can happen into an answer. */
-  public PeerAnswer send(PeerTarget target, PeerCall call) {
+  /**
+   * Sends one call and turns everything that can happen into an answer.
+   *
+   * <p>Takes no {@link PeerTarget} any more: every peer takes the same bearer now (C4), so there is
+   * nothing left here for the target to select.
+   */
+  public PeerAnswer send(PeerCall call) {
     HttpRequest.Builder request =
         HttpRequest.newBuilder(URI.create(call.url()))
             .timeout(callTimeout)
@@ -97,9 +102,7 @@ public class PeerClient {
           .header("Content-Type", "application/json")
           .POST(HttpRequest.BodyPublishers.ofString(call.body(), StandardCharsets.UTF_8));
     }
-    tokens
-        .token(target.credential())
-        .ifPresent(token -> request.header("Authorization", "Bearer " + token));
+    tokens.token().ifPresent(token -> request.header("Authorization", "Bearer " + token));
 
     try {
       HttpResponse<byte[]> response =

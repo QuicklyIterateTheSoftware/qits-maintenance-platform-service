@@ -819,19 +819,32 @@ broken. Remove it from the deployment's extras at the next edit of that file.
 service is platform tier, so a live platform injects the qualified name. Known debt, the same one
 qits-configuration and qits-platform-orchestrator carry.
 
-**Outbound credentials** are five named oidc clients — `projects`, `githost`, `ci`, `artifacts`,
-`mirror` — all `client-id=qits-platform-maintenance`, all shipped `client-enabled=false`. A token is
-cut for one service, which is why there are five; only the audience differs, and it is the one value
-not defaulted, because it can be environment-qualified. A deployment turns one on with
+**Outbound credentials are one named oidc client, `qits`** (service-client-identity-plan.md, C4). It
+used to be five — a token was cut for one service's own audience, so a peer-scoped call needed a
+peer-scoped client — but every token now asks the one platform audience, `qits-platform`, which every
+receiver accepts, so one client mints for every peer. Its keys read `QITS_RESOURCE_IDP_*` first —
+what `qits-deployments` injects once this repository declares `resources: idp:client` (a later,
+separate commit) — and fall back to the `projects` client's old extras names below, so a deployment
+that has not moved to the resource yet keeps working unchanged:
 
 ```
-QUARKUS_OIDC_CLIENT_CI_CLIENT_ENABLED=true
-QUARKUS_OIDC_CLIENT_CI_CREDENTIALS_SECRET=<this service's idp client secret>
-QUARKUS_OIDC_CLIENT_CI_GRANT_OPTIONS_CLIENT_AUDIENCE=dev-qits-ci
+QUARKUS_OIDC_CLIENT_PROJECTS_CLIENT_ENABLED=true
+QUARKUS_OIDC_CLIENT_PROJECTS_CLIENT_ID=<this service's client id at qits-platform-idp>
+QUARKUS_OIDC_CLIENT_PROJECTS_CREDENTIALS_SECRET=<this service's idp client secret>
 ```
 
-Off, calls go out with the forward-auth pair alone (`X-Qits-User: qits-platform-maintenance`,
-`X-Qits-Roles: qits:system`), which every call carries regardless.
+The old five named blocks (`projects`, `githost`, `ci`, `artifacts`, `mirror`) still exist, all
+`client-id=qits-platform-maintenance`, all `client-enabled=false` and `early-tokens-acquisition=false`
+so none of them fetches anything — they stay only so the `qits` client's fallback has an old env name
+to read, and are deleted in a later cleanup (C8). Off, calls go out with the forward-auth pair alone
+(`X-Qits-User: qits-platform-maintenance`, `X-Qits-Roles: qits:system`), which every call carries
+regardless.
+
+**Two peers that never got a bearer live now do, once the client is turned on.** `artifacts` and
+`mirror` had no client-enabling extras before this commit — the registry and mirror reads stayed
+anonymous. Collapsing five audience-bound clients into one that asks for every peer means the one
+switch now reaches all five, not the three that had extras before. Both receivers already accept
+`qits-platform`.
 
 **There was a sixth, `configuration`, and it went with the release trains** — as did
 `qits.maintenance.targets.configuration-url` and `qits.maintenance.train.sweep-cron`. Nothing here
@@ -873,12 +886,13 @@ claim is not optional — it is a route this service cannot use without it.
 | roles `qits:system`, `qits-platform:system` | the same pair qits-platform-orchestrator's client carries. It covers qits-projects' catalog, qits-githost's content policy, qits-ci's trigger and — since qits-ci a3ecce2 — the read-only run and repository routes the bump poller follows. |
 | a qits-projects serving `POST /repositories/{repoId}/release-requests` | **The release ask, and it needs nothing new here.** That route admits `qits:system` beside `qits:admin`, so the `projects` credential already opens it and no `qits:admin` lands on a service — the bootstrap's "qits:admin is a person's role" doctrine stands. Until that qits-projects release is deployed the ask is a 404, recorded as a refusal; the next nightly bump of the group asks again. |
 | claim `project` = `*` | qits-ci's trigger calls `machineAuth.requireProject("*")`, which passes only for a token literally granted every project. The bump names one repository but the trigger route demands them all. Today the only such grant is qits-platform-artifacts'; this service needs its own. |
-| audiences `<env>-qits-ci`, `qits-projects`, `qits-githost` | a token is cut for one service. qits-githost ships `qits.auth.machine.required=true`, so its content reads need a real bearer addressed to it. |
-| audiences `qits-platform-artifacts`, `qits-platform-mirror` | **not needed today** — the registry routes and the mirror's proxies are unguarded on qits-net. The two clients ship disabled for the day the edge's rule reaches the inside. |
+| audience `qits-platform` | **The only audience the `qits` client asks for now** (C4) — one platform audience for every peer, not one per service. Nothing to grant beyond it: C2 makes `qits-platform` always allowed for any client, so the per-service audience list below is no longer needed for this service's own calls. |
 
 In `qits-configuration` / `.qits-bootstrap.env` terms that is a client with
-`_ROLES` carrying `qits:system,qits-platform:system` (unchanged), `_CLAIMS_PROJECT: "*"`, and
-`_AUDIENCES` listing the four services above.
+`_ROLES` carrying `qits:system,qits-platform:system` (unchanged) and `_CLAIMS_PROJECT: "*"`. The
+`_AUDIENCES` list that used to name `<env>-qits-ci`, `qits-projects`, `qits-githost`,
+`qits-platform-artifacts` and `qits-platform-mirror` is inert now — every call asks for
+`qits-platform` alone — and is removed once this repository's C5 cutover lands (C9).
 
 **Gitlinks need the git host to report a tree entry's sha — written (qits-githost 33b0ccf), not
 yet deployed.** That commit teaches `GET /git/<project>/<repo>/tree/<rev>[/<path>]` to answer a
