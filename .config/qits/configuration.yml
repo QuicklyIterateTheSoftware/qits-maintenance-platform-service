@@ -1,0 +1,115 @@
+# The configuration keys qits-platform-maintenance reads.
+#
+# The deployer reads this file from the git host at the released tag and seeds it into
+# qits-configuration before the deployment runs. qits-configuration's `DeclarationParser` is the one
+# parser of this document; `keys` is the only top-level key.
+#
+# WHY THIS FILE EXISTS. qits-configuration flags a stored entry `orphaned` only when the application
+# has a declaration that does not list the key. Without this file no entry of this application is
+# flagged, so the dead ones cannot be found or removed. With it, every stored entry this file does
+# not list is flagged `orphaned`, and a person can remove it with the configuration UI's Remove
+# action. So this list must hold EVERY key the code still reads. A key missing here would invite
+# someone to delete a value this service needs.
+#
+# NO KEY HAS A DEFAULT, on purpose. A declared default sits UNDER the stored entries, and on this
+# platform the bootstrap stores all of these keys, so a default here would never be seen. Nothing
+# observable changes when this file lands (configuration-yml.md, §7.5 step one). No key is a
+# serviceAddress either: that type ignores stored values, and this change only lists keys. Moving to
+# rendered addresses is later work.
+#
+# THE ONE OUTBOUND CLIENT, `qits` (service-client-identity-plan.md, C4). Its url, id and secret read
+# QITS_RESOURCE_IDP_* first and fall back to the OLD `projects` client's four extras keys below. Those
+# four stay declared until this service's `idp:client` cutover; after it they are unused and belong
+# in a later change. The QITS_RESOURCE_IDP_* keys are not here: the deployer injects them from its
+# resource registry, and they are never stored in qits-configuration.
+#
+# DELIBERATELY NOT HERE, so they show as orphaned (plan C9, "maintenance 11"):
+#   * QUARKUS_OIDC_CLIENT_GITHOST_* and QUARKUS_OIDC_CLIENT_CI_* (five each). No code uses these two
+#     clients since C4. Their disabled blocks still bind, but that is not a read.
+#   * QUARKUS_OIDC_CLIENT_PROJECTS_GRANT_OPTIONS_CLIENT_AUDIENCE. The `qits` client does not fall
+#     back to it: its audience is fixed to `qits-platform` in the shipped config.
+
+keys:
+  # --- the peers this service calls ------------------------------------------------------------
+
+  env.QITS_MAINTENANCE_TARGETS_PROJECTS_URL:
+    type: string
+    description: "Base url of qits-projects: the repository catalog, and where a finished bump opens its release request. No path."
+
+  env.QITS_MAINTENANCE_TARGETS_GITHOST_URL:
+    type: string
+    description: "Base url of qits-githost, where each repository's manifests are read. No path."
+
+  env.QITS_MAINTENANCE_TARGETS_CI_URL:
+    type: string
+    description: "Base url of the qits-ci that applies a bump. No path."
+
+  env.QITS_MAINTENANCE_TARGETS_ARTIFACTS_URL:
+    type: string
+    description: "Base url of qits-artifacts, where SBOMs are read. No path: the /artifacts/sboms path is in the code."
+
+  env.QITS_MAINTENANCE_REGISTRIES_MAVEN_URL:
+    type: string
+    description: "The hosted maven repository the latest internal maven versions are read from. Includes the repository path."
+
+  env.QITS_MAINTENANCE_REGISTRIES_NPM_URL:
+    type: string
+    description: "The hosted npm repository the latest internal npm versions are read from. Includes the repository path."
+
+  env.QITS_MAINTENANCE_REGISTRIES_OCI_URL:
+    type: string
+    description: "The OCI registry the latest internal image tags are read from. Includes the /v2 path."
+
+  env.QITS_MAINTENANCE_MIRROR_MAVEN_URL:
+    type: string
+    description: "The Maven Central pull-through the latest external maven versions are read from. Includes the repository path."
+
+  env.QITS_MAINTENANCE_MIRROR_NPM_URL:
+    type: string
+    description: "The npmjs pull-through the latest external npm versions are read from. Includes the repository path."
+
+  env.QITS_OBSERVABILITY_URL:
+    type: string
+    description: "Where this service's OTLP telemetry goes. Scheme, host and port, no path."
+
+  # --- this service's own behaviour ------------------------------------------------------------
+
+  env.QITS_MAINTENANCE_BUMP_INTERNAL_AUTO:
+    type: boolean
+    description: "Whether the schedule asks for internal dependency bumps by itself. The Bump button works either way."
+
+  env.QITS_MAINTENANCE_ENVIRONMENT:
+    type: string
+    description: "Which environment's qits-ci applies a bump. Recorded on every bump row. Not this service's own tier: it has none."
+
+  # --- inbound: how a machine token to this service is checked ---------------------------------
+
+  env.QITS_AUTH_MACHINE_REQUIRED:
+    type: boolean
+    description: "The machine gate. Off, there is no OIDC tenant and no bearer is checked. On, a bearer is validated against the issuer below."
+
+  env.QITS_AUTH_MACHINE_AUDIENCE:
+    type: string
+    description: "The audience a machine token addressed to this service must carry. qits-platform is also accepted."
+
+  env.QUARKUS_OIDC_AUTH_SERVER_URL:
+    type: string
+    description: "The issuer whose keys validate a bearer arriving here."
+
+  # --- outbound: the `qits` client's fallback keys, until the idp:client cutover ----------------
+
+  env.QUARKUS_OIDC_CLIENT_PROJECTS_CLIENT_ENABLED:
+    type: boolean
+    description: "Switches the `qits` client on or off. Off, peer calls carry the forward-auth headers only. Kept under the old projects client's name."
+
+  env.QUARKUS_OIDC_CLIENT_PROJECTS_AUTH_SERVER_URL:
+    type: string
+    description: "The idp the `qits` client gets its token from, when QITS_RESOURCE_IDP_URL is not set."
+
+  env.QUARKUS_OIDC_CLIENT_PROJECTS_CLIENT_ID:
+    type: string
+    description: "The `qits` client's id, when QITS_RESOURCE_IDP_CLIENT_ID is not set. It is this service's own id."
+
+  env.QUARKUS_OIDC_CLIENT_PROJECTS_CREDENTIALS_SECRET:
+    type: string
+    description: "The `qits` client's secret, when QITS_RESOURCE_IDP_CLIENT_SECRET is not set."
