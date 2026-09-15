@@ -1013,6 +1013,58 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
                         .firstResult()));
   }
 
+  /**
+   * WHEN THE CLOCK LAST REACHED EACH REPOSITORY — the newest {@code started_at} of its SCHEDULED
+   * bumps, one entry per repository that has ever had one.
+   *
+   * <p><b>It exists to break a tie, and the tie used to be broken by the alphabet.</b> The
+   * dispatcher builds its candidates by walking {@link #repositories()}, which sorts by name, and
+   * {@code BumpOrder} then hands out the first free candidate in the order it was given — so among
+   * repositories that are equally ready, the arbiter was the first letter of the name. One bump goes
+   * at a time and each is held until its own release lands, so a fan-out of the whole estate drains
+   * at roughly one repository every five to fifteen minutes and the end of the alphabet is always
+   * last. Measured 2026-09-13: {@code qits-projects-daemon} and {@code qits-workspace-daemon}
+   * consume the identical two jars from one {@code qits-coding-agents} release; the first was bumped
+   * at 19:53 and the second at 21:28, nine repositories later, for no reason but its name. That is
+   * permanent starvation rather than jitter — the same repositories lose every single time — which
+   * is what makes it worth a query. Ordering the candidates by this map ascending puts the
+   * least-recently-bumped first, and a repository can no longer be permanently last.
+   *
+   * <p><b>SCHEDULED rows only, and the term is load-bearing.</b> A targeted bump is a caller's press
+   * on a branch that caller owns, and a MANUAL group bump is somebody pressing the button; neither
+   * is the clock reaching this repository, and counting either would let a person asking for one
+   * favour push that repository to the back of the queue this map drains — exactly the starvation
+   * the tiebreak is here to end.
+   *
+   * <p>A repository with no scheduled bump at all is simply ABSENT rather than carrying a sentinel:
+   * "never" is not a timestamp, and the caller is the one that decides what never ranks as (it ranks
+   * as the oldest, which is the honest reading — nothing has ever been handed to it).
+   *
+   * <p>One grouped query per tick over {@code mt_bump}, not a row per candidate: the table holds
+   * every bump this service has ever dispatched, so a scan folded into a map in Java would grow
+   * without bound while the answer stays one row per repository.
+   */
+  @ActivateRequestContext
+  public Map<String, Instant> lastScheduledBumpAt() {
+    return DbRetry.inNewTx(
+        "read when the clock last reached each repository",
+        () -> {
+          List<Object[]> rows =
+              getEntityManager()
+                  .createQuery(
+                      "select bump.repository, max(bump.startedAt) from MtBump bump"
+                          + " where bump.trigger = :trigger group by bump.repository",
+                      Object[].class)
+                  .setParameter("trigger", BumpTrigger.SCHEDULED.name())
+                  .getResultList();
+          Map<String, Instant> newest = new LinkedHashMap<>();
+          for (Object[] row : rows) {
+            newest.put((String) row[0], (Instant) row[1]);
+          }
+          return newest;
+        });
+  }
+
   // --- the dispatch window --------------------------------------------------------------------
 
   /**

@@ -312,6 +312,22 @@ repository. Only for that ecosystem, so a package called like a repository inven
 candidate waits on another, the least-blocked one goes with a WARN naming what it was waiting on. A
 night in which nothing is bumped is the worse outcome.
 
+**And among equally ready candidates the tiebreak is LEAST RECENTLY BUMPED, because it used to be
+the alphabet.** `BumpOrder` takes the first free candidate nothing owed sits below *in the order it
+was handed*, and that order was `MaintenanceStore.repositories()` — `ORDER BY name`. One bump goes at
+a time and each is held until its own release lands, so an estate-wide fan-out drains at roughly one
+repository every five to fifteen minutes and the end of the alphabet is the end of every night, for
+the same repositories every time. Measured 2026-09-13: `qits-projects-daemon` and
+`qits-workspace-daemon` consume the identical two jars from one `qits-coding-agents` release and are
+ready at the same instant; the first was dispatched at 19:53, the second at 21:28 — nine repositories
+later, purely by name. So `assess()` now orders its candidates by `lastScheduledBumpAt()` ascending
+(a repository the clock has never reached counts as the oldest and goes first, the name is the final
+tiebreak so the order stays deterministic) and hands that to `BumpOrder`, whose algorithm is
+unchanged. The topological rule still wins outright: an owed upstream goes before its consumer
+however long ago either was bumped. **Only SCHEDULED rows count** — a targeted or hand-pressed bump
+is a caller's press on a named branch, and letting one push a repository to the back of the queue
+the clock drains would be the starvation again with a different cause.
+
 **`bump.dispatch.gated=false` brings the old loop-and-fire back**, unchanged. It stays reachable
 rather than deleted because how much a qits-ci can take at once is a property of a deployment.
 

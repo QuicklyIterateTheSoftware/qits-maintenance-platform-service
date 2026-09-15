@@ -20,6 +20,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -704,7 +705,7 @@ public class BumpDispatcher {
   }
 
   /**
-   * Every repository owed an INTERNAL bump right now, in the inventory's listing order.
+   * Every repository owed an INTERNAL bump right now, least-recently-bumped first.
    *
    * <p>The filters are the ones the nightly loop always had — status OK, the group exists,
    * something is pending, no writer on that branch — and they are applied here rather than there
@@ -719,6 +720,31 @@ public class BumpDispatcher {
    * <p>One extra row read per candidate per tick, and only for the repositories that got as far as
    * having something pending — at roughly fifty repositories that is cheaper than the CI run a
    * single re-dispatch costs.
+   *
+   * <h2>THE ORDER IS THE CALLER'S, AND IT IS LEAST-RECENTLY-BUMPED FIRST</h2>
+   *
+   * <p>{@link BumpOrder} decides which candidates are <i>ready</i> — an upstream that is itself owed
+   * a bump always goes before its consumer, and nothing here touches that — but among candidates
+   * that are equally ready it simply takes the first one it was handed. <b>So whatever order this
+   * walk produces is the arbiter of everything the topology does not decide</b>, and for as long as
+   * it was {@link MaintenanceStore#repositories()}'s that arbiter was the alphabet.
+   *
+   * <p>That is starvation rather than unfairness, because of how slowly this queue drains: one bump
+   * goes at a time and each is HELD until its own release lands, so a fan-out over the whole estate
+   * moves at roughly one repository every five to fifteen minutes and the tail of the alphabet is
+   * always the tail of the night — every night, for the same repositories. Measured 2026-09-13:
+   * {@code qits-projects-daemon} and {@code qits-workspace-daemon} consume the identical two jars
+   * from one {@code qits-coding-agents} release and are equally ready the moment it lands; the first
+   * was dispatched at 19:53 and the second at 21:28, nine repositories later, for no reason but its
+   * name. {@code qits-workspace-daemon}, {@code qits-workspace-editor-oci} and {@code
+   * qits-workspaces-service} were last in every estate-wide fan-out there has been.
+   *
+   * <p>So the candidates are ordered by {@link MaintenanceStore#lastScheduledBumpAt()} ascending —
+   * the repository the clock reached longest ago goes first, one it has never reached at all counts
+   * as {@link Instant#EPOCH} and therefore goes before all of them, and the NAME is kept as the
+   * final tiebreak so two equal timestamps still produce one stable order rather than whatever the
+   * database happened to return. A repository dispatched today sinks to the back of tomorrow's
+   * queue by construction, and no repository can be permanently last.
    */
   public List<BumpOrder.Candidate> candidates() {
     return assess().candidates();
@@ -762,6 +788,19 @@ public class BumpDispatcher {
         continue;
       }
       candidates.add(new BumpOrder.Candidate(row.name, group, changes, hold.held()));
+    }
+    // LEAST-RECENTLY-BUMPED FIRST. The walk above is the store's listing order, which is the
+    // alphabet; handing that to BumpOrder made the first letter of a name the arbiter of everything
+    // the dependency topology does not decide, and a queue this slow turns that into permanent
+    // starvation of the tail. See this class's `candidates()` for the 2026-09-13 measurement. The
+    // name stays as the last tiebreak so the order is still deterministic.
+    if (!candidates.isEmpty()) {
+      Map<String, Instant> lastBumped = store.lastScheduledBumpAt();
+      candidates.sort(
+          Comparator.comparing(
+                  (BumpOrder.Candidate candidate) ->
+                      lastBumped.getOrDefault(candidate.repository(), Instant.EPOCH))
+              .thenComparing(BumpOrder.Candidate::repository));
     }
     return new Assessment(List.copyOf(candidates), List.copyOf(stalled), List.copyOf(refusals));
   }

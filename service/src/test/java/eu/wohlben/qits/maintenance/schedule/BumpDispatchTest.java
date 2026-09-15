@@ -7,10 +7,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.maintenance.api.Fixture;
 import eu.wohlben.qits.maintenance.api.InventoryReset;
 import eu.wohlben.qits.maintenance.bump.BumpDispatcher;
+import eu.wohlben.qits.maintenance.bump.BumpOrder;
 import eu.wohlben.qits.maintenance.bump.BumpService;
 import eu.wohlben.qits.maintenance.bump.CiClient;
+import eu.wohlben.qits.maintenance.latest.GitlinkSha;
+import eu.wohlben.qits.maintenance.manifest.GroupConfig;
+import eu.wohlben.qits.maintenance.manifest.ParsedPin;
 import eu.wohlben.qits.maintenance.model.BumpStatus;
+import eu.wohlben.qits.maintenance.model.BumpTrigger;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
+import eu.wohlben.qits.maintenance.model.GroupSource;
+import eu.wohlben.qits.maintenance.model.PinKind;
+import eu.wohlben.qits.maintenance.model.RepositoryStatus;
 import eu.wohlben.qits.maintenance.model.ScanScope;
 import eu.wohlben.qits.maintenance.pending.Change;
 import eu.wohlben.qits.maintenance.peer.FakePeers;
@@ -23,6 +31,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -437,6 +446,149 @@ class BumpDispatchTest {
         .body("owed", org.hamcrest.Matchers.equalTo(1))
         .body("queue[0].repository", org.hamcrest.Matchers.equalTo(Fixture.REPOSITORY))
         .body("queue[0].reason", org.hamcrest.Matchers.equalTo("READY"));
+  }
+
+  /**
+   * <b>THE SIXTH LIVE FAILURE: THE ALPHABET WAS THE TIEBREAK, AND IT STARVED THE SAME REPOSITORIES
+   * EVERY NIGHT.</b> {@code assess} walked {@code MaintenanceStore.repositories()}, which sorts by
+   * name, and {@code BumpOrder} takes the first free candidate in the order it was handed — so among
+   * repositories that are equally ready the arbiter was the first letter of the name. One bump goes
+   * at a time and each is held until its own release lands, so an estate-wide fan-out drains at
+   * roughly one repository every five to fifteen minutes and the end of the alphabet is the end of
+   * every night. Measured 2026-09-13: {@code qits-projects-daemon} and {@code qits-workspace-daemon}
+   * consume the identical two jars from one {@code qits-coding-agents} release; the first was bumped
+   * at 19:53 and the second at 21:28, nine repositories later, for no reason but its name.
+   *
+   * <p>So the two repositories here are equally ready and deliberately named so that the alphabet
+   * would answer wrongly: {@code qits-zzz-daemon} was last reached by the clock a fortnight ago and
+   * {@code qits-aaa-daemon} an hour ago, and it is the starved one that goes.
+   */
+  @Test
+  void theCandidateTheClockReachedLongestAgoGoesFirstEvenWhenItsNameSortsLast() {
+    inventory.clear();
+    owes("qits-aaa-daemon", "eu.wohlben.qits:qits-agents-early");
+    owes("qits-zzz-daemon", "eu.wohlben.qits:qits-agents-late");
+    lastReachedByTheClock("qits-aaa-daemon", Instant.now().minus(Duration.ofHours(1)));
+    lastReachedByTheClock("qits-zzz-daemon", Instant.now().minus(Duration.ofDays(14)));
+
+    List<String> order =
+        dispatcher.assess().candidates().stream().map(BumpOrder.Candidate::repository).toList();
+    assertEquals(
+        List.of("qits-zzz-daemon", "qits-aaa-daemon"),
+        order,
+        "equally ready, so the one waiting longest goes — not the one earliest in the alphabet");
+  }
+
+  /**
+   * <b>AND THE TOPOLOGY STILL OVERRULES IT, which is the half that must not have moved.</b> The
+   * recency tiebreak decides only among candidates that are equally ready; an upstream that is
+   * itself owed a bump goes before its consumer whatever the clock last did to either, because the
+   * consumer's {@code to} is not worth writing until that upstream's release exists. Here the
+   * consumer is both earlier in the alphabet and starved — a fortnight since its last night against
+   * the upstream's hour — and it still waits, blocked by the submodule it carries.
+   */
+  @Test
+  void anOwedUpstreamStillGoesBeforeItsConsumerHoweverLongTheConsumerHasWaited() {
+    inventory.clear();
+    owes("qits-zzz-lib", "eu.wohlben.qits:qits-agents-lib");
+    owesItsSubmodule("qits-aaa-consumer", "qits-zzz-lib");
+    lastReachedByTheClock("qits-zzz-lib", Instant.now().minus(Duration.ofHours(1)));
+    lastReachedByTheClock("qits-aaa-consumer", Instant.now().minus(Duration.ofDays(14)));
+    Fixture.scriptCiQueueEmpty(peers);
+
+    assertEquals(
+        "qits-aaa-consumer",
+        dispatcher.assess().candidates().get(0).repository(),
+        "the starved one IS first in the order handed to BumpOrder — recency put it there");
+
+    BumpDispatcher.Decision decision = dispatcher.explain(Instant.now());
+    assertEquals(
+        "qits-zzz-lib",
+        decision.pick().candidate().repository(),
+        "and it is still not the pick: the thing it waits on has to be released first");
+    assertTrue(
+        decision.queue().stream()
+            .anyMatch(
+                owed ->
+                    "qits-aaa-consumer".equals(owed.repository())
+                        && "BLOCKED".equals(owed.reason())
+                        && owed.detail().contains("qits-zzz-lib")),
+        "and the consumer says what it is waiting for");
+  }
+
+  /**
+   * A repository with one INTERNAL maven pin a release has moved past — the plainest possible
+   * candidate, built through the store rather than through a scan because what these two tests are
+   * about is the ORDER of several repositories and the fixture describes exactly one.
+   */
+  private void owes(String repository, String dependency) {
+    scanned(
+        repository,
+        ParsedPin.of(
+            Ecosystem.MAVEN, "pom.xml", dependency, "2026.901.1", null, "dependency:" + dependency));
+    store.recordLatestIfNewer(Ecosystem.MAVEN, dependency, "2026.913.1", "test", Instant.now());
+  }
+
+  /**
+   * …and one whose pending change is the SUBMODULE it carries, which is the edge {@link BumpOrder}
+   * reads by name rather than through the artifact ledger: a gitlink's {@code name} IS the
+   * repository it pins.
+   */
+  private void owesItsSubmodule(String repository, String submodule) {
+    scanned(
+        repository,
+        ParsedPin.of(
+            Ecosystem.GITLINK,
+            ".gitmodules",
+            submodule,
+            "1111111111111111111111111111111111111111",
+            null,
+            "gitlink:webui"));
+    // The pin is a commit and the verdict is a DIFFERENCE, so the latest row has to carry the sha
+    // its release was cut from — a version alone leaves nothing to compare and nothing pending.
+    store.recordLatestIfNewer(
+        Ecosystem.GITLINK,
+        submodule,
+        "2026.913.1",
+        GitlinkSha.of("2222222222222222222222222222222222222222"),
+        Instant.now());
+  }
+
+  private void scanned(String repository, ParsedPin pin) {
+    store.replaceInventory(
+        repository,
+        Fixture.PROJECT,
+        "catalog-" + repository,
+        null,
+        "main",
+        RepositoryStatus.OK,
+        "sha-" + repository,
+        null,
+        List.of(pin),
+        List.of(GroupConfig.Group.ofKind(GroupConfig.DEFAULT_GROUP, PinKind.INTERNAL)),
+        GroupSource.DEFAULT,
+        candidate -> PinKind.INTERNAL,
+        Instant.now());
+  }
+
+  /**
+   * One night's scheduled bump of this repository, ended.
+   *
+   * <p><b>It carries no changes on purpose.</b> The row is history — what the tiebreak reads — and a
+   * row whose changes matched the pending set would HOLD the repository instead, which is a
+   * different rule and not the one under test here.
+   */
+  private void lastReachedByTheClock(String repository, Instant at) {
+    UUID id =
+        store.openBump(
+            repository,
+            GroupConfig.DEFAULT_GROUP,
+            "maintenance/" + GroupConfig.DEFAULT_GROUP,
+            "dev",
+            BumpTrigger.SCHEDULED,
+            List.of(),
+            at);
+    store.bumpFinished(id, BumpStatus.SUCCEEDED, "SUCCESS", "a night that has landed", at);
   }
 
   /**

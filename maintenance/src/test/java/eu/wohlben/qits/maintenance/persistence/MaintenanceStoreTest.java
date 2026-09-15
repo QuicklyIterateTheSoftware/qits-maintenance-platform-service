@@ -771,4 +771,89 @@ class MaintenanceStoreTest {
     assertEquals("run-1,run-2", row.ciRunId);
     assertEquals(id.toString(), row.ciEventId);
   }
+
+  /**
+   * <b>WHEN THE CLOCK LAST REACHED A REPOSITORY — the newest of its scheduled bumps, and nothing
+   * else.</b> This is the column the dispatcher breaks its ties by, so all three properties are one
+   * fact each: newest per repository (an older night must not make a repository look starved), one
+   * entry per repository rather than one per bump, and SCHEDULED only.
+   *
+   * <p>Every bump is finished before the next is opened, because a repository may hold only one
+   * active bump of a group at a time — see {@link #aSecondBumpOfOneBranchIsRefusedInsideTheOpeningTransaction()}.
+   */
+  @Test
+  void theLastScheduledBumpIsTheNewestOnePerRepository() {
+    String repository = "scheduled-" + UUID.randomUUID();
+    Instant older = Instant.parse("2026-09-01T02:00:00Z");
+    Instant newer = Instant.parse("2026-09-13T19:53:00Z");
+    scheduledBump(repository, older);
+    scheduledBump(repository, newer);
+
+    assertEquals(newer, store.lastScheduledBumpAt().get(repository));
+  }
+
+  /**
+   * <b>A PERSON'S PRESS IS NOT THE CLOCK REACHING A REPOSITORY.</b> A targeted bump is a caller's
+   * press on a branch that caller owns and a MANUAL group bump is somebody pressing the button;
+   * counting either would let one favour push a repository to the back of the queue the clock
+   * drains, which is the starvation the tiebreak exists to end.
+   */
+  @Test
+  void aBumpSomebodyAskedForByHandIsNotWhatTheClockLastDid() {
+    String repository = "by-hand-" + UUID.randomUUID();
+    Instant scheduled = Instant.parse("2026-09-01T02:00:00Z");
+    scheduledBump(repository, scheduled);
+    UUID pressed =
+        store.openBump(
+            repository,
+            "dependencies",
+            "maintenance/dependencies",
+            "dev",
+            BumpTrigger.MANUAL,
+            List.of(),
+            Instant.parse("2026-09-14T11:00:00Z"));
+    store.bumpFinished(pressed, BumpStatus.SUCCEEDED, "SUCCESS", "pressed", Instant.now());
+
+    assertEquals(
+        scheduled,
+        store.lastScheduledBumpAt().get(repository),
+        "the button was pressed since, and it says nothing about the night");
+  }
+
+  /**
+   * <b>NEVER IS ABSENT, NOT A TIMESTAMP.</b> A repository the clock has never reached carries no
+   * entry at all — what "never" ranks as is the reading caller's decision (it goes first), and a
+   * sentinel written here would be this class inventing one.
+   */
+  @Test
+  void aRepositoryTheClockHasNeverReachedIsAbsentFromTheMap() {
+    String never = "never-" + UUID.randomUUID();
+    UUID pressed =
+        store.openBump(
+            never,
+            "dependencies",
+            "maintenance/dependencies",
+            "dev",
+            BumpTrigger.MANUAL,
+            List.of(),
+            Instant.now());
+    store.bumpFinished(pressed, BumpStatus.SUCCEEDED, "SUCCESS", "pressed", Instant.now());
+
+    assertFalse(store.lastScheduledBumpAt().containsKey(never));
+    assertFalse(store.lastScheduledBumpAt().containsKey("no-bump-" + UUID.randomUUID()));
+  }
+
+  /** One scheduled bump of one repository, opened at that instant and ended straight away. */
+  private void scheduledBump(String repository, Instant at) {
+    UUID id =
+        store.openBump(
+            repository,
+            "dependencies",
+            "maintenance/dependencies",
+            "dev",
+            BumpTrigger.SCHEDULED,
+            List.of(),
+            at);
+    store.bumpFinished(id, BumpStatus.SUCCEEDED, "SUCCESS", "the branch is pushed", at);
+  }
 }

@@ -71,6 +71,27 @@ import java.util.Set;
  * here: a targeted bump names its own branch, and the ordering has no opinion about branches to
  * lose.
  *
+ * <p><b>THE LISTING ORDER IS THE CALLER'S, AND IT DECIDES EVERYTHING THE TOPOLOGY DOES NOT.</b>
+ * Every method here walks {@code candidates} in the order it was handed and takes the first one that
+ * qualifies, so among candidates that are equally ready — nothing owed below either of them — the
+ * caller's order is the whole arbiter. That was worth saying out loud the day the caller's order
+ * turned out to be the alphabet: {@code BumpDispatcher.assess} built the list by walking {@code
+ * MaintenanceStore.repositories()}, which sorts by name, so a repository's first letter decided when
+ * it was bumped. One bump goes at a time and each is held until its own release lands, so an
+ * estate-wide fan-out drains at roughly one repository every five to fifteen minutes and the tail of
+ * the alphabet is the tail of every night — the same repositories, every time, which is starvation
+ * rather than jitter. Measured 2026-09-13: {@code qits-projects-daemon} and {@code
+ * qits-workspace-daemon} consume the identical two jars from one {@code qits-coding-agents} release
+ * and are ready at the same instant; the first was dispatched at 19:53, the second at 21:28, nine
+ * repositories later. {@code qits-workspace-*} was last in every fan-out there had been.
+ *
+ * <p>So the caller now hands these lists over <b>least-recently-bumped first</b> — ascending by the
+ * newest SCHEDULED {@code mt_bump.started_at} of each repository, never-bumped first, name as the
+ * final tiebreak. <b>Nothing in this class changed for it</b>, and nothing here should: the
+ * topological rule above still overrules the order outright (an owed upstream goes before its
+ * consumer however long ago either was bumped), and this class's contract is exactly what it always
+ * was — a stable order in, the first qualifying entry out.
+ *
  * <p><b>Targeted bumps are not candidates and cannot be.</b> {@code BumpDispatcher.assess} builds
  * this list out of what the inventory says is PENDING, which is a question about a repository's pins
  * on <i>main</i>; a targeted bump exists because a caller asked for named changes on a named branch,
@@ -110,13 +131,15 @@ public final class BumpOrder {
   public record Pick(Candidate candidate, Set<String> blockedBy, boolean cycleBroken) {}
 
   /**
-   * The next viable bump: the first free candidate nothing else owed sits below, in listing order.
+   * The next viable bump: the first free candidate nothing else owed sits below, in the order the
+   * caller listed them — which is least-recently-bumped first, for the reason the class doc gives.
    *
    * <p><b>{@code owed} is built from ALL the candidates and the pick is taken from the free ones.</b>
    * The two sets are deliberately different — that is how a repository waiting on a release it has
    * already been bumped for goes on holding its consumers back without being sent again.
    *
    * @param candidates every repository owed a bump this tick, held ones included, in a stable order
+   *     — the caller's, and the tiebreak among equally ready candidates: see the class doc
    * @param producers {@link ArtifactGraph#producers()} — coordinate to publishing repository
    * @return the bump to send, or empty when there is none to send right now — no candidates at all,
    *     or every free one still waiting on a release in flight
@@ -181,8 +204,10 @@ public final class BumpOrder {
    * could ask. "Fifteen repositories are owed and nothing has been sent" and "the scheduler is
    * dead" were therefore the same picture from every surface, which is what let this class's
    * arming bug sit unnoticed for a day. This is the same reasoning laid out for a reader rather
-   * than collapsed to a pick: READY first in listing order (so the head of this list IS what {@link
-   * #next} returns), then BLOCKED by fewest owed upstreams, then HELD.
+   * than collapsed to a pick: READY first in the caller's listing order — least-recently-bumped
+   * first, so the head of this list IS what {@link #next} returns and a reader can see why a
+   * repository is where it is rather than reading an alphabet — then BLOCKED by fewest owed
+   * upstreams, then HELD.
    *
    * <p>It decides nothing. A caller that dispatched the head of this list instead of calling {@link
    * #next} would skip the cycle rule, which is the one place the two differ.
