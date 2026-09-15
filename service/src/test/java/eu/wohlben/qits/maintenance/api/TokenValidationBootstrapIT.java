@@ -188,7 +188,7 @@ public class TokenValidationBootstrapIT {
         .as("jwks-fetched");
 
     // End (b), this service's side: those keys are what token validation now runs on. A platform
-    // peer's bearer (aud = this service, roles in `groups`) opens the inventory listing — nothing
+    // peer's bearer (aud = the platform, roles in `groups`) opens the inventory listing — nothing
     // named, nothing written, no peer asked.
     //
     // The actor is set BEFORE the call: the tap sees a request, never a narrative role, and this is
@@ -214,7 +214,7 @@ public class TokenValidationBootstrapIT {
         .contentType(ContentType.JSON)
         .body("$", hasSize(stored));
     story
-        .note("a platform peer's bearer (aud=qits-platform-maintenance, groups=[qits:system]) is"
+        .note("a platform peer's bearer (aud=qits-platform, groups=[qits:system]) is"
             + " accepted, and the listing is this store's rows")
         .as("inventory-served");
 
@@ -258,8 +258,8 @@ public class TokenValidationBootstrapIT {
   @UserStoryDescription(
       """
       The flip side of trusting the platform's keys. A token signed by a key the published JWKS
-      never carried, or minted for another service's audience, is refused at the door — however
-      well-formed it looks: both are 401 and not 403, because the credential never became an
+      never carried, or minted for an audience that is not this platform's, is refused at the door —
+      however well-formed it looks: both are 401 and not 403, because the credential never became an
       identity and there is no caller to have been forbidden. A token addressed here and signed
       correctly but carrying a role this service has never heard of gets the other answer, 403 —
       it authenticated and covers nothing. There is no anonymous route in this service and there
@@ -277,7 +277,7 @@ public class TokenValidationBootstrapIT {
 
     strangersBearer =
         idp.token()
-            .audience(StoryProfile.AUDIENCE)
+            .audience(StoryProfile.PLATFORM_AUDIENCE)
             .groups(StoryIdentities.MACHINE_ROLE)
             .signedByUnknownKey()
             .mint();
@@ -290,12 +290,21 @@ public class TokenValidationBootstrapIT {
         .note("a token signed by a key the published JWKS never carried is refused")
         .as("unknown-key-refused");
 
+    // The audience half, which is what proves quarkus.oidc.token.audience=qits-platform is read
+    // rather than assumed: this token is signed by the very key the JWKS published and is refused
+    // anyway, because it was cut for somewhere that is not this platform. A PEER's token would not
+    // do here — qits-platform-idp stamps qits-platform onto every token it mints, so a sibling
+    // service's bearer is admitted and its roles decide what it may do, which is the third door
+    // below. The audience says which platform, never which service.
     wrongAudienceBearer =
-        idp.token().audience("some-other-service").groups(StoryIdentities.MACHINE_ROLE).mint();
+        idp.token()
+            .audience(StoryProfile.FOREIGN_AUDIENCE)
+            .groups(StoryIdentities.MACHINE_ROLE)
+            .mint();
     StoryIdentities.bearer(given(), wrongAudienceBearer).get(REPOSITORIES).then().statusCode(401);
     story
-        .note("a token minted for another service's audience is refused just the same — 401 and not"
-            + " 403, because the credential never became an identity")
+        .note("a token minted for an audience that is not this platform's is refused just the same —"
+            + " 401 and not 403, because the credential never became an identity")
         .as("wrong-audience-refused");
 
     // The third door, and the one that proves the groups→roles mapping really ran rather than being
@@ -308,7 +317,7 @@ public class TokenValidationBootstrapIT {
     readerBearer =
         idp.token()
             .subject("somebody-elses-service")
-            .audience(StoryProfile.AUDIENCE)
+            .audience(StoryProfile.PLATFORM_AUDIENCE)
             .groups(StoryIdentities.READER_ROLE)
             .mint();
     StoryIdentities.bearer(given(), readerBearer).get(REPOSITORIES).then().statusCode(403);

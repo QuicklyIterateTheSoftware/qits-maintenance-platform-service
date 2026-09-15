@@ -267,10 +267,10 @@ project can address it — the pair the retired qits-workspaces door took. A row
 a refusal, not a retry: the next scan fills the column and the next bump asks with it.
 
 **The ask needs no credential of its own.** It is a qits-projects route and the route admits
-`qits:system` beside `qits:admin`, so the `projects` client every catalog read already mints opens
-it. There was a sixth oidc client once — audience `qits-workspaces`, for the release door — and it
-went with the door. A 401/403 is still classified RETRYABLE rather than refused, so a grant that has
-not landed heals rather than needing the bump run again.
+`qits:system` beside `qits:admin`, so the bearer every catalog read already mints through the one
+`qits` client opens it. There was a client for the release door once — audience `qits-workspaces` —
+and it went with the door. A 401/403 is still classified RETRYABLE rather than refused, so a grant
+that has not landed heals rather than needing the bump run again.
 
 ## Persistence
 
@@ -556,8 +556,8 @@ route here and there must never be one — the write surface pushes branches int
 the platform.
 
 **Outbound, this service is a MACHINE and nothing else**: every call carries `X-Qits-Roles:
-qits:system`, and the idp client carries `qits:system,qits-platform:system` — the orchestrator's
-pair. `qits:admin` is the human role and this service never holds it, not even to read a CI run:
+qits:system`, and the idp client carries `qits:system` — the orchestrator's machine role.
+`qits:admin` is the human role and this service never holds it, not even to read a CI run:
 qits-ci a3ecce2 made its read-only run and repository routes take `qits:system`. What the client
 needs beyond the orchestrator's is one claim, `project = *`, because qits-ci's trigger demands every
 project. See README's "Rollout needs".
@@ -565,6 +565,13 @@ project. See README's "Rollout needs".
 `quarkus.oidc.tenant-enabled=${qits.auth.machine.required:false}` — validation follows the rollout
 gate rather than standing on its own, so with the gate off there is no OIDC tenant, nothing fetches
 a JWKS, and a clone-alone build needs no issuer. There is no third state.
+
+**ONE AUDIENCE AND IT IS A LITERAL**: `quarkus.oidc.token.audience=qits-platform`. qits-platform-idp
+stamps that value onto every token it mints whatever the client asked for, so the tenant admits
+every caller there is and the ROLES above are the whole of what separates them. Nothing here reads
+`qits.auth.machine.audience` — the shipped properties do not set it, and the one profile that turns
+the gate on states it itself, because qits-auth-core's `MachineAuth` refuses to start with the gate
+on and no audience configured.
 
 ## Tests
 

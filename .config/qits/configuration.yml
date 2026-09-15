@@ -24,8 +24,8 @@
 # resource registry, and they are never stored in qits-configuration.
 #
 # DELIBERATELY NOT HERE, so they show as orphaned (plan C9, "maintenance 11"):
-#   * QUARKUS_OIDC_CLIENT_GITHOST_* and QUARKUS_OIDC_CLIENT_CI_* (five each). No code uses these two
-#     clients since C4. Their disabled blocks still bind, but that is not a read.
+#   * QUARKUS_OIDC_CLIENT_GITHOST_* and QUARKUS_OIDC_CLIENT_CI_* (five each). There are no such
+#     clients: `qits` mints for every peer, and those blocks are deleted.
 #   * QUARKUS_OIDC_CLIENT_PROJECTS_GRANT_OPTIONS_CLIENT_AUDIENCE. The `qits` client does not fall
 #     back to it: its audience is fixed to `qits-platform` in the shipped config.
 
@@ -90,7 +90,7 @@ keys:
 
   env.QITS_AUTH_MACHINE_AUDIENCE:
     type: string
-    description: "The audience a machine token addressed to this service must carry. qits-platform is also accepted."
+    description: "What qits-auth-core's MachineAuth is configured with while the gate above is on — it refuses to start without one. It does not decide what a bearer must carry: the tenant enforces the platform audience, qits-platform, as a literal."
 
   env.QUARKUS_OIDC_AUTH_SERVER_URL:
     type: string

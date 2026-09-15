@@ -50,15 +50,26 @@ class QitsOidcClientShippedConfigTest {
   }
 
   @Test
-  void theOldFiveClientsStayDisabledAndInert() {
-    for (String name : new String[] {"projects", "githost", "ci", "artifacts", "mirror"}) {
-      assertEquals(
-          "false", value("quarkus.oidc-client." + name + ".client-enabled"), name + " client-enabled");
-      assertEquals(
-          "false",
-          value("quarkus.oidc-client." + name + ".early-tokens-acquisition"),
-          name + " early-tokens-acquisition");
+  void theProjectsBlockStaysDisabledAndInert() {
+    // It is shipped for one reason — a live deployment names this service's credential under the
+    // `projects` spelling and the expressions above read those variables — and the three values
+    // below are what make a deployment's leftover _CLIENT_ENABLED=true build a client that does
+    // nothing instead of one that discovers and fetches a token at boot.
+    assertEquals("false", value("quarkus.oidc-client.projects.client-enabled"));
+    assertEquals("false", value("quarkus.oidc-client.projects.discovery-enabled"));
+    assertEquals("false", value("quarkus.oidc-client.projects.early-tokens-acquisition"));
+  }
+
+  @Test
+  void theOtherNamedClientsAreGone() {
+    // Nothing mints through them and no deployment sets their extras, so there is no block to
+    // configure: the keys resolve to nothing at all rather than to a disabled client.
+    for (String name : new String[] {"githost", "ci", "artifacts", "mirror"}) {
+      assertTrue(
+          ConfigProvider.getConfig()
+              .getOptionalValue("quarkus.oidc-client." + name + ".client-id", String.class)
+              .isEmpty(),
+          name + " client-id");
     }
-    assertEquals("false", value("quarkus.oidc-client.client-enabled"));
   }
 }

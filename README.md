@@ -814,7 +814,6 @@ environment without a rebuild.
 | `qits.maintenance.bump.dispatch.quiet-hours` | *(empty)* | hours a branch is unwelcome in: `HH:MM-HH:MM[,…]` in `time-zone`, end exclusive, midnight-wrapping allowed. Suppresses the debt-driven opening only; `POST /bumps/window` overrides it |
 | `qits.maintenance.bump.internal.window` | `6h` | how long one window lasts before it is closed, logged and re-opened if work is still owed. It closes early the moment nothing is owed, and it is also how long a refusal stands |
 | `qits.maintenance.environment` | `dev` | which environment's CI is recorded on a bump row |
-| `qits.auth.machine.audience` | `qits-platform-maintenance` | this service's own id at qits-platform-idp |
 
 **The registry keys carry a PATH as well as a host**, because a registry is mounted under a prefix
 and the prefix names the repository row it serves. Moving a row is then a deployment's decision.
@@ -849,18 +848,22 @@ QUARKUS_OIDC_CLIENT_PROJECTS_CLIENT_ID=<this service's client id at qits-platfor
 QUARKUS_OIDC_CLIENT_PROJECTS_CREDENTIALS_SECRET=<this service's idp client secret>
 ```
 
-The old five named blocks (`projects`, `githost`, `ci`, `artifacts`, `mirror`) still exist, all
-`client-id=qits-platform-maintenance`, all `client-enabled=false` and `early-tokens-acquisition=false`
-so none of them fetches anything — they stay only so the `qits` client's fallback has an old env name
-to read, and are deleted in a later cleanup (C8). Off, calls go out with the forward-auth pair alone
-(`X-Qits-User: qits-platform-maintenance`, `X-Qits-Roles: qits:system`), which every call carries
-regardless.
+One old named block is still shipped, `projects`, and it is not a leftover: a live deployment names
+this service's credential under exactly that spelling, so the block is what the three variables
+above land on. Where a block exists the environment overrides its values, which is why this one ships
+`client-enabled=false`, `discovery-enabled=false` and `early-tokens-acquisition=false` — a
+deployment's `_CLIENT_ENABLED=true` then builds a client that is inert rather than one that
+discovers and fetches a token at boot, which is what the extension's own defaults would do. Nothing
+injects it and no code asks it for anything. It goes when `resources: idp:client` is declared and
+the old extras are off every deployment. The four other blocks (`githost`, `ci`, `artifacts`,
+`mirror`) are gone; a deployment still setting `QUARKUS_OIDC_CLIENT_GITHOST_*`, `_CI_*`,
+`_ARTIFACTS_*` or `_MIRROR_*` is setting keys nothing reads.
 
-**Two peers that never got a bearer live now do, once the client is turned on.** `artifacts` and
-`mirror` had no client-enabling extras before this commit — the registry and mirror reads stayed
-anonymous. Collapsing five audience-bound clients into one that asks for every peer means the one
-switch now reaches all five, not the three that had extras before. Both receivers already accept
-`qits-platform`.
+**One toggle reaches every peer.** With the client off, calls go out with the forward-auth pair
+alone (`X-Qits-User: qits-platform-maintenance`, `X-Qits-Roles: qits:system`), which every call
+carries regardless; with it on, all five peers — qits-projects, qits-githost, qits-ci,
+qits-platform-artifacts and qits-platform-mirror — are called with a bearer. There is no per-peer
+arming, and every one of the five accepts `qits-platform`.
 
 **There was a sixth, `configuration`, and it went with the release trains** — as did
 `qits.maintenance.targets.configuration-url` and `qits.maintenance.train.sweep-cron`. Nothing here
@@ -871,8 +874,8 @@ and re-reading two peers on a timer bought failure modes for them. A deployment 
 `QUARKUS_OIDC_CLIENT_CONFIGURATION_*` is setting keys nothing reads; remove them at the next edit of
 that file.
 
-**The release ask needs no client of its own.** It is a qits-projects route, so it rides the
-`projects` credential every catalog read already mints; the route admits `qits:admin` and
+**The release ask needs no client of its own.** It is a qits-projects route, so it rides the `qits`
+client's bearer every catalog read already mints; the route admits `qits:admin` and
 `qits:system`, and `qits:system` is what every call here carries. There was a client for it once —
 audience `qits-workspaces`, for the release door — and it went with the door, the same way the
 `configuration` one went with the trains. A deployment still setting
@@ -899,14 +902,13 @@ claim is not optional — it is a route this service cannot use without it.
 
 | what | why |
 |---|---|
-| roles `qits:system`, `qits-platform:system` | the same pair qits-platform-orchestrator's client carries. It covers qits-projects' catalog, qits-githost's content policy, qits-ci's trigger and — since qits-ci a3ecce2 — the read-only run and repository routes the bump poller follows. |
-| a qits-projects serving `POST /repositories/{repoId}/release-requests` | **The release ask, and it needs nothing new here.** That route admits `qits:system` beside `qits:admin`, so the `projects` credential already opens it and no `qits:admin` lands on a service — the bootstrap's "qits:admin is a person's role" doctrine stands. Until that qits-projects release is deployed the ask is a 404, recorded as a refusal; the next nightly bump of the group asks again. |
+| role `qits:system` | the machine role qits-platform-orchestrator's client carries. It covers qits-projects' catalog, qits-githost's content policy, qits-ci's trigger and — since qits-ci a3ecce2 — the read-only run and repository routes the bump poller follows. |
+| a qits-projects serving `POST /repositories/{repoId}/release-requests` | **The release ask, and it needs nothing new here.** That route admits `qits:system` beside `qits:admin`, so the `qits` client's bearer already opens it and no `qits:admin` lands on a service — the bootstrap's "qits:admin is a person's role" doctrine stands. Until that qits-projects release is deployed the ask is a 404, recorded as a refusal; the next nightly bump of the group asks again. |
 | claim `project` = `*` | qits-ci's trigger calls `machineAuth.requireProject("*")`, which passes only for a token literally granted every project. The bump names one repository but the trigger route demands them all. Today the only such grant is qits-platform-artifacts'; this service needs its own. |
 | audience `qits-platform` | **The only audience the `qits` client asks for now** (C4) — one platform audience for every peer, not one per service. Nothing to grant beyond it: C2 makes `qits-platform` always allowed for any client, so the per-service audience list below is no longer needed for this service's own calls. |
 
-In `qits-configuration` / `.qits-bootstrap.env` terms that is a client with
-`_ROLES` carrying `qits:system,qits-platform:system` (unchanged) and `_CLAIMS_PROJECT: "*"`. The
-`_AUDIENCES` list that used to name `<env>-qits-ci`, `qits-projects`, `qits-githost`,
+In `qits-configuration` / `.qits-bootstrap.env` terms that is a client with `_ROLES` carrying
+`qits:system` and `_CLAIMS_PROJECT: "*"`. The `_AUDIENCES` list that used to name `<env>-qits-ci`, `qits-projects`, `qits-githost`,
 `qits-platform-artifacts` and `qits-platform-mirror` is inert now — every call asks for
 `qits-platform` alone — and is removed once this repository's C5 cutover lands (C9).
 
