@@ -339,8 +339,16 @@ public class BumpIT {
       is not a success: reporting SUCCEEDED would put a branch in a nightly list that nobody ever
       pushed. So the head is read before the trigger and again when the run ends, only the head is
       compared — one bump is up to two commits, so a service expecting one would report every
-      mixed group as broken — and a green run over an unmoved branch ends NOTHING_TO_DO with the
-      sentence that says so.
+      mixed group as broken — and a green run over an unmoved branch ends NOTHING_TO_DO.
+
+      AND THE RELEASE IS STILL ASKED FOR, because "this run pushed nothing" is not "this branch has
+      nothing unreleased". The branch here exists at a commit that is not main's: something put it
+      there, earlier, and until somebody releases it the repository sits on an old dependency while
+      every surface agrees there is nothing to do. That is not a hypothetical — qits-mirror-platform-service
+      spent 2026-09-16 exactly like this, the dispatch window reporting "its branch is pushed and
+      it waits on its own release" while the ending that would have asked for one had decided there
+      was nothing to release. So the STATUS follows the run and the ASK follows the branch: ahead of
+      main is asked for, level with main is not.
       """)
   @UserflowRunsAfter(InventoryIT.class)
   @Order(2)
@@ -362,6 +370,17 @@ public class BumpIT {
     ci.json(
         StoryCatalog.runPath(StoryCatalog.SECOND_RUN),
         "{\"id\":\"" + StoryCatalog.SECOND_RUN + "\",\"status\":\"SUCCESS\"}");
+    // The release ask, at the SECOND repository's own catalog id. Armed because it is now made:
+    // the branch above is at a commit that is not main's, so it carries unreleased work whatever
+    // this run did or did not push.
+    // WRAPPED, as the controller sends it — the pushed story's stub says the same thing and for the
+    // same reason: a client reading a flat body finds no id and records a convergence, so a flat
+    // fixture would make this story pass against a service that never read the answer.
+    StoryPeers.attach(StoryTarget.PROJECTS)
+        .json(
+            StoryCatalog.SECOND_RELEASE_REQUESTS_PATH,
+            "{\"request\":{\"id\":\"rr-unmoved\",\"repoId\":\"r2\",\"state\":\"PENDING\","
+                + "\"backingBranch\":\"release/rr-unmoved\",\"mergedSha\":null,\"detail\":null}}");
 
     unmovedBumpId =
         StoryIdentities.operator(given())
@@ -398,13 +417,21 @@ public class BumpIT {
         // mistake this outcome exists to prevent.
         .body("ciRunStatus", equalTo("SUCCESS"))
         .body("ciRunIds", equalTo(List.of(StoryCatalog.SECOND_RUN)))
-        .body("message", containsString("did not move"))
+        // AND THE RELEASE WAS ASKED FOR ANYWAY. This is the assertion the live defect needed: the
+        // status says this run wrote nothing, and the column says the branch was still handed on,
+        // because it is ahead of main. The message is the ASK's by then — `note` recomposes it from
+        // the frozen change list on every retry, which is what stops the column growing a line per
+        // tick through an outage — so the ending's own wording is deliberately not asserted here.
+        .body("releaseRequestId", equalTo("rr-unmoved"))
         // The changes are still on the row: the payload went out and is what a person reads to see
         // what the step decided against.
         .body("changes.size()", greaterThan(0));
     story
-        .note("the run PASSED and the branch is where it was, so the outcome is NOTHING_TO_DO and"
-            + " the row says which of the two facts it is — the changes it sent are still on it")
+        .note("the run PASSED and the branch is where it was, so the outcome is NOTHING_TO_DO — and"
+            + " the branch is nevertheless ahead of main, so the release is asked for all the same."
+            + " The status follows the run; the ask follows the branch. A bump that pushed nothing"
+            + " in THIS run is not a branch with nothing to release, and treating the two as one is"
+            + " what left a repository sitting on an old dependency for a day")
         .as("passed-and-unmoved");
 
     network.declare(
@@ -498,11 +525,25 @@ public class BumpIT {
     // ONE LABEL FOR BOTH READS, and that is the point rather than an accident: the head before the
     // trigger and the head after the run are the same answer, which is what NOTHING_TO_DO means.
     out(UNMOVED_SLUG, StoryTarget.GITHOST, "GET " + secondBranchWire + " -> 200");
+    // MAIN'S HEAD, AND IT IS THE NEW ARROW. It is the read that turns "this run pushed nothing"
+    // into "this branch has nothing unreleased" — two different questions, and the whole of the
+    // 2026-09-16 defect was answering the second with the first. One read, at the ending only.
+    out(
+        UNMOVED_SLUG,
+        StoryTarget.GITHOST,
+        "GET " + StoryCatalog.treeWire(StoryCatalog.SECOND_REPOSITORY, "main") + " -> 200");
     out(UNMOVED_SLUG, StoryTarget.CI, "POST " + StoryCatalog.TRIGGER_PATH + " -> 200");
     out(
         UNMOVED_SLUG,
         StoryTarget.CI,
         "GET " + StoryCatalog.runPath(StoryCatalog.SECOND_RUN) + " -> 200");
+    // …and the ask itself, at the SECOND repository's catalog id. The pushed story has this arrow
+    // too; what used to separate the two endings on the far side of this service was its absence
+    // here, and that separation was the bug.
+    out(
+        UNMOVED_SLUG,
+        StoryTarget.PROJECTS,
+        "POST " + StoryCatalog.SECOND_RELEASE_REQUESTS_PATH + " -> 200");
 
     ReportAssertions.assertDeclaredEdge(
         CATEGORY_SLUG,
@@ -512,13 +553,13 @@ public class BumpIT {
         StoryTarget.STORE,
         "the head before the run is recorded, and the verdict is written against it");
 
-    ReportAssertions.assertEdgeCount(CATEGORY_SLUG, UNMOVED_SLUG, 6);
+    // Two in; out, two head reads (the branch and main), one trigger, one run read, one release ask
+    // and a row. EIGHT, where it was six: the two new arrows are main's head and the ask, and they
+    // are one change — you cannot honestly make the second without the first, because a branch that
+    // is level with main must still be asked about for nothing.
+    ReportAssertions.assertEdgeCount(CATEGORY_SLUG, UNMOVED_SLUG, 8);
     ReportAssertions.assertOnlyEdgesFrom(
         CATEGORY_SLUG, UNMOVED_SLUG, List.of(StoryIdentities.OPERATOR, StoryTarget.SERVICE));
-    // AND NO RELEASE WAS ASKED FOR. Nothing was pushed, so there is nothing to hand on — which is
-    // the one thing that separates this ending from the other on the far side of this service, and
-    // it is why there is no edge to qits-projects here where the pushed story has one.
-    ReportAssertions.assertNoEdgesTo(CATEGORY_SLUG, UNMOVED_SLUG, StoryTarget.PROJECTS);
     ReportAssertions.assertNoEdgesTo(CATEGORY_SLUG, UNMOVED_SLUG, StoryTarget.ARTIFACTS);
     ReportAssertions.assertNoEdgesTo(CATEGORY_SLUG, UNMOVED_SLUG, StoryTarget.MIRROR);
     ReportAssertions.assertNotLeaked(CATEGORY_SLUG, UNMOVED_SLUG, unmovedBumpId);

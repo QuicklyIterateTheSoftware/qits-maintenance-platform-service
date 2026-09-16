@@ -117,6 +117,16 @@ public final class StoryCatalog {
   /** …and where the branch it pushed is asked to be released. */
   public static final String RELEASE_REQUESTS_PATH = StoryTarget.releaseRequests(CATALOG_ID);
 
+  /**
+   * {@link #SECOND_REPOSITORY}'s own, at its own catalog id.
+   *
+   * <p>It is a second constant and not a parameter because the id is the whole of what the route
+   * carries: a release ask addressed at {@link #CATALOG_ID} would reach the wrong repository, and
+   * the story that needs this one is precisely the story about a branch that ends NOTHING_TO_DO and
+   * is asked to be released anyway.
+   */
+  public static final String SECOND_RELEASE_REQUESTS_PATH = StoryTarget.releaseRequests("r2");
+
   private StoryCatalog() {}
 
   // --- routes, in two spellings ------------------------------------------------------------------
