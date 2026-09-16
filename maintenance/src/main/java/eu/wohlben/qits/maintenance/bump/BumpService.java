@@ -52,11 +52,23 @@ import org.jboss.logging.Logger;
  * to overwrite. That is the STALE state: they own the branch now, and nothing bumps it again until
  * it is gone.
  *
- * <p><b>SUCCEEDED asks for the release itself.</b> A branch nobody asks about is a branch that sits
- * there, so the ending that pushed one opens a release request in qits-projects — see {@link
- * ReleaseRequestClient} for what that ask is and why it is convergent. NOTHING_TO_DO and STALE do
- * not: there is nothing to release in the first case, and in the second somebody owns the branch by
- * hand and asking for their commits to be released is precisely the thing that must not happen.
+ * <p><b>A GREEN ENDING ASKS FOR THE RELEASE WHENEVER THE BRANCH IS AHEAD OF MAIN</b> — which is not
+ * the same test as "did this run push", and used to be. A branch nobody asks about is a branch that
+ * sits there, so the ending opens a release request in qits-projects; see {@link
+ * ReleaseRequestClient} for what that ask is and why it is convergent.
+ *
+ * <p>This used to read "SUCCEEDED asks for the release itself, NOTHING_TO_DO does not: there is
+ * nothing to release". The second half was a guess dressed as a fact. NOTHING_TO_DO says the head
+ * did not move ACROSS THIS RUN, and a head read that raced the step's own push is enough to produce
+ * it for a branch the step really did write — measured on qits-mirror-platform-service, 2026-09-16:
+ * a run recorded NOTHING_TO_DO at 01:17:19 whose branch carried a commit authored 01:17:06, sitting
+ * unreleased on an old qits-integrations while the dispatcher held the repository for a release
+ * nobody had asked for. So the status still describes the run and the ask now follows the branch.
+ *
+ * <p><b>STALE still does not ask, and that has not moved.</b> Somebody owns the branch by hand and
+ * asking for their commits to be released is precisely the thing that must not happen. Nor does a
+ * branch that is level with main: there is genuinely nothing on it, which is the one case the old
+ * wording always had right.
  *
  * <p><b>The ask is where this service's part ends.</b> It opens a request; the quality gates settle
  * it, Auto Release tags it and the merge back to main follows the deployment, all in qits-projects.
@@ -401,6 +413,13 @@ public class BumpService {
    * <p>So each ending writes the column and the row stops being read, and until one of them happens
    * qits-projects is asked once per poll tick — which is the same tick that follows a running CI run
    * and is a no-op whenever nothing is owed.
+   *
+   * <p><b>It reaches NOTHING_TO_DO rows as well as SUCCEEDED ones, and that is what heals a branch
+   * already stranded.</b> The ending makes the ask now (see {@code finishGroup}), but rows that
+   * ended before it did are sitting with a pushed branch and a null column, and nothing would ever
+   * look at them again. Their price is one extra pair of head reads here: a NOTHING_TO_DO branch may
+   * legitimately be level with main, which is not something a PUSHED branch row can tell you, and
+   * asking to release a branch with nothing on it is a request somebody has to close by hand.
    */
   public void retryRelease(UUID id) {
     Optional<MtBump> found = store.bump(id);
@@ -408,7 +427,14 @@ public class BumpService {
       return;
     }
     MtBump bump = found.get();
-    if (!BumpStatus.SUCCEEDED.name().equals(bump.status) || bump.releaseRequestId != null) {
+    boolean owed =
+        BumpStatus.SUCCEEDED.name().equals(bump.status)
+            // NOTHING_TO_DO is owed an ask whenever its branch is ahead of main — see
+            // `bumpsOwedARelease` and `finishGroup`. This is the path a row that ended before that
+            // was true reaches, which is what makes an already-stranded branch heal rather than
+            // needing a hand.
+            || BumpStatus.NOTHING_TO_DO.name().equals(bump.status);
+    if (!owed || bump.releaseRequestId != null) {
       // Settled between the sweep's read and this task. Idempotent by design: the sweep queues onto
       // one worker thread and a second tick can land behind the first.
       return;
@@ -432,6 +458,29 @@ public class BumpService {
               bump,
               bump.branch + " is " + (state == null ? "no longer tracked" : state)
                   + "; no release was asked for again"));
+      return;
+    }
+    // AHEAD OF MAIN, ASKED FRESH — the sweep cannot inherit `finishGroup`'s reading. A PUSHED row
+    // only says the branch existed when it was last read, and `recordBranchHead` writes PUSHED for
+    // any branch with a head at all, including one that is still exactly main. Since NOTHING_TO_DO
+    // rows joined this sweep, some of them are precisely that, and asking qits-projects to release a
+    // branch with nothing on it is a request somebody then has to close. One head read per owed row
+    // per tick, on a listing that empties after one tick.
+    Optional<MtRepository> repository = store.repository(bump.repository);
+    String head = repository.map(row -> branchHead(row, bump.branch)).orElse(null);
+    String base = repository.map(row -> branchHead(row, baseRef(row))).orElse(null);
+    if (head == null || base == null || head.equals(base)) {
+      // head == base is the settled case and writes CONVERGED: there is nothing on the branch, and
+      // there never will be under this bump. An UNREADABLE head is not — the git host being quiet
+      // for a tick must not close an ask that is genuinely owed, so it is left for the next sweep,
+      // which is the same policy `finishTargeted` applies to a head it could not read.
+      if (head != null && base != null) {
+        store.bumpReleaseAsked(
+            id,
+            ReleaseRequestClient.CONVERGED,
+            note(bump, bump.branch + " is level with " + baseRef(repository.get())
+                + "; there is nothing on it to release"));
+      }
       return;
     }
     askForRelease(bump);
@@ -591,6 +640,42 @@ public class BumpService {
       // Green, and the branch is where it was. The step read the files and found the versions
       // already there — the pins moved between the scan and the run, or another bump got there
       // first.
+      //
+      // THAT IS NOT THE SAME QUESTION AS "IS THERE ANYTHING TO RELEASE", and treating it as one cost
+      // qits-mirror-platform-service a day on an unreleased library. `moved` compares two reads of
+      // the head around one run, so it answers "did THIS run push"; whether the branch is carrying
+      // unreleased commits is a question about the branch against main, and every way the first can
+      // say no while the second says yes leaves the branch stranded: the read raced the step's push,
+      // an earlier run pushed and ended here for the same reason, a retry re-ran a step that had
+      // already done its work. Nothing asks again afterwards, because NOTHING_TO_DO was the one
+      // green ending that made no ask — and the dispatcher then HOLDS the repository for ever,
+      // waiting on a release nobody will ever request. `GET /maintenance/api/bumps/window` said so
+      // out loud ("its branch is pushed and it waits on its own release") while this line said the
+      // opposite.
+      //
+      // So the ASK follows the branch and only the STATUS follows the run. Ahead of main means there
+      // is something to release and this asks for it, exactly as the moved case does and by the same
+      // convergent ask; the status stays NOTHING_TO_DO because this run really did write nothing,
+      // and a reader deserves that distinction rather than a SUCCEEDED that invents a push.
+      String base = repository.map(row -> branchHead(row, baseRef(row))).orElse(null);
+      if (after != null && base != null && !after.equals(base)) {
+        store.recordBranch(bump.repository, bump.groupName, branch, BranchState.PUSHED, after, now);
+        store.bumpFinished(
+            bump.id,
+            BumpStatus.NOTHING_TO_DO,
+            ciRunStatus,
+            "the run passed and " + branch + " did not move, but it is ahead of " + baseRef(repository.get())
+                + " and unreleased",
+            now);
+        // Closed before the ask, for the reason the moved case gives: a qits-projects that will not
+        // answer must not be able to change the verdict.
+        askForRelease(bump);
+        return;
+      }
+      // No branch, or a branch that is main. Genuinely nothing — the one case the old wording
+      // always described correctly. `base == null` joins them deliberately: an unreadable main is
+      // not evidence that the branch is ahead, and asking to release a branch on that guess is the
+      // expensive direction to be wrong in.
       store.bumpFinished(
           bump.id,
           BumpStatus.NOTHING_TO_DO,

@@ -917,6 +917,17 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
    * release_request_id} is null for ever by design. Without the term every targeted row would join
    * this listing the moment it succeeded and be re-attempted once per poll tick for the life of the
    * row: not an ask that is owed, but one that will never be made.
+   *
+   * <p><b>NOTHING_TO_DO is here too, and it is what makes a stranded branch self-heal.</b> That
+   * ending means "this run pushed nothing", which is not "this branch has nothing unreleased" — a
+   * head read that raced the step's own push is enough to separate the two, and the branch then sat
+   * unreleased while the dispatcher held its repository for a release nobody had asked for
+   * (qits-mirror-platform-service, 2026-09-16, a day on an old qits-integrations). {@code
+   * BumpService.finishGroup} now makes the ask at the ending when the branch is ahead of main; this
+   * term is what reaches the rows that ended before it did, and what re-attempts an ask that did not
+   * land. The caller's branch-state check is still what ends them: a NOTHING_TO_DO whose branch is
+   * genuinely main writes {@code CONVERGED} on the first tick and leaves, so the listing stays
+   * bounded exactly as the paragraph above describes.
    */
   @ActivateRequestContext
   public List<MtBump> bumpsOwedARelease() {
@@ -924,9 +935,9 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
         "read the bumps owed a release ask",
         () ->
             MtBump.find(
-                    "status = ?1 and releaseRequestId is null and mode = ?2",
+                    "status in ?1 and releaseRequestId is null and mode = ?2",
                     Sort.by("startedAt"),
-                    BumpStatus.SUCCEEDED.name(),
+                    List.of(BumpStatus.SUCCEEDED.name(), BumpStatus.NOTHING_TO_DO.name()),
                     BumpMode.GROUP.name())
                 .list());
   }
