@@ -1,0 +1,78 @@
+archetype: java-service
+artifacts:
+  - { type: docker, name: qits/qits-platform-maintenance, sbom: .sbom/sbom.json }
+userflows: true
+
+# ONE FLAG OUTSIDE THE ALLOW-LIST: `-Dquarkus.http.test-port=0`. Both halves of this run bind a test
+# port and a fixed one races itself; the repository's own AGENTS.md spells the gate command with it.
+# The slot is otherwise the recipe verbatim.
+release-request:
+  - image: qits/build-images/node-docker-base:latest
+    build: true
+    timeout-seconds: 3600
+    script: |
+      origin_parent="${QITS_CI_REPOSITORY_URL%/*}"
+      webui_dirs=""
+      if [ -f .gitmodules ]; then
+        for key in $(git config -f .gitmodules --name-only --get-regexp '^submodule\..*\.path$'); do
+          name=${key#submodule.}
+          name=${name%.path}
+          path=$(git config -f .gitmodules --get "$key")
+          git -c "submodule.$name.url=$origin_parent/$name" submodule update --init "$path"
+          if [ -f "$path/package.json" ]; then
+            webui_dirs="$webui_dirs $path"
+          fi
+        done
+      fi
+      npm_hosted_origin=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).origin')
+      npm_proxy_origin=$(node -p 'new URL(process.env.QITS_NPM_PROXY_URL).origin')
+      npm_hosted_path=$(node -p 'new URL(process.env.QITS_NPM_REGISTRY_URL).pathname')
+      for dir in $webui_dirs; do
+        (
+          cd "$dir"
+          if [ -f package-lock.json ]; then
+            sed -i -E \
+              -e "s#(\"resolved\": \")https?://[^/\"]+#\1$npm_proxy_origin#" \
+              -e "s#(\"resolved\": \")https?://[^/\"]+($npm_hosted_path)#\1$npm_hosted_origin\2#" \
+              package-lock.json
+          fi
+          env npm_config_registry="$QITS_NPM_PROXY_URL" \
+              "npm_config_@qits:registry=$QITS_NPM_REGISTRY_URL" \
+              npm ci --no-audit --no-fund
+          npm run build
+        )
+      done
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt build-arg:QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
+        --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret
+
+  - image: qits/build-images/maven-base:latest
+    user: build
+    gating: false
+    timeout-seconds: 2400
+    script: |
+      export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
+      export QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}"
+      ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+        -Dquarkus.http.test-port=0 \
+        -Dquarkus.quinoa=false \
+        -DskipITs=false \
+        "-Dit.test=TokenValidationBootstrapIT,ScanCycleIT,InventoryIT,BumpIT,MaintenanceRefusalIT"
+      stories_dir=$(find . -maxdepth 3 -type d -path '*/target/userstories' | head -1)
+      : "${stories_dir:?the verify produced no */target/userstories}"
+      tar -czf /tmp/userstories.tgz -C "$stories_dir" .
+      status=$(curl -sS -o /tmp/docs-publish.out -w '%{http_code}' \
+        -X PUT --data-binary @/tmp/userstories.tgz \
+        -H "X-Artifacts-Meta-git.branch.name: $QITS_CI_BRANCH" \
+        -H "X-Artifacts-Meta-git.commit.hash: $QITS_CI_SHA" \
+        -H "X-Artifacts-Meta-git.repository.name: qits-maintenance-platform-service" \
+        "$QITS_DOCS_URL/@userflows/qits-maintenance-platform-service/-/$QITS_CI_SHA")
+      case "$status" in
+        201) echo "published userflows@$QITS_CI_SHA ($QITS_CI_BRANCH)" ;;
+        409) echo "userflows@$QITS_CI_SHA are already published — skipping" ;;
+        *)   echo "docs publish failed: HTTP $status"; cat /tmp/docs-publish.out; exit 1 ;;
+      esac
