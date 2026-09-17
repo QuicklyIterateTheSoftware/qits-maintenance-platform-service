@@ -37,6 +37,7 @@ import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.control.ActivateRequestContext;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -1515,6 +1516,37 @@ public class MaintenanceStore implements PanacheRepositoryBase<MtRepository, Str
                     "repository in ?1",
                     Sort.by("ecosystem").and("name").and("occurredAt", Sort.Direction.Descending),
                     spellings)
+                .list());
+  }
+
+  /**
+   * What ONE REPOSITORY published at a named set of versions — every artifact of those releases.
+   *
+   * <p>The narrow read behind {@code ArtifactGraph.imagesReleasedWith}, and it is narrow on purpose:
+   * the caller is the GC's pin source, which asks about the handful of versions somebody's manifest
+   * currently pins rather than about a repository's whole history. {@link
+   * #artifactsOfRepository(List)} would answer the same question by reading every release that
+   * repository ever cut, once per repository, on every collection.
+   *
+   * <p>Both terms are {@code in} lists for the reason that overload spells out: the repository is
+   * carried under every spelling its rows may hold, and the versions are the several a set of pins
+   * named. Neither is ever empty here — an empty {@code in} answers nothing and costs a round trip
+   * to find that out.
+   */
+  @ActivateRequestContext
+  public List<MtArtifact> artifactsOfReleases(
+      List<String> spellings, Collection<String> versions) {
+    if (spellings == null || spellings.isEmpty() || versions == null || versions.isEmpty()) {
+      return List.of();
+    }
+    return DbRetry.inNewTx(
+        "read the artifacts of named releases of one repository",
+        () ->
+            MtArtifact.find(
+                    "repository in ?1 and version in ?2",
+                    Sort.by("ecosystem").and("name"),
+                    spellings,
+                    List.copyOf(versions))
                 .list());
   }
 

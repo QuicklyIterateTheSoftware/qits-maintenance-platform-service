@@ -635,7 +635,7 @@ GET  /pins                                        → {generatedAt,
                                                      repositories:[{name, status, lastScanAt,
                                                                     headSha}],
                                                      pins:[{ecosystem, name, version, repository,
-                                                            manifestPath}]}
+                                                            manifestPath, via}]}
                                                                 503 the inventory holds no row at all
 GET  /artifacts                                   → [{ecosystem, name, repository, latest, version,
                                                       occurredAt, sbomStatus, dependentCount,
@@ -706,6 +706,19 @@ GET  /adoption/by-release?repository=&version=    → {repository, catalogId, ve
   manifest), so two reads over an unchanged store answer the same bytes. `gitlink` is excluded: it
   is INTERNAL by construction and its version is a commit sha, which is not an artifact anything
   could collect. `repositories` carries the freshness the consumer judges the answer by.
+- **The docker rows include the images a pom pins WITHOUT SPELLING THEM OUT, and `via` is how you
+  tell.** Container image versions are maven pins now — qits-workspaces pins
+  `qits-workspace-daemon-protocol` and `qits-workspace-editor-image`, qits-projects pins
+  `qits-projects-daemon-protocol`, and each of those artifact versions IS the tag of an image the
+  same release published. So `control/CarriedImages` resolves them: for every internal maven or npm
+  pin, the repository that released that coordinate, and every docker artifact **that same repository
+  released at that same version**. The mapping is the release's own assertion —
+  `.config/qits/release.yml` through the `SoftwareRelease` frame into `mt_artifact` — and never a
+  table anybody has to maintain. Without it the image of a bump that has landed on main but not yet
+  deployed is named by no pin source on the platform and is held by retention alone, which for OCI is
+  a `P0D` window and `RELEASES_KEPT=2`. A derived row carries `via` (`maven eu.wohlben.qits:…`) and
+  the repository and manifest of the **pinning** pom; a row a `FROM` line really wrote carries none,
+  and where both exist the stored row wins.
 - **An inventory with no rows at all answers 503 rather than an empty keep-set.** The consumer is
   fail-closed on a source it could not read — that run deletes nothing — and treats an answer as
   authoritative, so "this service has never scanned" must never arrive as "nothing on the platform

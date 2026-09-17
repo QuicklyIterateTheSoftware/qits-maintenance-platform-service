@@ -62,6 +62,9 @@ public class Inventory {
   /** The other half of the dependency picture — what the releases CONTAIN. See {@link ArtifactGraph}. */
   @Inject ArtifactGraph graph;
 
+  /** The images a maven or npm pin names through the release that stamped them both. */
+  @Inject CarriedImages carried;
+
   /** Every repository, with its groups and what each has pending. */
   public List<RepositoryDto> repositories() {
     Map<String, MtLatest> latest = PendingChanges.index(store.allLatest());
@@ -209,6 +212,14 @@ public class Inventory {
    * folds and the fold it wants is its own. And the ORDER is total — ecosystem, name, version,
    * repository, manifest — so two reads over an unchanged store answer identically and a diff
    * between two runs is a change in the platform rather than in a query plan.
+   *
+   * <p><b>The one thing this computes is {@link CarriedImages}, and it is the same fact in the
+   * ecosystem it will actually be fetched from.</b> Container image versions are pom pins now — a
+   * maven coordinate whose own version IS the image tag — so a repository pinning one references an
+   * image it never spells out, and a keep-set of literal manifest lines would leave that image held
+   * by retention alone for as long as the bump sits on main unreleased. The derived rows are docker
+   * rows carrying a {@code via}; everything else about them, the filters and the order included, is
+   * what a stored row gets.
    */
   public PinSourceDto pins() {
     List<MtRepository> rows = store.repositories();
@@ -235,8 +246,12 @@ public class Inventory {
           // The column is already the wire name — `replaceInventory` writes `Ecosystem.wireName()`
           // and the lookup above proved it is one this build knows — so it is served as stored.
           new PinSourceDto.ArtifactPinDto(
-              pin.ecosystem, pin.name, pin.version, pin.repository, pin.manifestPath));
+              pin.ecosystem, pin.name, pin.version, pin.repository, pin.manifestPath, null));
     }
+    // …and the images those maven and npm pins name without spelling out. Derived from the rows
+    // above rather than from the store again, so the two halves of one answer can never be read at
+    // two different moments; see CarriedImages for why the keep would otherwise have a hole in it.
+    pins.addAll(carried.resolve(List.copyOf(pins)));
     pins.sort(PIN_ORDER);
     return new PinSourceDto(Instant.now(), List.copyOf(repositories), List.copyOf(pins));
   }

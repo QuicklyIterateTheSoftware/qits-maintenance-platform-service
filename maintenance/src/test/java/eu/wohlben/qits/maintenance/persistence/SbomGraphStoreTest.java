@@ -306,4 +306,36 @@ class SbomGraphStoreTest {
 
     assertEquals(2, store.artifactsOfRepository(repository).size());
   }
+
+  /**
+   * THE NARROW READ THE PIN SOURCE ASKS ITS CO-RELEASE QUESTION WITH: one repository, the two or
+   * three versions somebody's manifest pins right now, and nothing of that repository's history.
+   */
+  @Test
+  void theArtifactsOfNamedReleasesAreReadBackByRepositoryAndVersionTogether() {
+    String repository = "qits-daemon-" + UUID.randomUUID();
+    store.upsertArtifact(
+        Ecosystem.MAVEN, "eu.wohlben.qits:protocol", "2026.917.1", repository, Instant.now());
+    store.upsertArtifact(
+        Ecosystem.DOCKER, "qits/agent", "2026.917.1", repository, Instant.now());
+    // A later release of the same repository, which is what a version term that did not bite would
+    // hand the collector as a keep for a version nobody pins.
+    store.upsertArtifact(
+        Ecosystem.DOCKER, "qits/agent", "2026.918.9", repository, Instant.now());
+    // …and somebody else's release at the very version asked about.
+    store.upsertArtifact(Ecosystem.DOCKER, "qits/other", "2026.917.1", "elsewhere", Instant.now());
+    detached();
+
+    List<MtArtifact> read =
+        store.artifactsOfReleases(List.of(repository), List.of("2026.917.1"));
+
+    assertEquals(2, read.size());
+    assertTrue(read.stream().allMatch(row -> row.version.equals("2026.917.1")));
+    assertTrue(read.stream().anyMatch(row -> row.name.equals("qits/agent")));
+    assertTrue(read.stream().anyMatch(row -> row.name.equals("eu.wohlben.qits:protocol")));
+
+    // An empty term on either side answers nothing and costs no round trip to say so.
+    assertTrue(store.artifactsOfReleases(List.of(repository), List.of()).isEmpty());
+    assertTrue(store.artifactsOfReleases(List.of(), List.of("2026.917.1")).isEmpty());
+  }
 }

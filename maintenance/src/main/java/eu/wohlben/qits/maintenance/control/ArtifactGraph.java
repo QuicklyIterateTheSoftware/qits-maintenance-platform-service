@@ -361,6 +361,55 @@ public class ArtifactGraph {
     return ecosystem + " " + name;
   }
 
+  /**
+   * <b>WHAT ELSE ONE RELEASE PUBLISHED</b> — the container images each named {@code (repository,
+   * version)} release carried, beside whatever registry artifact the caller already knows about.
+   *
+   * <p>A sibling of {@link #producers}, and the second half of the same question. That one answers
+   * "whose release is this coordinate"; this one answers "and what images did that same release
+   * put in the registry". Together they turn a maven or npm version somebody's manifest pins into
+   * the image tag of the same calver — see {@link CarriedImages}, which is the only caller.
+   *
+   * <p><b>DOCKER only, and the same release only.</b> A repository publishing a jar and an image out
+   * of one reactor stamps both with the release's version, and that co-stamping is the whole of the
+   * evidence here: it is what {@code .config/qits/release.yml} declared and what the {@code
+   * SoftwareRelease} frame announced, so nothing has to remember a mapping. A version the repository
+   * released no image at is simply absent, which is the truth about it.
+   *
+   * <p>One read per repository asked about, over {@link MaintenanceStore#artifactsOfReleases} —
+   * narrow in both terms, because the caller asks about the handful of versions that are pinned
+   * right now rather than about anybody's history.
+   *
+   * @param versionsByRepository catalog repository name to the released versions asked about
+   * @return repository to version to the docker artifact names that release published, with an
+   *     absent entry wherever there were none
+   */
+  public Map<String, Map<String, List<String>>> imagesReleasedWith(
+      Map<String, Set<String>> versionsByRepository) {
+    if (versionsByRepository == null || versionsByRepository.isEmpty()) {
+      return Map.of();
+    }
+    RepositoryNames names = names();
+    Map<String, Map<String, List<String>>> byRepository = new LinkedHashMap<>();
+    for (Map.Entry<String, Set<String>> asked : versionsByRepository.entrySet()) {
+      Map<String, List<String>> byVersion = new LinkedHashMap<>();
+      for (MtArtifact artifact :
+          store.artifactsOfReleases(names.spellings(asked.getKey()), asked.getValue())) {
+        if (Ecosystem.of(artifact.ecosystem).orElse(null) != Ecosystem.DOCKER
+            || artifact.name == null) {
+          continue;
+        }
+        byVersion
+            .computeIfAbsent(artifact.version, version -> new ArrayList<>())
+            .add(artifact.name);
+      }
+      if (!byVersion.isEmpty()) {
+        byRepository.put(asked.getKey(), byVersion);
+      }
+    }
+    return Map.copyOf(byRepository);
+  }
+
   // --- the one translation ----------------------------------------------------------------------
 
   /**

@@ -27,7 +27,9 @@ import java.util.List;
  * @param generatedAt when this answer was read out of the store — the moment the two lists below
  *     agree on, not a cached one
  * @param repositories every repository the inventory holds, ordered by name
- * @param pins every internal maven, npm and docker pin, in one deterministic order
+ * @param pins every internal maven, npm and docker pin, in one deterministic order — including the
+ *     docker rows RESOLVED out of a maven or npm pin whose release stamped an image with the same
+ *     version, which carry a {@code via} and are otherwise rows like any other
  */
 public record PinSourceDto(
     Instant generatedAt, List<RepositoryStateDto> repositories, List<ArtifactPinDto> pins) {
@@ -47,7 +49,14 @@ public record PinSourceDto(
       String name, String status, Instant lastScanAt, String headSha) {}
 
   /**
-   * One pin, as one manifest of one repository wrote it.
+   * One pin, as one manifest of one repository wrote it — or, where {@link #via} is set, as one
+   * manifest of one repository pins it without spelling it out.
+   *
+   * <p><b>What a row names is what the consumer would FETCH, not the characters in the file.</b> An
+   * npm row carries the LOCK's resolved version rather than the range its {@code package.json}
+   * writes, and a docker row with a {@code via} carries the image a maven or npm pin names by
+   * carrying the version the same release stamped on it — see {@code control/CarriedImages}. Both
+   * are the same resolution, and a keep-set built out of literal text would miss both.
    *
    * @param ecosystem maven, npm or docker — never gitlink, whose version is a commit sha rather than
    *     a registry artifact
@@ -56,7 +65,16 @@ public record PinSourceDto(
    *     what an install actually fetches out of the registry
    * @param repository the repository whose manifest holds the line
    * @param manifestPath where that line is, relative to the repository root
+   * @param via the {@code <ecosystem> <name>} of the coordinate this row was RESOLVED through, and
+   *     null on a row a manifest wrote out. It is provenance and no part of the keep: a reviewer
+   *     asking why an image nobody's {@code FROM} line mentions is being kept reads the pom property
+   *     that carries its tag here.
    */
   public record ArtifactPinDto(
-      String ecosystem, String name, String version, String repository, String manifestPath) {}
+      String ecosystem,
+      String name,
+      String version,
+      String repository,
+      String manifestPath,
+      String via) {}
 }
