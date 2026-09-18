@@ -33,12 +33,13 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * <p>Served under {@code /maintenance/api/repositories} — the {@code /maintenance/api} prefix is
  * {@code quarkus.rest.path}, not spelled here, so this class carries only its own noun.
  *
- * <p><b>Every route accepts the same pair of roles</b>, {@code qits:admin} (a person, through the
- * gateway's forward-auth headers) and {@code qits:system} (a machine, through a bearer validated
- * against qits-platform-idp). A bump is asked for by an operator in a browser and could as well be
- * asked for by a machine; a machine-only guard would lock the operator out of the button this
- * service exists to offer. There is no anonymous route here. The reads also take {@code
- * qits:agent} (a commissioned agent); the bumps do not.
+ * <p><b>Every route accepts the same three roles</b>, {@code qits:admin} (a person, through the
+ * gateway's forward-auth headers), {@code qits:system} (a machine, through a bearer validated
+ * against qits-platform-idp) and {@code qits:agent} (a commissioned agent). A bump is asked for by
+ * an operator in a browser and could as well be asked for by a machine or by the agent doing the
+ * work; a machine-only guard would lock the operator out of the button this service exists to
+ * offer, and an operator-only one would make an agent beg for a press that chooses nothing. There
+ * is no anonymous route here.
  */
 @Path("/repositories")
 @Produces(MediaType.APPLICATION_JSON)
@@ -170,6 +171,11 @@ public class RepositoryController {
    * <p><b>A group with nothing pending still answers 202</b> and the row ends NOTHING_TO_DO. The
    * inventory can be seconds out of date, so refusing here would be refusing on the strength of a
    * cache — and the honest answer is a row that says what the run found.
+   *
+   * <p><b>An agent presses it too, and that is not a loosening.</b> The caller names a group and
+   * nothing else: what lands on the branch is whatever is already pending there, every change
+   * resolving a version somebody has already released — so what this door grants is <i>when</i>, not
+   * <i>what</i>, and the 409s above are still the whole of what keeps two runs off one branch.
    */
   @POST
   @jakarta.ws.rs.Path("/{name}/groups/{group}/bumps")
@@ -177,7 +183,7 @@ public class RepositoryController {
   @APIResponse(responseCode = "202", description = "Requested; poll GET /bumps/{id}")
   @APIResponse(responseCode = "404", description = "No such repository, or no such group")
   @APIResponse(responseCode = "409", description = "One is already active, or bumping is disabled")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public Response bump(@PathParam("name") String name, @PathParam("group") String group) {
     UUID id = bumps.request(name, group, BumpTrigger.MANUAL);
     return Response.status(Response.Status.ACCEPTED)
@@ -212,6 +218,12 @@ public class RepositoryController {
    * rules {@code BumpPayload} holds a group bump to, refused here rather than as a red run somebody
    * has to go and read a step log for. This door refuses synchronously where the group path records
    * the reason on the row, because there is a caller on the other end of this one.
+   *
+   * <p><b>{@code qits:agent} opens it, beside the operator and the machine</b>, because the caller
+   * on the other end is usually an agent arming its own release request and the changes it names
+   * choose nothing new — each one pins a version that is already released, onto a branch the caller
+   * already owns and that CI still gates and a person still approves. The 409 above is unchanged,
+   * and it is what stops two callers writing one ref.
    */
   @POST
   @jakarta.ws.rs.Path("/{name}/branches/bumps")
@@ -222,7 +234,7 @@ public class RepositoryController {
   @APIResponse(
       responseCode = "409",
       description = "One is already active on that branch, or bumping is disabled")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public Response bumpBranch(@PathParam("name") String name, TargetedBumpRequest request) {
     if (request == null || request.branch() == null || request.branch().isBlank()) {
       throw new BadRequestException("a targeted bump names the branch it writes onto");

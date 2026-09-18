@@ -77,12 +77,16 @@ public class BumpController {
    * <p>Opening while one is already open replaces it, which is what "open a window now" plainly
    * means and is the same upsert the cron does. It dispatches nothing itself: the next tick, within
    * {@code bump.poll-interval}, asks the three gates exactly as it would at 02:00.
+   *
+   * <p><b>Which is why an agent may open one too</b>, not only an operator or a machine: the caller
+   * chooses nothing that the 02:00 tick would not have chosen by itself, only that it is asked now.
+   * The three gates are unchanged, and so is every 409 behind them.
    */
   @POST
   @jakarta.ws.rs.Path("/window")
   @Operation(summary = "Open a bump dispatch window now")
   @APIResponse(responseCode = "200", description = "The window that is now open")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public BumpWindowDto openWindow() {
     Instant now = Instant.now();
     dispatcher.open(now);
@@ -97,7 +101,7 @@ public class BumpController {
   @jakarta.ws.rs.Path("/window")
   @Operation(summary = "Close the bump dispatch window")
   @APIResponse(responseCode = "204", description = "There is no window now")
-  @RolesAllowed({"qits:admin", "qits:system"})
+  @RolesAllowed({"qits:admin", "qits:system", "qits:agent"})
   public void closeWindow() {
     dispatcher.close("it was closed by hand");
   }

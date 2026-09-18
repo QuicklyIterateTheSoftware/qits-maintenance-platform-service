@@ -7,16 +7,23 @@ import static org.hamcrest.Matchers.not;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 /**
- * {@code qits:agent}, a commissioned agent's own role: it reads every GET route and queues nothing.
+ * {@code qits:agent}, a commissioned agent's own role: it reads every GET route, it works the bump
+ * doors, and it starts nothing else.
  *
  * <p>Each request names its identity in {@code X-Qits-User} / {@code X-Qits-Roles}, so the {@code
- * %test} dev user does not apply and the identity holds exactly the role sent. Where a read needs
+ * %test} dev user does not apply and the identity holds exactly the role sent. Where a route needs
  * data this suite does not seed, the test asserts only that the door let the request through.
+ *
+ * <p><b>The bumps were refused here once, and are not now.</b> A bump chooses no content — its pins
+ * resolve tags that are already released — so what the door grants is timing, and refusing an agent
+ * bought nothing but a person to go and press it. What still bounds the role is the rest of the
+ * write surface, and the roles outside it: {@code qits:reader} is refused on the same doors.
  */
 @QuarkusTest
 class AgentReadAccessTest {
@@ -32,7 +39,12 @@ class AgentReadAccessTest {
   }
 
   private static void readable(String path) {
-    agent().get(BASE + path).then().statusCode(not(anyOf(is(401), is(403))));
+    allowed(agent().get(BASE + path));
+  }
+
+  /** The door opened — whatever the request then made of itself. */
+  private static void allowed(Response response) {
+    response.then().statusCode(not(anyOf(is(401), is(403))));
   }
 
   @Test
@@ -77,7 +89,7 @@ class AgentReadAccessTest {
   }
 
   @Test
-  void anAgentQueuesNothing() {
+  void anAgentScansNothingAndIngestsNothing() {
     agent()
         .contentType(ContentType.JSON)
         .body("{\"scope\":\"ALL\"}")
@@ -90,13 +102,47 @@ class AgentReadAccessTest {
         .post(BASE + "/artifacts/ingest")
         .then()
         .statusCode(403);
-    agent()
+  }
+
+  /**
+   * <b>The bump doors are open to an agent</b>, which is the whole of what this file used to assert
+   * the opposite of.
+   *
+   * <p>They are asserted by what they are NOT — never 401, never 403 — because what an agent may do
+   * here is the question, and whether this suite has seeded a repository to bump is not. A 404 for a
+   * repository nobody scanned is the door having opened.
+   *
+   * <p>The window pair is opened and closed again in one breath, so this test leaves the dispatcher
+   * where it found it.
+   */
+  @Test
+  void anAgentWorksTheBumpDoors() {
+    allowed(agent().contentType(ContentType.JSON).post(BASE + "/bumps/window"));
+    allowed(agent().delete(BASE + "/bumps/window"));
+    allowed(
+        agent()
+            .contentType(ContentType.JSON)
+            .post(BASE + "/repositories/qits-ci-service/groups/default/bumps"));
+    allowed(
+        agent()
+            .contentType(ContentType.JSON)
+            .body("{\"branch\":\"workspace/ws-agent\",\"changes\":[]}")
+            .post(BASE + "/repositories/qits-ci-service/branches/bumps"));
+  }
+
+  @Test
+  void aRoleOutsideTheBoundaryIsRefusedTheBumpDoorsToo() {
+    as("qits:reader")
         .contentType(ContentType.JSON)
         .post(BASE + "/repositories/qits-ci-service/groups/default/bumps")
         .then()
         .statusCode(403);
-    agent().contentType(ContentType.JSON).post(BASE + "/bumps/window").then().statusCode(403);
-    agent().delete(BASE + "/bumps/window").then().statusCode(403);
+    as("qits:reader")
+        .contentType(ContentType.JSON)
+        .post(BASE + "/bumps/window")
+        .then()
+        .statusCode(403);
+    as("qits:reader").delete(BASE + "/bumps/window").then().statusCode(403);
   }
 
   @Test
