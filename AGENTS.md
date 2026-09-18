@@ -641,9 +641,9 @@ on and no audience configured.
 ## The userflows
 
 Nine `@UserStory` methods across five classes, emitting `service/target/userstories/` and published
-as `@userflows/qits-platform-maintenance` by the non-gating second step of
-`.config/qits/ci-event-release-request.yml` — once per release-request fold, not per commit.
-`skipITs` stays true and the pipeline names the classes:
+as `@userflows/qits-platform-maintenance` by the second step of the release-request phase of
+`.config/qits/release.yml` — once per release-request fold, not per commit. `skipITs` stays true and
+the pipeline names the classes:
 `-DskipITs=false "-Dit.test=TokenValidationBootstrapIT,ScanCycleIT,InventoryIT,BumpIT,MaintenanceRefusalIT"`.
 
 | class | category | what it is about |
