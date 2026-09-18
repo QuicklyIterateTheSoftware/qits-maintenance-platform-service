@@ -28,8 +28,9 @@ import java.util.List;
  *     agree on, not a cached one
  * @param repositories every repository the inventory holds, ordered by name
  * @param pins every internal maven, npm and docker pin, in one deterministic order — including the
- *     docker rows RESOLVED out of a maven or npm pin whose release stamped an image with the same
- *     version, which carry a {@code via} and are otherwise rows like any other
+ *     {@code docker} and {@code daemon} rows RESOLVED out of a maven or npm pin whose release
+ *     stamped an image or a daemon binary with the same version, which carry a {@code via} and are
+ *     otherwise rows like any other
  */
 public record PinSourceDto(
     Instant generatedAt, List<RepositoryStateDto> repositories, List<ArtifactPinDto> pins) {
@@ -58,8 +59,10 @@ public record PinSourceDto(
    * carrying the version the same release stamped on it — see {@code control/CarriedImages}. Both
    * are the same resolution, and a keep-set built out of literal text would miss both.
    *
-   * @param ecosystem maven, npm or docker — never gitlink, whose version is a commit sha rather than
-   *     a registry artifact
+   * @param ecosystem maven, npm, docker or — on a derived row only — {@code daemon}, the platform's
+   *     binary store, which is not one of this service's ecosystems and is spelled exactly so
+   *     because the consumer matches the word. Never gitlink, whose version is a commit sha rather
+   *     than a registry artifact
    * @param name the artifact in its own ecosystem's spelling, which is the registry coordinate
    * @param version the exact version referenced; for npm the LOCK's resolved one, because that is
    *     what an install actually fetches out of the registry

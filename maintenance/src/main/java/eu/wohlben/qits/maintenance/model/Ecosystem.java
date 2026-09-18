@@ -31,6 +31,32 @@ public enum Ecosystem {
    */
   GITLINK;
 
+  /**
+   * <b>{@code daemon} — a released artifact word that is deliberately NOT a constant above, and the
+   * one place that is written down.</b>
+   *
+   * <p>qits-ci publishes a {@code SoftwareRelease} of type {@code daemon} for every binary that
+   * lands in the platform's {@code daemons} store, and since the qits CLI's version became a pom pin
+   * — qits-ci pins {@code eu.wohlben.qits:qits-platform-access-cli-binary}, whose version IS the
+   * store coordinate of the binary the same release published — those releases have to leave an
+   * {@code mt_artifact} row, or the GC's keep-set has the hole {@code control/CarriedDaemons}
+   * exists to close.
+   *
+   * <p><b>A row, and still not an ecosystem.</b> The enum above prices a fifth value at "a parser, a
+   * resolver and a step together" and a daemon binary has none of the three: no manifest declares
+   * one as a dependency, no registry answers what its newest version is, and no bump step can edit a
+   * line that does not exist. So {@link #of} keeps answering EMPTY for it, and everything that
+   * branches on an {@code Ecosystem} — the latest column, the pending rule, the SBOM fetch — keeps
+   * passing it by. What a daemon row carries is a fact about a RELEASE, which is exactly the half of
+   * this schema that is keyed by the stored string rather than by this enum.
+   *
+   * <p>Compared as the stored string wherever it is needed, which is three places: the listener that
+   * writes the row, {@code ArtifactGraph.daemonsReleasedWith} that reads it back, and the {@code
+   * ecosystem} the pin source serves the derived row under — a spelling qits-artifacts' {@code
+   * MaintenanceHttpDependencyPins} matches exactly.
+   */
+  public static final String DAEMON_WIRE_NAME = "daemon";
+
   /** The stored and served spelling. */
   public String wireName() {
     return name().toLowerCase(java.util.Locale.ROOT);

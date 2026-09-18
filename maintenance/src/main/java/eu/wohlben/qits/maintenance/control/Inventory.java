@@ -65,6 +65,8 @@ public class Inventory {
   /** The images a maven or npm pin names through the release that stamped them both. */
   @Inject CarriedImages carried;
 
+  @Inject CarriedDaemons carriedDaemons;
+
   /** Every repository, with its groups and what each has pending. */
   public List<RepositoryDto> repositories() {
     Map<String, MtLatest> latest = PendingChanges.index(store.allLatest());
@@ -213,13 +215,14 @@ public class Inventory {
    * repository, manifest — so two reads over an unchanged store answer identically and a diff
    * between two runs is a change in the platform rather than in a query plan.
    *
-   * <p><b>The one thing this computes is {@link CarriedImages}, and it is the same fact in the
-   * ecosystem it will actually be fetched from.</b> Container image versions are pom pins now — a
-   * maven coordinate whose own version IS the image tag — so a repository pinning one references an
-   * image it never spells out, and a keep-set of literal manifest lines would leave that image held
-   * by retention alone for as long as the bump sits on main unreleased. The derived rows are docker
-   * rows carrying a {@code via}; everything else about them, the filters and the order included, is
-   * what a stored row gets.
+   * <p><b>The one thing this computes is {@link CarriedImages} and {@link CarriedDaemons}, and it is
+   * the same fact in the store it will actually be fetched from.</b> Container image versions and
+   * the qits CLI's version are pom pins now — a maven coordinate whose own version IS the image tag,
+   * or the daemon binary's store coordinate — so a repository pinning one references something it
+   * never spells out, and a keep-set of literal manifest lines would leave that image or that binary
+   * held by retention alone for as long as the bump sits on main unreleased. The derived rows are
+   * {@code docker} and {@code daemon} rows carrying a {@code via}; everything else about them, the
+   * order included, is what a stored row gets.
    */
   public PinSourceDto pins() {
     List<MtRepository> rows = store.repositories();
@@ -248,10 +251,14 @@ public class Inventory {
           new PinSourceDto.ArtifactPinDto(
               pin.ecosystem, pin.name, pin.version, pin.repository, pin.manifestPath, null));
     }
-    // …and the images those maven and npm pins name without spelling out. Derived from the rows
-    // above rather than from the store again, so the two halves of one answer can never be read at
-    // two different moments; see CarriedImages for why the keep would otherwise have a hole in it.
-    pins.addAll(carried.resolve(List.copyOf(pins)));
+    // …and the images and daemon binaries those maven and npm pins name without spelling out.
+    // Derived from the STORED rows — snapshotted here, so the second derivation cannot read the
+    // first one's output as if a manifest had written it — rather than from the store again, so the
+    // halves of one answer can never be read at two different moments. See CarriedImages and
+    // CarriedDaemons for why the keep would otherwise have a hole in it in each store.
+    List<PinSourceDto.ArtifactPinDto> stored = List.copyOf(pins);
+    pins.addAll(carried.resolve(stored));
+    pins.addAll(carriedDaemons.resolve(stored));
     pins.sort(PIN_ORDER);
     return new PinSourceDto(Instant.now(), List.copyOf(repositories), List.copyOf(pins));
   }

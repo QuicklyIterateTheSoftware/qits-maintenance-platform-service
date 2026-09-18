@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 /**
  * The read side of what our releases CONTAIN, beside {@link Inventory}'s read side of what our
@@ -378,7 +379,8 @@ public class ArtifactGraph {
    *
    * <p>One read per repository asked about, over {@link MaintenanceStore#artifactsOfReleases} —
    * narrow in both terms, because the caller asks about the handful of versions that are pinned
-   * right now rather than about anybody's history.
+   * right now rather than about anybody's history. The walk itself is {@link #releasedWith}, shared
+   * with {@link #daemonsReleasedWith}, which asks the identical question about a daemon binary.
    *
    * @param versionsByRepository catalog repository name to the released versions asked about
    * @return repository to version to the docker artifact names that release published, with an
@@ -386,6 +388,44 @@ public class ArtifactGraph {
    */
   public Map<String, Map<String, List<String>>> imagesReleasedWith(
       Map<String, Set<String>> versionsByRepository) {
+    return releasedWith(
+        versionsByRepository,
+        artifact -> Ecosystem.of(artifact.ecosystem).orElse(null) == Ecosystem.DOCKER);
+  }
+
+  /**
+   * <b>THE SAME QUESTION, ONE ARTIFACT TYPE OVER</b> — the daemon binaries each named {@code
+   * (repository, version)} release put in the platform's {@code daemons} store.
+   *
+   * <p>A sibling of {@link #imagesReleasedWith} in every respect, and it exists for the same hole in
+   * the keep-set: the qits CLI's version is a pom pin now — qits-ci pins {@code
+   * eu.wohlben.qits:qits-platform-access-cli-binary}, whose version IS the store coordinate of the
+   * binary the same release published — so a repository pinning that coordinate references a binary
+   * it never spells out. See {@link CarriedDaemons}, which is the only caller.
+   *
+   * <p><b>The filter compares the STORED STRING, and that is the one difference.</b> {@code daemon}
+   * is not an {@link Ecosystem} and must not become one — {@code Ecosystem#DAEMON_WIRE_NAME} prices
+   * the fifth constant at a parser, a resolver and a bump step, none of which a daemon binary has —
+   * so {@code Ecosystem.of} answers empty for these rows and a comparison through it would filter
+   * out exactly what is being asked for.
+   *
+   * @param versionsByRepository catalog repository name to the released versions asked about
+   * @return repository to version to the daemon artifact names that release published, with an
+   *     absent entry wherever there were none
+   */
+  public Map<String, Map<String, List<String>>> daemonsReleasedWith(
+      Map<String, Set<String>> versionsByRepository) {
+    return releasedWith(
+        versionsByRepository,
+        artifact -> Ecosystem.DAEMON_WIRE_NAME.equalsIgnoreCase(artifact.ecosystem));
+  }
+
+  /**
+   * The shared read behind both: one narrow query per repository asked about, kept by the caller's
+   * own test of what the release carried.
+   */
+  private Map<String, Map<String, List<String>>> releasedWith(
+      Map<String, Set<String>> versionsByRepository, Predicate<MtArtifact> carried) {
     if (versionsByRepository == null || versionsByRepository.isEmpty()) {
       return Map.of();
     }
@@ -395,8 +435,7 @@ public class ArtifactGraph {
       Map<String, List<String>> byVersion = new LinkedHashMap<>();
       for (MtArtifact artifact :
           store.artifactsOfReleases(names.spellings(asked.getKey()), asked.getValue())) {
-        if (Ecosystem.of(artifact.ecosystem).orElse(null) != Ecosystem.DOCKER
-            || artifact.name == null) {
+        if (artifact.name == null || !carried.test(artifact)) {
           continue;
         }
         byVersion

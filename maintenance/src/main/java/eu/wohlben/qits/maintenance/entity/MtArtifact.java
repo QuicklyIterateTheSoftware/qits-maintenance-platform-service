@@ -19,6 +19,21 @@ import java.util.UUID;
  * <p><b>The row is the outbox.</b> A {@code SoftwareRelease} frame writes it PENDING and returns;
  * the document is fetched afterwards, on the worker thread, outside the transaction that claimed
  * the event.
+ *
+ * <p><b>CORRECTION to {@code V3__sbom_graph.sql}, whose {@code ecosystem} comment says a {@code
+ * daemon} release is "never a row here — nothing in any manifest pins them".</b> That was true when
+ * it was written and is not true now: the qits CLI's version is a pom pin — qits-ci pins {@code
+ * eu.wohlben.qits:qits-platform-access-cli-binary}, whose version IS the {@code daemons}-store
+ * coordinate of the binary the same release published — so a daemon release DOES leave a row, and
+ * the GC's keep-set is derived from it (see {@code control/CarriedDaemons}). The column is {@code
+ * varchar(32)} with no check constraint and has always been able to hold the word; the correction
+ * is carried here rather than in the migration because an applied migration's checksum is the one
+ * thing that must never move — editing a comment in one refuses boot and rolls the deploy back.
+ * {@code docs} remains as the comment describes it: nothing pins an api-docs bundle.
+ *
+ * <p>A daemon row is written TERMINAL rather than PENDING — {@code
+ * MaintenanceStore.upsertDaemonArtifact} says why — because this build cannot address a daemon's
+ * bill of materials at all, and a PENDING row would be swept for ever.
  */
 @Entity
 @Table(name = "mt_artifact")
@@ -26,7 +41,12 @@ public class MtArtifact extends PanacheEntityBase {
 
   @Id public UUID id;
 
-  /** {@code Ecosystem}'s wire name — the same vocabulary {@code mt_pin} uses, because it joins. */
+  /**
+   * {@code Ecosystem}'s wire name — the same vocabulary {@code mt_pin} uses, because it joins — or
+   * {@code Ecosystem.DAEMON_WIRE_NAME}, which is a released artifact word and not an ecosystem. Read
+   * it through {@code Ecosystem.of}, which answers empty for the latter, and compare the string
+   * where a daemon is the subject.
+   */
   @Column(nullable = false, length = 32)
   public String ecosystem;
 

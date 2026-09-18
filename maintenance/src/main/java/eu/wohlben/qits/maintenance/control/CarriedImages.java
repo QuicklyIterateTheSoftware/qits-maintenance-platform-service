@@ -4,12 +4,7 @@ import eu.wohlben.qits.maintenance.dto.PinSourceDto;
 import eu.wohlben.qits.maintenance.model.Ecosystem;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 /**
  * <b>THE IMAGE A POM PIN NAMES.</b> Every container image a repository's manifest pins without
@@ -59,6 +54,12 @@ import java.util.Set;
  * image for a version this service never saw released, and inventing one would put a name in a
  * keep-set that no release ever carried. The window that matters is the freshly released version,
  * whose row {@code SoftwareReleaseListener} writes off the frame whatever becomes of its SBOM.
+ *
+ * <p><b>The walk itself moved to {@link CarriedArtifacts} when {@link CarriedDaemons} needed it
+ * verbatim.</b> That is the algorithm — the producer lookup, the de-duplication, the {@code via},
+ * and the stored row winning where both exist; what stays here is which artifact type is carried and
+ * why this particular hole was worth closing. The two callers differ in two tokens and in nothing
+ * else, which is the reason they are one piece of code and not two.
  */
 @ApplicationScoped
 public class CarriedImages {
@@ -75,80 +76,7 @@ public class CarriedImages {
    *     the answer is served in
    */
   public List<PinSourceDto.ArtifactPinDto> resolve(List<PinSourceDto.ArtifactPinDto> pins) {
-    if (pins == null || pins.isEmpty()) {
-      return List.of();
-    }
-    // Which repository released each coordinate anybody pins, read once. A carrier that names no
-    // release of ours — a coordinate this platform has never published — falls out here.
-    Map<String, String> producers = graph.producers();
-    Map<String, Set<String>> versionsByRepository = new LinkedHashMap<>();
-    for (PinSourceDto.ArtifactPinDto pin : pins) {
-      String repository = carrierOf(producers, pin);
-      if (repository != null) {
-        versionsByRepository
-            .computeIfAbsent(repository, name -> new LinkedHashSet<>())
-            .add(pin.version());
-      }
-    }
-
-    Map<String, Map<String, List<String>>> images = graph.imagesReleasedWith(versionsByRepository);
-    if (images.isEmpty()) {
-      return List.of();
-    }
-
-    // Keyed so one image reached through two carriers of the same release — a pom pinning both
-    // halves of one repository's reactor — is one row rather than two saying the same thing.
-    Map<String, PinSourceDto.ArtifactPinDto> derived = new LinkedHashMap<>();
-    for (PinSourceDto.ArtifactPinDto pin : pins) {
-      String repository = carrierOf(producers, pin);
-      if (repository == null) {
-        continue;
-      }
-      for (String image :
-          images.getOrDefault(repository, Map.of()).getOrDefault(pin.version(), List.of())) {
-        derived.putIfAbsent(
-            key(image, pin.version(), pin.repository(), pin.manifestPath()),
-            new PinSourceDto.ArtifactPinDto(
-                Ecosystem.DOCKER.wireName(),
-                image,
-                pin.version(),
-                // The PINNING repository and the manifest that holds the line, never the one that
-                // released the image: the consumer's question the moment it decides not to delete
-                // something is "who still holds this", and the answer is the pom with the property
-                // in it. Where the NAME came from is `via`.
-                pin.repository(),
-                pin.manifestPath(),
-                pin.ecosystem() + " " + pin.name()));
-      }
-    }
-
-    // A manifest that also writes the image out — a Dockerfile `FROM` at the same version — has
-    // already said this, with a line a bump can edit. The stored row is the better one of the two.
-    for (PinSourceDto.ArtifactPinDto pin : pins) {
-      derived.remove(key(pin.name(), pin.version(), pin.repository(), pin.manifestPath()));
-    }
-    return List.copyOf(new ArrayList<>(derived.values()));
-  }
-
-  /**
-   * The repository whose release published this pin's coordinate, or null when it carries no image
-   * of ours.
-   *
-   * <p>DOCKER and GITLINK are refused at the door rather than filtered later: an image is its own
-   * carrier and resolving one would restate the row it came from, and a gitlink's version is a
-   * commit sha, which no release ever stamped an artifact with.
-   */
-  private static String carrierOf(
-      Map<String, String> producers, PinSourceDto.ArtifactPinDto pin) {
-    Ecosystem ecosystem = Ecosystem.of(pin.ecosystem()).orElse(null);
-    if (ecosystem != Ecosystem.MAVEN && ecosystem != Ecosystem.NPM) {
-      return null;
-    }
-    String repository = producers.get(ArtifactGraph.producerKey(pin.ecosystem(), pin.name()));
-    return repository == null || repository.isBlank() ? null : repository;
-  }
-
-  private static String key(String name, String version, String repository, String manifestPath) {
-    return name + ":" + version + " " + repository + " " + manifestPath;
+    return CarriedArtifacts.resolve(
+        pins, graph, Ecosystem.DOCKER.wireName(), graph::imagesReleasedWith);
   }
 }

@@ -444,8 +444,22 @@ where v1 waited up to six hours for a poll.
   version exists and never that a higher one does not. Without the guard, a catch-up frame from
   yesterday would rewind a column this morning's scan filled, and the whole inventory would report
   that dependency as up to date until the next scan. `packageName` joins `mt_pin`'s naming directly:
-  maven `g:a`, npm `@scope/name`, docker `qits/<name>`. `daemon` and `docs` releases settle — they
-  are real facts and nothing pins them.
+  maven `g:a`, npm `@scope/name`, docker `qits/<name>`. A `docs` release settles — an api-docs
+  bundle is a real fact and nothing pins it.
+- **A `daemon` release writes the artifact row and NOT the latest column**, which is the one type
+  that makes exactly one of the two writes. The qits CLI's version is a pom pin now — qits-ci pins
+  `eu.wohlben.qits:qits-platform-access-cli-binary`, whose version IS the `daemons`-store coordinate
+  of the binary the same release published — so a daemon release that left no `mt_artifact` row left
+  the GC nothing to derive a keep from, and a store collecting at `window=P0D` took the binary out
+  from under a pin that still named it. No `mt_latest`: that column is compared against a pin of the
+  same ecosystem and there is none (the pom holds the *maven* coordinate), and `LatestResolver` has
+  no registry to refresh it from. `daemon` stays **out of the `Ecosystem` enum** — a fifth constant
+  costs a parser, a resolver and a bump step, and a daemon binary has none of the three — so the row
+  carries the literal string and `Ecosystem.of("daemon")` still answers empty. The row is written
+  **terminal** (`FAILED`, with the reason in `sbom_error`) rather than PENDING: nothing here can
+  address a daemon's SBOM — the route is keyed by an `Ecosystem` — so a PENDING row would be
+  re-queued by the hourly sweep for ever. `MISSING` would have been the quieter word and an untrue
+  one: qits-artifacts *does* hold a document for a released daemon.
 - **`SCMRelease` is also the ONLY source of a gitlink's latest.** There is no registry to poll — a
   submodule is a git repository and nothing publishes one — so the daily scan neither fills that row
   nor clears it, and `LatestResolver.resolvable` refuses the ecosystem outright. Every release is
@@ -719,6 +733,19 @@ GET  /adoption/by-release?repository=&version=    → {repository, catalogId, ve
   a `P0D` window and `RELEASES_KEPT=2`. A derived row carries `via` (`maven eu.wohlben.qits:…`) and
   the repository and manifest of the **pinning** pom; a row a `FROM` line really wrote carries none,
   and where both exist the stored row wins.
+- **The same rule one artifact type over: the `daemon` rows.** `control/CarriedDaemons` is
+  `control/CarriedImages` with the platform's binary store in place of the registry — for every
+  internal maven or npm pin, the repository that released that coordinate, and every **daemon**
+  artifact that same repository released at that same version — and the two call one walk
+  (`control/CarriedArtifacts`), because they differ in two tokens and nothing else. It exists for the
+  `qits` CLI: qits-ci pins `eu.wohlben.qits:qits-platform-access-cli-binary`, whose version IS the
+  store coordinate of the binary, and the `daemons` store collects at `window=P0D` keeping the last
+  two versions — so the pin rotted with nothing bumping it and nothing holding it back, and release
+  pipelines 404'd on the fetch. The derived rows are served with `ecosystem: "daemon"`, which is a
+  **contract**: qits-artifacts' `MaintenanceHttpDependencyPins` files a row by exactly that word and
+  refuses the whole pin source on one it cannot file, so it is deployed before this service serves
+  one or every GC run fails closed. `daemon` is not an `Ecosystem` and never becomes one; only a
+  derived row is ever spelled with it, since no manifest this service parses pins a daemon.
 - **An inventory with no rows at all answers 503 rather than an empty keep-set.** The consumer is
   fail-closed on a source it could not read — that run deletes nothing — and treats an answer as
   authoritative, so "this service has never scanned" must never arrive as "nothing on the platform

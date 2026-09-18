@@ -69,6 +69,27 @@ public class SbomIngestService {
   }
 
   /**
+   * <b>What an announced DAEMON release leaves behind: a row, and nothing on the queue.</b>
+   *
+   * <p>A daemon binary is not an {@link Ecosystem} and never will be — {@code
+   * Ecosystem.DAEMON_WIRE_NAME} says why — so there is no document to fetch here and no fetch to
+   * queue. The row is still written, because the qits CLI's version is a pom pin now and the GC's
+   * keep-set is derived from exactly these rows: without one, the binary a released pom names is
+   * kept by nothing and the release pipelines that fetch it 404. See {@code control/CarriedDaemons}.
+   *
+   * <p>It is written TERMINAL by {@link MaintenanceStore#upsertDaemonArtifact}, and this method
+   * makes no queue submit at all, so nothing ever asks about it: a PENDING row would be re-queued
+   * by {@link #sweep} every hour, answered by {@link #ingest}'s unknown-ecosystem arm, and reset by
+   * the next sweep — a loop around a question this build cannot ask.
+   *
+   * @return the artifact row's id
+   */
+  public UUID announcedDaemon(
+      String name, String version, String repository, Instant occurredAt) {
+    return store.upsertDaemonArtifact(name, version, repository, occurredAt);
+  }
+
+  /**
    * The manual backfill: create the row or put it back to PENDING, whatever it said before, and
    * queue it.
    *

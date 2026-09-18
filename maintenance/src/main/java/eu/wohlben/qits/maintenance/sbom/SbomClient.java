@@ -100,11 +100,12 @@ public class SbomClient {
    * qits-ci's {@code packageType} vocabulary, which is what the route is keyed by.
    *
    * <p><b>{@code daemon} SBOMs exist upstream and are unreachable from here, deliberately.</b>
-   * qits-artifacts stores one per released daemon binary, and no {@code mt_artifact} row is ever a
-   * daemon: {@link Ecosystem} has three constants because three manifests pin three things, and a
-   * daemon is pinned by nothing this service parses. An artifact row for one would join to no pin
-   * and be answered to nobody — see {@code SoftwareReleaseListener.ECOSYSTEMS}, which is where the
-   * type is filtered out one step earlier.
+   * qits-artifacts stores one per released daemon binary; this signature cannot address it, because
+   * it takes an {@link Ecosystem} and {@code daemon} is not one — {@code
+   * Ecosystem.DAEMON_WIRE_NAME} prices the fifth constant and declines it. There ARE {@code
+   * mt_artifact} rows for daemons since the qits CLI's version became a pom pin, and they exist to
+   * carry a GC keep rather than a document: {@code SbomIngestService.announcedDaemon} writes each
+   * one terminal at the write and queues no fetch, so this route is never reached for one.
    */
   static String packageType(Ecosystem ecosystem) {
     // maven, npm, docker — the wire spelling this service already stores and serves, which is the
