@@ -25,6 +25,17 @@ import org.jboss.logging.Logger;
  * the newest version says nothing about what any release contained, and a graph of one release says
  * nothing about whether a higher one exists. See {@code SbomIngestService}.
  *
+ * <p><b>…and a DAEMON release makes the second write only.</b> {@code daemon} used to be discarded
+ * here with a DEBUG, on the reading — written into {@code mt_artifact.ecosystem}'s own V3 comment as
+ * a decision — that nothing in any manifest pins a daemon binary. That sentence stopped being true
+ * when the qits CLI's version became a pom pin: qits-ci pins {@code
+ * eu.wohlben.qits:qits-platform-access-cli-binary}, whose version IS the {@code daemons}-store
+ * coordinate of the binary the same release published, and with no {@code mt_artifact} row the GC
+ * had nothing to derive a keep from — the store collects at {@code window=P0D} keeping the last two
+ * versions, so the pin rotted and the release pipelines that fetch the CLI 404'd. See {@link
+ * #daemon}, {@code control/CarriedDaemons}, and {@code Ecosystem.DAEMON_WIRE_NAME} for why the word
+ * is a string here and not a fifth enum constant.
+ *
  * <p>This is the fast path the six-hourly internal scan used to be. Everything downstream is
  * unchanged and needs no help: pending is computed from {@code mt_pin ⋈ mt_latest} on every read, so
  * a column that moved is a repository page that shows an arrow the moment it is refreshed, and a
@@ -51,9 +62,11 @@ import org.jboss.logging.Logger;
  *
  * <p>{@code packageType} is qits-ci's own vocabulary and its values are the literals {@code npm},
  * {@code maven}, {@code docker}, {@code daemon} and {@code docs}. Three of them are ecosystems this
- * service inventories and {@link #ECOSYSTEMS} is that map; the other two, and anything a future
- * qits-ci adds, are a DEBUG and a settled event — a release of a daemon binary or an api-docs bundle
- * is a real fact about the platform and simply not one this inventory holds.
+ * service inventories and {@link #ECOSYSTEMS} is that map; {@code daemon} is the fourth and takes
+ * the artifact row alone; {@code docs}, and anything a future qits-ci adds, is a DEBUG and a settled
+ * event. {@code docs} stays out on the rule that was always the real one — <b>nothing pins it</b>.
+ * An api-docs bundle is named by no manifest and fetched by no build, so a row for one would be a
+ * keep nobody asked for; a daemon binary is named by a pom property that resolves to it.
  *
  * <p>They are compared as the literal wire values rather than through qits-ci's {@code
  * CiArtifact.Type} enum, which lives in a module this service does not and should not depend on. The
@@ -126,8 +139,13 @@ public class SoftwareReleaseListener implements QitsDurableEventListener {
 
   /**
    * qits-ci's {@code packageType} vocabulary, as the wire spells it, mapped onto the three
-   * ecosystems this inventory holds. {@code daemon} and {@code docs} are deliberately absent: they
-   * are real releases and are not pinned in any manifest this service parses.
+   * ecosystems this inventory holds.
+   *
+   * <p>{@code daemon} is deliberately absent and is NOT an omission: it is handled one branch below,
+   * as the string it is. Putting it in this map would make it an {@link Ecosystem}, which would put
+   * a daemon binary in {@code mt_latest}, in the pending rule and on the SBOM route — three
+   * questions nothing can answer about it. {@code docs} is absent for the original reason, which
+   * still holds: nothing pins an api-docs bundle.
    */
   static final Map<String, Ecosystem> ECOSYSTEMS =
       Map.of(
@@ -188,10 +206,12 @@ public class SoftwareReleaseListener implements QitsDurableEventListener {
       // offer, and an event nothing can read must not hold the watermark.
       return;
     }
-    Ecosystem ecosystem = ECOSYSTEMS.get(packageType(release));
-    if (ecosystem == null) {
-      // A daemon binary or an api-docs bundle, or a type qits-ci added after this was written. All
-      // three are ordinary traffic on a bus this consumer shares, so DEBUG rather than WARN.
+    String packageType = packageType(release);
+    Ecosystem ecosystem = ECOSYSTEMS.get(packageType);
+    boolean daemon = Ecosystem.DAEMON_WIRE_NAME.equals(packageType);
+    if (ecosystem == null && !daemon) {
+      // An api-docs bundle, or a type qits-ci added after this was written. Both are ordinary
+      // traffic on a bus this consumer shares, so DEBUG rather than WARN.
       LOG.debugf(
           "%s %s released %s of type '%s', which this inventory does not hold; it is settled",
           frame.name(), frame.id(), release.packageName(), release.packageType());
@@ -203,6 +223,10 @@ public class SoftwareReleaseListener implements QitsDurableEventListener {
       LOG.warnf(
           "%s %s carries no (packageName, version) to record a latest under; it is skipped",
           frame.name(), frame.id());
+      return;
+    }
+    if (daemon) {
+      daemon(frame, release, name, version);
       return;
     }
     // The store throws out of here on a database that will not answer, which is exactly right: the
@@ -229,6 +253,35 @@ public class SoftwareReleaseListener implements QitsDurableEventListener {
     // outbox — see SbomIngestService.
     sboms.announced(
         ecosystem, name, version, repository(release), occurredAt(frame));
+  }
+
+  /**
+   * <b>A released daemon binary: the artifact row, and NOT the latest column.</b>
+   *
+   * <p>The row is what the GC's keep-set is derived from — {@code control/CarriedDaemons} turns a
+   * pom pin on the co-released maven coordinate into a keep for this binary — so a daemon release
+   * this listener discarded was a version the {@code daemons} store was free to collect out from
+   * under a pin that still named it.
+   *
+   * <p><b>{@code mt_latest} is deliberately not written, and it is not an omission either.</b> That
+   * column exists to be compared against a pin of the same ecosystem, and there is no such pin: what
+   * a pom holds is the MAVEN coordinate, whose own {@code mt_latest} is what moves it. A daemon
+   * column would also be a column {@code LatestResolver} cannot refresh — there is no registry to
+   * ask — so the daily scan would leave it at whatever the last frame said and the freshness of the
+   * row would be unknowable. And {@code recordLatestIfNewer} takes an {@link Ecosystem}, which
+   * {@code daemon} is not.
+   *
+   * <p>The repository translation and the frame's moment are the same two the ordinary path uses,
+   * for the same two reasons; so is the failure policy — the store throws only on a database that
+   * will not answer, and the claim rolls back.
+   */
+  private void daemon(
+      EventFrame frame, SoftwareReleasePayload release, String name, String version) {
+    sboms.announcedDaemon(name, version, repository(release), occurredAt(frame));
+    LOG.infof(
+        "%s %s released the daemon binary %s %s; it is recorded so a pin of its co-released"
+            + " artifact can keep it",
+        frame.name(), frame.id(), name, version);
   }
 
   /**

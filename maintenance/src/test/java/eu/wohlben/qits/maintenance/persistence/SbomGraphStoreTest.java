@@ -338,4 +338,91 @@ class SbomGraphStoreTest {
     assertTrue(store.artifactsOfReleases(List.of(repository), List.of()).isEmpty());
     assertTrue(store.artifactsOfReleases(List.of(), List.of("2026.917.1")).isEmpty());
   }
+
+  // --- the daemon row: a keep, never an outbox ----------------------------------------------------
+
+  /**
+   * <b>A DAEMON BINARY GETS A ROW, and the column takes the word.</b> {@code ecosystem} is {@code
+   * varchar(32)} with no check constraint, so the literal {@code daemon} stores and reads back
+   * exactly as written — which is what the pin source's daemon derivation joins on, and why V3's
+   * comment saying a daemon is "never a row here" is carried as corrected on {@code MtArtifact}.
+   */
+  @Test
+  void aReleasedDaemonBinaryIsStoredUnderTheLiteralWordAndIsNotAnEcosystem() {
+    String repository = "qits-platform-access-cli-" + UUID.randomUUID();
+    // The version carries the uniqueness: a row is keyed by (ecosystem, name, version) and this
+    // module's tests share one database, so a fixed one would answer with a sibling test's row.
+    String version = "2026.918." + UUID.randomUUID();
+    UUID id =
+        store.upsertDaemonArtifact("qits-platform-access-cli", version, repository, Instant.now());
+    detached();
+
+    MtArtifact row = store.artifact(id).orElseThrow();
+    assertEquals(Ecosystem.DAEMON_WIRE_NAME, row.ecosystem);
+    assertEquals("qits-platform-access-cli", row.name);
+    assertEquals(version, row.version);
+    assertEquals(repository, row.repository);
+    assertTrue(
+        Ecosystem.of(row.ecosystem).isEmpty(),
+        "the row exists and the word is still not one of the four this service resolves");
+  }
+
+  /**
+   * <b>TERMINAL AT THE WRITE, because nothing here can ever read it.</b> {@code SbomClient} keys the
+   * route by an {@code Ecosystem} and the ingest refuses a row whose ecosystem does not resolve, so
+   * a PENDING daemon row would be re-queued by the hourly sweep for ever and answered by nobody. The
+   * status carries its own sentence, which MISSING has no field to do — and MISSING would assert
+   * something untrue about qits-artifacts, which does hold a document for a released daemon.
+   */
+  @Test
+  void aDaemonRowIsTerminalWithItsReasonAndNoSweepEverPicksItUp() {
+    UUID id =
+        store.upsertDaemonArtifact(
+            "qits-platform-access-cli", "2026.918." + UUID.randomUUID(), "qits-cli", Instant.now());
+    detached();
+
+    MtArtifact row = store.artifact(id).orElseThrow();
+    assertEquals(SbomStatus.FAILED.name(), row.sbomStatus);
+    assertEquals(MaintenanceStore.DAEMON_SBOM_UNREAD, row.sbomError);
+    assertTrue(
+        store.pendingArtifacts().stream().noneMatch(pending -> pending.id.equals(id)),
+        "a row nothing can fetch must not sit in the queue the sweep re-offers");
+  }
+
+  /** A redelivered daemon release is a read and a return, exactly as the ordinary upsert is. */
+  @Test
+  void aRedeliveredDaemonReleaseLeavesTheRowAloneRatherThanDuplicatingIt() {
+    String version = "2026.918." + UUID.randomUUID();
+    UUID first = store.upsertDaemonArtifact("qits-platform-access-cli", version, "a", Instant.now());
+    UUID again = store.upsertDaemonArtifact("qits-platform-access-cli", version, "b", Instant.now());
+    detached();
+
+    assertEquals(first, again);
+    assertEquals("a", store.artifact(first).orElseThrow().repository);
+  }
+
+  /**
+   * And the read the pin source derives its daemon keeps with: the same narrow query, answering for
+   * a row whose ecosystem is a string rather than an enum value.
+   */
+  @Test
+  void theDaemonOfAReleaseIsReadBackBesideTheMavenCoordinateThatCarriesIt() {
+    String repository = "qits-platform-access-cli-" + UUID.randomUUID();
+    String version = "2026.918." + UUID.randomUUID();
+    store.upsertArtifact(
+        Ecosystem.MAVEN,
+        "eu.wohlben.qits:qits-platform-access-cli-binary",
+        version,
+        repository,
+        Instant.now());
+    store.upsertDaemonArtifact("qits-platform-access-cli", version, repository, Instant.now());
+    detached();
+
+    List<MtArtifact> read = store.artifactsOfReleases(List.of(repository), List.of(version));
+
+    assertEquals(2, read.size());
+    assertTrue(
+        read.stream().anyMatch(row -> Ecosystem.DAEMON_WIRE_NAME.equals(row.ecosystem)),
+        "the binary and the coordinate whose version names it are one release");
+  }
 }

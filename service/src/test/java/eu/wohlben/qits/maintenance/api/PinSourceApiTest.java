@@ -16,12 +16,18 @@ import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * <b>{@code GET /pins} — the artifact GC's keep-set, and the images inside it that no manifest of
- * anybody's spells out.</b>
+ * <b>{@code GET /pins} — the artifact GC's keep-set, and the images and daemon binaries inside it
+ * that no manifest of anybody's spells out.</b>
+ *
+ * <p>One rule, asserted twice over two artifact types: the daemon block at the bottom is the image
+ * block above it with {@code qits/eventstream-daemon} swapped for a binary in the platform's {@code
+ * daemons} store, because that is exactly what the change was — {@code control/CarriedDaemons} is
+ * {@code control/CarriedImages} over the other carried type, and both call one walk.
  *
  * <p>Container image versions are pom pins now. A repository that pins {@code
  * qits-workspace-daemon-protocol} at a version has, by that one line, named {@code qits/workspace}
@@ -250,5 +256,125 @@ class PinSourceApiTest {
   @Test
   void anEmptyInventoryRefusesRatherThanAnsweringAnEmptyKeepSet() {
     given().when().get(BASE + "/pins").then().statusCode(503);
+  }
+
+  // --- the same rule, one artifact type over: the daemon binary a pom pin names --------------------
+
+  /** The daemon binary the same release put in the platform's binary store. */
+  private static final String DAEMON_BINARY = "qits-platform-access-cli";
+
+  /**
+   * The eventstream release with a daemon binary beside the jar — the shape the qits CLI's own
+   * release has: {@code {type: maven, …-binary}} and {@code {type: daemon, …}} at one version.
+   */
+  private void theCarrierReleaseWithADaemon() {
+    theCarrierRelease();
+    store.upsertDaemonArtifact(
+        DAEMON_BINARY, EVENTSTREAM_VERSION, EVENTSTREAM_REPOSITORY,
+        Instant.parse("2026-08-11T10:00:00Z"));
+  }
+
+  /**
+   * THE OTHER HALF OF THE POINT. A pom pins a maven version; the release that published that version
+   * also published a daemon binary stamped with it; the binary is in the keep-set, as a row whose
+   * ecosystem is the literal {@code daemon} — the word qits-artifacts files it by — named by the pom
+   * that holds the line and by the coordinate it was resolved through.
+   */
+  @Test
+  void aDaemonItsCarriersReleaseStampedIsKeptByTheManifestThatPinsTheCarrier() {
+    theCarrierReleaseWithADaemon();
+    scan();
+
+    given()
+        .when()
+        .get(BASE + "/pins")
+        .then()
+        .statusCode(200)
+        .body(
+            "pins.findAll { it.ecosystem == 'daemon' }.collect { it.name + ':' + it.version }",
+            hasItem(coordinate(DAEMON_BINARY, EVENTSTREAM_VERSION)))
+        .body("pins.find { it.name == '" + DAEMON_BINARY + "' }.repository",
+            equalTo(Fixture.REPOSITORY))
+        .body("pins.find { it.name == '" + DAEMON_BINARY + "' }.manifestPath", equalTo("pom.xml"))
+        // A derived row is never mistaken for a stored pin, and nothing writes a daemon line out.
+        .body(
+            "pins.find { it.name == '" + DAEMON_BINARY + "' }.via",
+            equalTo("maven " + EVENTSTREAM));
+  }
+
+  /**
+   * ONLY THE CO-RELEASED VERSION, for a daemon as for an image. A later binary of the same
+   * repository is a version nobody pins, and keeping it would be this service inventing a reference
+   * — which for a store collecting at {@code window=P0D} is exactly the mistake that costs nothing
+   * and hides everything.
+   */
+  @Test
+  void aDaemonTheSameRepositoryReleasedAtAnotherVersionIsNotKept() {
+    theCarrierReleaseWithADaemon();
+    store.upsertDaemonArtifact(
+        DAEMON_BINARY, "2026.899.9", EVENTSTREAM_REPOSITORY,
+        Instant.parse("2026-08-29T10:00:00Z"));
+    scan();
+
+    given()
+        .when()
+        .get(BASE + "/pins")
+        .then()
+        .statusCode(200)
+        .body(
+            "pins.collect { it.name + ':' + it.version }",
+            hasItem(coordinate(DAEMON_BINARY, EVENTSTREAM_VERSION)))
+        .body(
+            "pins.collect { it.name + ':' + it.version }",
+            not(hasItem(coordinate(DAEMON_BINARY, "2026.899.9"))));
+  }
+
+  /**
+   * NO ARTIFACT ROW, NO KEEP — the honesty the image rule has. A version this service never saw a
+   * daemon released at resolves to nothing rather than to a name invented for it.
+   */
+  @Test
+  void aVersionWithNoDaemonRowYieldsNoDaemonRowAtAll() {
+    theCarrierRelease();
+    scan();
+
+    given()
+        .when()
+        .get(BASE + "/pins")
+        .then()
+        .statusCode(200)
+        .body("pins.findAll { it.ecosystem == 'daemon' }.size()", equalTo(0));
+  }
+
+  /**
+   * The two derivations run off the STORED pins and not off each other's output. A daemon row is
+   * derived from the maven pin the manifest holds, never from the docker row this answer derived a
+   * line earlier — which is why the snapshot in {@code Inventory.pins} is taken before either.
+   */
+  @Test
+  void theImageAndTheDaemonAreBothDerivedFromTheStoredPinAndNotFromEachOther() {
+    theCarrierReleaseWithADaemon();
+    scan();
+
+    given()
+        .when()
+        .get(BASE + "/pins")
+        .then()
+        .statusCode(200)
+        .body("pins.find { it.name == '" + DAEMON_IMAGE + "' }.via", equalTo("maven " + EVENTSTREAM))
+        .body(
+            "pins.find { it.name == '" + DAEMON_BINARY + "' }.via", equalTo("maven " + EVENTSTREAM));
+
+    // …and the derived rows are sorted INTO the one total order the answer is served in rather than
+    // appended after it, which is what makes two reads over an unchanged store answer identically.
+    List<String> ecosystems =
+        given()
+            .when()
+            .get(BASE + "/pins")
+            .then()
+            .statusCode(200)
+            .extract()
+            .path("pins.collect { it.ecosystem }");
+    assertEquals(ecosystems.stream().sorted().toList(), ecosystems);
   }
 }

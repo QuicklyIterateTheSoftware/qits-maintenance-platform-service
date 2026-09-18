@@ -113,6 +113,18 @@ class SoftwareReleaseListenerTest {
       announced.add(new Announced(ecosystem, name, version, repository, occurredAt));
       return UUID.randomUUID();
     }
+
+    /**
+     * The daemon arm records a null ecosystem, which is the point of it: {@code daemon} is a stored
+     * string and not an {@link Ecosystem}, and the row it writes is terminal with no fetch queued
+     * behind it — {@code SbomGraphStoreTest} proves that half against a real PostgreSQL.
+     */
+    @Override
+    public UUID announcedDaemon(
+        String name, String version, String repository, Instant occurredAt) {
+      announced.add(new Announced(null, name, version, repository, occurredAt));
+      return UUID.randomUUID();
+    }
   }
 
   private SoftwareReleaseListener listener;
@@ -204,12 +216,13 @@ class SoftwareReleaseListenerTest {
   }
 
   /**
-   * {@code daemon} and {@code docs} are real releases of things no manifest this service parses ever
-   * pins, and a type qits-ci adds later reads the same way. All of them settle.
+   * {@code docs} is a real release of a thing no manifest this service parses ever pins, and a type
+   * qits-ci adds later reads the same way. Both settle. {@code daemon} moves no column either — see
+   * the daemon block below — for a different reason: its row is a keep, not a pin.
    */
   @Test
   void aPackageTypeThisInventoryDoesNotHoldSettlesWithoutAWrite() {
-    release("daemon", "qits-ci-daemon", "2026.901.1");
+    release("daemon", "qits-platform-access-cli", "2026.901.1");
     release("docs", "@apidocs/qits-ci", "2026.901.1");
     release("cargo", "qits-something", "1.0.0");
 
@@ -316,7 +329,8 @@ class SoftwareReleaseListenerTest {
   void poisonOpensNoArtifactRowEither() {
     listener.onFrame(frame("SoftwareRelease", "not json at all"));
     release("maven", "eu.wohlben.qits:qits-eventstream", "");
-    release("daemon", "qits-ci-daemon", "2026.901.1");
+    // …and the daemon arm is inside the same gate: a binary with no version names nothing to keep.
+    release("daemon", "qits-platform-access-cli", "");
 
     assertTrue(sboms.announced.isEmpty());
   }
@@ -377,16 +391,75 @@ class SoftwareReleaseListenerTest {
   }
 
   /**
-   * {@code daemon} SBOMs exist upstream and are unreachable from here on purpose: no mt_artifact row
-   * is ever a daemon, because nothing any manifest parses pins one. The filter is the ecosystem map
-   * above, one step before either write.
+   * {@code docs} is the type that is still discarded, and it is discarded on the rule that was
+   * always the real one: NOTHING PINS an api-docs bundle, so a row for one would be a keep nobody
+   * asked for. The filter is the ecosystem map, one step before either write.
    */
   @Test
-  void noArtifactRowIsEverOpenedForATypeThisInventoryDoesNotHold() {
-    release("daemon", "qits-ci-daemon", "2026.901.1");
+  void noArtifactRowIsEverOpenedForATypeNothingPins() {
     release("docs", "@apidocs/qits-ci", "2026.901.1");
+    release("cargo", "qits-something", "1.0.0");
 
     assertTrue(sboms.announced.isEmpty());
     assertTrue(store.writes.isEmpty());
+  }
+
+  // --- the daemon arm: a row, and no column --------------------------------------------------------
+
+  /**
+   * <b>THE WHOLE POINT OF THIS CHANGE.</b> The qits CLI's version is a pom pin — qits-ci pins
+   * {@code eu.wohlben.qits:qits-platform-access-cli-binary}, whose version IS the daemons-store
+   * coordinate of the binary the same release published — so a daemon release this listener
+   * discarded left no {@code mt_artifact} row, the pin source could derive no keep from one, and the
+   * store collected the binary out from under a pin that still named it.
+   */
+  @Test
+  void aDaemonReleaseOpensTheArtifactRowTheKeepIsDerivedFrom() {
+    EventFrame published =
+        frame(
+            "SoftwareRelease",
+            softwareReleasePayload("daemon", "qits-platform-access-cli", "2026.918.1"));
+
+    listener.onFrame(published);
+
+    assertEquals(1, sboms.announced.size());
+    RecordingIngest.Announced row = sboms.announced.get(0);
+    assertEquals("qits-platform-access-cli", row.name());
+    assertEquals("2026.918.1", row.version());
+    assertEquals(
+        "qits-eventstream-javalib",
+        row.repository(),
+        "the repository translation is the ordinary path's, not a second one");
+    assertEquals(
+        published.occurredAt(),
+        row.occurredAt(),
+        "and so is the publisher's moment, for the same reason: it is what 'newest' is ordered by");
+  }
+
+  /**
+   * <b>…AND NO {@code mt_latest} COLUMN.</b> That column exists to be compared against a pin of the
+   * same ecosystem and there is none — what a pom holds is the MAVEN coordinate, whose own column
+   * moves it — and {@code LatestResolver} could never refresh a daemon column anyway, there being no
+   * registry to ask. A column nothing can refresh and nothing compares against is a stale number
+   * with no way to tell.
+   */
+  @Test
+  void aDaemonReleaseMovesNoLatestColumn() {
+    release("daemon", "qits-platform-access-cli", "2026.918.1");
+
+    assertTrue(store.writes.isEmpty(), "there is no pin of that ecosystem to compare against");
+    assertEquals(1, sboms.announced.size(), "and the row is still written");
+  }
+
+  /**
+   * The word stays OUT of the enum, which is what keeps the latest column, the pending rule and the
+   * SBOM route from all being asked a question about a daemon binary that none of them can answer.
+   * {@code Ecosystem.DAEMON_WIRE_NAME} is the string, and it is compared as one.
+   */
+  @Test
+  void daemonIsNotAnEcosystemAndAskingForOneStillAnswersEmpty() {
+    assertTrue(Ecosystem.of("daemon").isEmpty());
+    assertTrue(Ecosystem.of(Ecosystem.DAEMON_WIRE_NAME).isEmpty());
+    assertEquals("daemon", Ecosystem.DAEMON_WIRE_NAME, "the spelling is qits-artifacts' contract");
   }
 }
