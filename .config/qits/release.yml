@@ -64,8 +64,18 @@ release-request:
       stories_dir=$(find . -maxdepth 3 -type d -path '*/target/userstories' | head -1)
       : "${stories_dir:?the verify produced no */target/userstories}"
       tar -czf /tmp/userstories.tgz -C "$stories_dir" .
+      publish_token=""
+      if [ -n "${QITS_PUBLISH_TOKEN_COMMAND:-}" ] \
+        && command -v "$QITS_PUBLISH_TOKEN_COMMAND" >/dev/null 2>&1; then
+        publish_token=$("$QITS_PUBLISH_TOKEN_COMMAND" 2>/dev/null) || publish_token=""
+      fi
+      set --
+      if [ -n "$publish_token" ]; then
+        set -- -H "Authorization: Bearer $publish_token"
+      fi
+
       status=$(curl -sS -o /tmp/docs-publish.out -w '%{http_code}' \
-        -X PUT --data-binary @/tmp/userstories.tgz \
+        -X PUT --data-binary @/tmp/userstories.tgz "$@" \
         -H "X-Artifacts-Meta-git.branch.name: $QITS_CI_BRANCH" \
         -H "X-Artifacts-Meta-git.commit.hash: $QITS_CI_SHA" \
         -H "X-Artifacts-Meta-git.repository.name: qits-maintenance-platform-service" \
