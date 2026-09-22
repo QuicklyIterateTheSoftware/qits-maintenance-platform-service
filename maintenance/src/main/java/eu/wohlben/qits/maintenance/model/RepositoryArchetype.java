@@ -36,6 +36,18 @@ public enum RepositoryArchetype {
   /** A single-page application, built and served by (or beside) a service. */
   FRONTEND,
 
+  /**
+   * A server-rendered application — an Angular SSR app that is deployed and served in its own right,
+   * beside the microfrontends a {@link #FRONTEND} is one of. It is a component of its project like
+   * any other, so a bump edits its manifests and a release places it on the same footing as a
+   * service.
+   *
+   * <p>The role suffix qits-projects derives it from is {@code -app}. Nothing here derives an
+   * archetype from a name — see the class comment, this vocabulary arrives over the wire — so the
+   * suffix is stated for the reader and read by nobody.
+   */
+  APP,
+
   /** A command-line tool. */
   CLI,
 

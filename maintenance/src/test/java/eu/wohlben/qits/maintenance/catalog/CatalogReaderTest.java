@@ -101,6 +101,26 @@ class CatalogReaderTest {
     }
   }
 
+  /**
+   * <b>{@code APP} is a word this service knows.</b> qits-projects derives it from the {@code -app}
+   * role suffix for a server-rendered application, and it is transcribed here for the same reason
+   * every other value is: an archetype {@code RepositoryArchetype.of} cannot place costs a
+   * repository its place on a train, so the first {@code -app} repository would drop out of the bump
+   * train silently. The assertion is that it does not answer empty — the failure mode the unknown
+   * spelling above documents.
+   */
+  @Test
+  void theServerRenderedApplicationArchetypeIsRecognised() {
+    CatalogEntry entry =
+        parse(
+            "{\"id\":\"r1\",\"projectId\":\"qits\",\"name\":\"qits-shop-app\","
+                + "\"archetype\":\"APP\"}");
+    assertEquals("APP", entry.archetype());
+    assertEquals(
+        Optional.of(RepositoryArchetype.APP), RepositoryArchetype.of(entry.archetype()));
+    assertEquals("APP", RepositoryArchetype.APP.wireName());
+  }
+
   /** A row with no addressable name is still skipped, archetype or no archetype. */
   @Test
   void aRowWithNoNameIsSkippedEvenWhenItCarriesAnArchetype() {
