@@ -29,7 +29,13 @@ class QitsOidcClientShippedConfigTest {
 
   @Test
   void theQitsClientResolvesItsOwnLiteralDefaults() {
-    assertEquals("http://qits-platform-idp:8080/idp", value("quarkus.oidc-client.qits.auth-server-url"));
+    // The tier is DERIVED, not written: QITS_ENVIRONMENT is injected into every container by
+    // qits-deployments and is unset under test, so the `:dev` fallback is what resolves here. The
+    // assertion is on the resolved string on purpose — a default that stopped deriving would still
+    // read `dev-` on this suite only if somebody hardcoded it, and that is the mistake worth
+    // catching.
+    assertEquals(
+        "http://dev-qits-platform-idp:8080/idp", value("quarkus.oidc-client.qits.auth-server-url"));
     assertEquals("qits-platform-maintenance", value("quarkus.oidc-client.qits.client-id"));
     // Empty, not absent — SmallRye reads a configured-empty String as null, so an empty secret reads
     // as an empty Optional rather than as "" itself.

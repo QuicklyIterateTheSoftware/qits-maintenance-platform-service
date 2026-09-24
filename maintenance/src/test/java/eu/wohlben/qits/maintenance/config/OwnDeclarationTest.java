@@ -86,9 +86,14 @@ class OwnDeclarationTest {
   }
 
   /**
-   * THE `qits` CLIENT'S FALLBACK IS THE OLD `projects` CLIENT, and only its four read keys. Its
-   * audience key and the githost and ci clients' keys are read by nothing, so they must stay out and
-   * show as orphaned. If the fallback in microprofile-config.properties moves, this moves with it.
+   * THE `qits` CLIENT'S FALLBACK IS THE OLD `projects` CLIENT, and only three of its four read keys
+   * are declared here. `_AUTH_SERVER_URL` is out: the shipped config DERIVES that address from
+   * QITS_ENVIRONMENT, which every container is given, so a stored entry carrying it states nothing
+   * this process could not work out. (It named qits-platform-idp by a bare alias until the platform
+   * plane was deleted — one process for the whole estate, one address estate-wide. The address moved
+   * and stopped being worth storing in the same change.) Its audience key and the githost and ci
+   * clients' keys are read by nothing either, so all of them must stay out and show as orphaned. If
+   * the fallback in microprofile-config.properties moves, this moves with it.
    */
   @Test
   void onlyTheQitsClientsFallbackKeysAreDeclared() throws IOException {
@@ -100,7 +105,6 @@ class OwnDeclarationTest {
     assertEquals(
         Set.of(
             "env.QUARKUS_OIDC_CLIENT_PROJECTS_CLIENT_ENABLED",
-            "env.QUARKUS_OIDC_CLIENT_PROJECTS_AUTH_SERVER_URL",
             "env.QUARKUS_OIDC_CLIENT_PROJECTS_CLIENT_ID",
             "env.QUARKUS_OIDC_CLIENT_PROJECTS_CREDENTIALS_SECRET"),
         declared);

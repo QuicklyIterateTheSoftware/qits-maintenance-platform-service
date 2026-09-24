@@ -50,7 +50,7 @@ public final class StoryTarget {
   public static final String CI = "qits-ci";
 
   /** The internal registries: maven, npm and OCI behind three path prefixes of one service. */
-  public static final String ARTIFACTS = "qits-platform-artifacts";
+  public static final String ARTIFACTS = "qits-artifacts";
 
   /** Maven Central and npmjs, cached — where an EXTERNAL pin's latest is asked. */
   public static final String MIRROR = "qits-platform-mirror";
