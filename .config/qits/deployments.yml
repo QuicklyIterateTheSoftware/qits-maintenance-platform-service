@@ -21,7 +21,7 @@ routes: /maintenance
 # WHERE THE EDGE APPEARS THIS APPLICATION IN THE SIDEBAR. One entry per slot: `platform` is the
 # project-scoped group, and this is its second row. The label and the position are the whole
 # statement — the host is derived from the application name (`qits-maintenance` minus its
-# `qits-` prefix is `maintenance`), so there is no `host:` line to keep in step.
+# `qits-platform-` prefix is `maintenance`), so there is no `host:` line to keep in step.
 #
 # This replaces `navigation: Maintenance:13`, the flat list every application shared. The old key
 # still parses — a spec is read at the built sha, so it can never become unknown — and maps to
@@ -59,8 +59,8 @@ navigation-entries: platform.Maintenance:2
 # the existing rows and injects the passwords this process is already connected with.
 # THE DATABASE IS NAMED EXPLICITLY, AND IT IS A SAFETY PIN RATHER THAN A PREFERENCE.
 # `postgresql:db` with no third segment DERIVES the database from the APPLICATION name —
-# `qits_` plus the name minus its `qits-` prefix. This application is about to be renamed
-# (qits-platform-maintenance -> qits-maintenance), so a derived name would follow it: the deployment would provision a
+# `qits_` plus the name minus its `qits-` prefix. This application is STILL TO BE renamed
+# (qits-platform-maintenance -> qits-maintenance, blocked on qits-376), and a derived name would follow it: the deployment would provision a
 # BRAND NEW EMPTY `qits_maintenance` and start against it, on a green deploy, with nothing failing.
 # Naming the database this application already uses makes the rename a rename of the
 # APPLICATION alone, which is the whole intent — and this line has to OUTLIVE the rename rather
