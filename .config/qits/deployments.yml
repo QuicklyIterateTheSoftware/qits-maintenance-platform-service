@@ -10,7 +10,7 @@
 # Every derivation the deployer makes hangs off this name — the wire alias peers dial, the container
 # it manages, the extras family, the database — so letting it follow the repository would
 # decommission the running service and start a stranger beside it.
-application: qits-maintenance
+application: qits-platform-maintenance
 
 # One route for the whole WIRE segment: the API at /maintenance/api and the document at
 # /maintenance/q. The edge path-routes verbatim by prefix on every vhost, so this one line reaches
