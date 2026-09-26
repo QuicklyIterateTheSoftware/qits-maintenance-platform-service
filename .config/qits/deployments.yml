@@ -10,7 +10,25 @@
 # Every derivation the deployer makes hangs off this name — the wire alias peers dial, the container
 # it manages, the extras family, the database — so letting it follow the repository would
 # decommission the running service and start a stranger beside it.
-application: qits-platform-maintenance
+application: qits-maintenance
+
+# WHAT THIS APPLICATION USED TO BE CALLED, and the one thing a rename is allowed to move.
+#
+# A renamed application is a NEW application to the deployer: services are keyed by name, swarm
+# cannot rename one, and pd_service / pd_deployment / pd_resource all hold an application name and no
+# repository identity. So this deploys BESIDE qits-platform-maintenance and an operator retires the
+# predecessor afterwards. That half is unchanged.
+#
+# What this line moves is the DATABASE CLAIM. Without it the successor's first deploy is refused —
+# "the database qits_platform_maintenance is already provisioned for qits-platform-maintenance" — which is the
+# right refusal in general, because two unrelated repositories sharing a store is worse than a loud
+# failure. Naming the predecessor narrows that check to this one row rather than weakening it.
+#
+# It also preserves the CREDENTIAL: the claim row is read one statement later to decide whether to
+# send the stored password or a fresh one, so transferring it first means the predecessor — still
+# running, with open pools on that role — keeps working. Removing this line after the rename does not
+# tidy anything up; it re-arms the refusal.
+renamed_from: qits-platform-maintenance
 
 # One route for the whole WIRE segment: the API at /maintenance/api and the document at
 # /maintenance/q. The edge path-routes verbatim by prefix on every vhost, so this one line reaches
@@ -21,7 +39,7 @@ routes: /maintenance
 # WHERE THE EDGE APPEARS THIS APPLICATION IN THE SIDEBAR. One entry per slot: `platform` is the
 # project-scoped group, and this is its second row. The label and the position are the whole
 # statement — the host is derived from the application name (`qits-maintenance` minus its
-# `qits-platform-` prefix is `maintenance`), so there is no `host:` line to keep in step.
+# `qits-` prefix is `maintenance`), so there is no `host:` line to keep in step.
 #
 # This replaces `navigation: Maintenance:13`, the flat list every application shared. The old key
 # still parses — a spec is read at the built sha, so it can never become unknown — and maps to
